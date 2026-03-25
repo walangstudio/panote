@@ -6,13 +6,14 @@
 
 [![Version](https://img.shields.io/badge/version-0.1.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
+[![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-A local-first note-taking app for desktop and Android. Notes are stored encrypted on-device. Sharing a note with another device requires both sides to enter the same passphrase; nothing goes through a server.
+A local-first note-taking app for desktop and Android, built with Tauri 2, Svelte 5, and Rust. Notes are stored encrypted on-device. Sharing a note with another device requires both sides to enter the same passphrase; nothing goes through a server.
 
 Supported note types: Plain text, Markdown, Checklist, Code, Kanban.
 
