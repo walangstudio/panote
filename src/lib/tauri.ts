@@ -1,0 +1,65 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export type NoteKind = "text" | "markdown" | "checklist" | "code" | "kanban";
+
+export interface NoteMetadata {
+  id: string;
+  kind: NoteKind;
+  title: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+  has_note_password: boolean;
+}
+
+export interface NoteDetail {
+  id: string;
+  kind: NoteKind;
+  title: string;
+  content: unknown;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NoteInput {
+  kind: NoteKind;
+  title: string;
+  content: unknown;
+  tags: string[];
+}
+
+export interface Peer {
+  id: string;
+  name: string;
+  address: string;
+  port: number;
+  via: "lan" | "ble";
+}
+
+export interface PendingTransfer {
+  transfer_id: string;
+  from_peer: string;
+  received_at: number;
+}
+
+// Notes
+export const noteCreate = (input: NoteInput) =>
+  invoke<NoteMetadata>("note_create", { input });
+export const noteUpdate = (id: string, input: NoteInput) =>
+  invoke<NoteMetadata>("note_update", { id, input });
+export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
+export const noteList = () => invoke<NoteMetadata[]>("note_list");
+export const noteGet = (id: string) =>
+  invoke<NoteDetail>("note_get", { id });
+
+// Transfer
+export const peersScan = () => invoke<Peer[]>("peers_scan");
+export const noteSend = (noteId: string, peerId: string, passphrase: string) =>
+  invoke<void>("note_send", { noteId, peerId, passphrase });
+export const pendingTransfersList = () =>
+  invoke<PendingTransfer[]>("pending_transfers_list");
+export const noteReceiveAccept = (transferId: string, passphrase: string) =>
+  invoke<string>("note_receive_accept", { transferId, passphrase });
+export const noteReceiveReject = (transferId: string) =>
+  invoke<void>("note_receive_reject", { transferId });
