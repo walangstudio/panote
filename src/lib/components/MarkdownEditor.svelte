@@ -1,10 +1,11 @@
 <script lang="ts">
   import { marked } from "marked";
+  import DOMPurify from "dompurify";
 
   let { content = $bindable({ body: "" }), initialPreview = true } = $props<{ content: { body: string }, initialPreview?: boolean }>();
 
   let preview = $state(initialPreview);
-  let rendered = $derived(marked(content.body ?? ""));
+  let rendered = $derived(DOMPurify.sanitize(marked(content.body ?? "") as string));
 </script>
 
 <div class="md-editor">

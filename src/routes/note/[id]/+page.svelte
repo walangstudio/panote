@@ -1,9 +1,10 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { onMount } from "svelte";
-  import { goto } from "$app/navigation";
+  import { goto, beforeNavigate } from "$app/navigation";
   import { noteGet, noteCreate, noteUpdate, type NoteDetail, type NoteKind } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
+  import TransferModal from "$lib/components/TransferModal.svelte";
   import TextEditor from "$lib/components/TextEditor.svelte";
   import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
   import ChecklistEditor from "$lib/components/ChecklistEditor.svelte";
@@ -23,11 +24,34 @@
   let content = $state<unknown>({});
   let tags = $state<string[]>([]);
   let tagInput = $state("");
+  let menuOpen = $state(false);
+  let transferOpen = $state(false);
+  let savedTitle = $state("");
+  let savedContent = $state("{}");
+  let savedTags = $state("[]");
+  let justSaved = $state(false);
+
+  const dirty = $derived(
+    !justSaved && (
+      title !== savedTitle ||
+      JSON.stringify(content) !== savedContent ||
+      JSON.stringify(tags) !== savedTags
+    )
+  );
+
+  beforeNavigate(({ cancel }) => {
+    if (dirty && !confirm("You have unsaved changes. Leave without saving?")) {
+      cancel();
+    }
+  });
 
   onMount(async () => {
     if (isNew) {
       kind = kindParam;
       content = defaultContent(kind);
+      savedTitle = title;
+      savedContent = JSON.stringify(content);
+      savedTags = JSON.stringify(tags);
       loading = false;
       return;
     }
@@ -37,6 +61,9 @@
       title = note.title;
       content = note.content;
       tags = note.tags;
+      savedTitle = title;
+      savedContent = JSON.stringify(content);
+      savedTags = JSON.stringify(tags);
     } catch (e) {
       error = String(e);
     }
@@ -44,6 +71,7 @@
   });
 
   async function save() {
+    addTag();
     saving = true;
     error = "";
     try {
@@ -54,6 +82,7 @@
         await noteUpdate(id, input);
       }
       await refreshNotes();
+      justSaved = true;
       goto("/");
     } catch (e) {
       error = String(e);
@@ -91,6 +120,17 @@
       <button class="save-btn" onclick={save} disabled={saving}>
         {saving ? "Saving…" : "Save"}
       </button>
+      {#if !isNew}
+        <div class="menu-wrap">
+          <button class="menu-btn" onclick={() => menuOpen = !menuOpen} aria-label="More options">···</button>
+          {#if menuOpen}
+            <div class="menu-backdrop" role="presentation" onclick={() => menuOpen = false}></div>
+            <ul class="menu-dropdown">
+              <li><button onclick={() => { menuOpen = false; transferOpen = true; }}>Send note</button></li>
+            </ul>
+          {/if}
+        </div>
+      {/if}
     </header>
 
     <div class="meta">
@@ -100,12 +140,19 @@
           class="tag-input"
           placeholder="Add tags, comma separated…"
           bind:value={tagInput}
+          enterkeyhint="done"
           onkeydown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); } }}
+          oninput={() => { if (tagInput.includes(",")) addTag(); }}
+          onblur={addTag}
         />
       </div>
     </div>
 
     {#if error}<p class="error">{error}</p>{/if}
+
+    {#if transferOpen}
+      <TransferModal noteIds={id ? [id] : []} onclose={() => transferOpen = false} />
+    {/if}
 
     <div class="editor-body">
       {#if kind === "text"}
@@ -124,8 +171,8 @@
 {/if}
 
 <style>
-  .loading { display: flex; align-items: center; justify-content: center; height: 100vh; }
-  .editor-layout { display: flex; flex-direction: column; height: 100vh; }
+  .loading { display: flex; align-items: center; justify-content: center; height: 100%; }
+  .editor-layout { display: flex; flex-direction: column; height: 100%; }
   header {
     display: flex; align-items: center; gap: 1rem;
     padding: 0.75rem 1.5rem;
@@ -168,4 +215,22 @@
   }
   .editor-body { flex: 1; overflow: auto; }
   .error { color: #e74c3c; font-size: 0.85rem; margin: 0.5rem 1.5rem; }
+  .menu-wrap { position: relative; flex-shrink: 0; }
+  .menu-btn {
+    background: none; border: 1px solid var(--border); border-radius: 7px;
+    color: var(--text); cursor: pointer; padding: 0.4rem 0.6rem;
+    font-size: 1rem; line-height: 1; letter-spacing: 0.1em;
+  }
+  .menu-backdrop { position: fixed; inset: 0; z-index: 10; }
+  .menu-dropdown {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 11;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; list-style: none; margin: 0; padding: 0.3rem 0;
+    min-width: 140px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  }
+  .menu-dropdown li button {
+    width: 100%; text-align: left; background: none; border: none;
+    padding: 0.55rem 1rem; color: var(--text); cursor: pointer; font-size: 0.9rem;
+  }
+  .menu-dropdown li button:hover { background: var(--hover); }
 </style>

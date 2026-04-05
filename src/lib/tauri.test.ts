@@ -12,8 +12,16 @@ import {
   noteReceiveAccept,
   noteReceiveReject,
   noteSend,
+  notesSend,
   pendingTransfersList,
+  pendingOffersList,
+  transferOfferRespond,
   peersScan,
+  generatePairingCode,
+  knownPeersList,
+  startReceiving,
+  stopReceiving,
+  isReceiving,
 } from "./tauri";
 
 const input = { kind: "text" as const, title: "t", content: {}, tags: [] };
@@ -78,5 +86,52 @@ describe("tauri bindings", () => {
     expect(invoke).toHaveBeenCalledWith("note_receive_reject", {
       transferId: "t1",
     });
+  });
+
+  it("generatePairingCode → generate_pairing_code", async () => {
+    await generatePairingCode();
+    expect(invoke).toHaveBeenCalledWith("generate_pairing_code");
+  });
+
+  it("knownPeersList → known_peers_list", async () => {
+    await knownPeersList();
+    expect(invoke).toHaveBeenCalledWith("known_peers_list");
+  });
+
+  it("notesSend → notes_send", async () => {
+    await notesSend(["n1", "n2"], "peer1", "CODE");
+    expect(invoke).toHaveBeenCalledWith("notes_send", {
+      noteIds: ["n1", "n2"],
+      peerId: "peer1",
+      passphrase: "CODE",
+    });
+  });
+
+  it("pendingOffersList → pending_offers_list", async () => {
+    await pendingOffersList();
+    expect(invoke).toHaveBeenCalledWith("pending_offers_list");
+  });
+
+  it("transferOfferRespond → transfer_offer_respond", async () => {
+    await transferOfferRespond("offer-1", "K4X7P2");
+    expect(invoke).toHaveBeenCalledWith("transfer_offer_respond", {
+      offerId: "offer-1",
+      passphrase: "K4X7P2",
+    });
+  });
+
+  it("startReceiving → start_receiving", async () => {
+    await startReceiving();
+    expect(invoke).toHaveBeenCalledWith("start_receiving");
+  });
+
+  it("stopReceiving → stop_receiving", async () => {
+    await stopReceiving();
+    expect(invoke).toHaveBeenCalledWith("stop_receiving");
+  });
+
+  it("isReceiving → is_receiving", async () => {
+    await isReceiving();
+    expect(invoke).toHaveBeenCalledWith("is_receiving");
   });
 });

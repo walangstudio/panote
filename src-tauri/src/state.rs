@@ -1,9 +1,21 @@
 use crate::crypto::tls::TofuVerifier;
+use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+pub fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -35,6 +47,15 @@ pub struct PendingTransfer {
     pub received_at: i64,
 }
 
+/// A transfer offer waiting for the recipient to enter the pairing code.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingOffer {
+    pub offer_id: String,
+    pub from_peer: String,
+    pub note_count: u32,
+    pub received_at: i64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: SqlitePool,
@@ -43,6 +64,63 @@ pub struct AppState {
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub pending_transfers: Arc<Mutex<HashMap<String, PendingTransfer>>>,
     pub tofu: Arc<TofuVerifier>,
+    /// Serializes outbound TLS handshakes so `set_peer_address` + `connect`
+    /// can't race when two transfers happen concurrently.
+    pub outbound_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Transfer offers awaiting recipient code entry.
+    pub pending_offers: Arc<Mutex<HashMap<String, PendingOffer>>>,
+    /// Oneshot channels for delivering the recipient's passphrase to the waiting connection.
+    pub offer_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+    /// Whether the TCP listener is active (receiving enabled).
+    pub receiving: Arc<AtomicBool>,
+    /// Handle to the listener task so it can be aborted on toggle-off.
+    pub listener_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{crypto::vault::derive_key, db::init_pool};
+
+    async fn test_state() -> AppState {
+        let pool = init_pool(":memory:").await.unwrap();
+        let key = derive_key("key", &[0u8; 16]).unwrap();
+        AppState::new(pool, key)
+    }
+
+    fn sample_transfer(id: &str) -> PendingTransfer {
+        PendingTransfer {
+            transfer_id: id.to_string(),
+            from_peer: "alice.local".into(),
+            transfer_salt: vec![1, 2, 3],
+            transfer_nonce: vec![4, 5, 6],
+            transfer_ct: vec![7, 8, 9],
+            received_at: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn peek_pending_returns_transfer_without_removing() {
+        let state = test_state().await;
+        state.add_pending(sample_transfer("t1"));
+        let peeked = state.peek_pending("t1");
+        assert!(peeked.is_some());
+        assert_eq!(state.list_pending().len(), 1, "transfer must still be present after peek");
+    }
+
+    #[tokio::test]
+    async fn peek_after_take_returns_none() {
+        let state = test_state().await;
+        state.add_pending(sample_transfer("t1"));
+        state.take_pending("t1");
+        assert!(state.peek_pending("t1").is_none());
+    }
+
+    #[tokio::test]
+    async fn peek_nonexistent_returns_none() {
+        let state = test_state().await;
+        assert!(state.peek_pending("no-such-id").is_none());
+    }
 }
 
 impl AppState {
@@ -54,6 +132,11 @@ impl AppState {
             peers: Arc::new(Mutex::new(Vec::new())),
             pending_transfers: Arc::new(Mutex::new(HashMap::new())),
             tofu: Arc::new(TofuVerifier::new(provider)),
+            outbound_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_offers: Arc::new(Mutex::new(HashMap::new())),
+            offer_responses: Arc::new(Mutex::new(HashMap::new())),
+            receiving: Arc::new(AtomicBool::new(false)),
+            listener_task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -64,11 +147,19 @@ impl AppState {
             .insert(transfer.transfer_id.clone(), transfer);
     }
 
+    pub fn peek_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
+        self.pending_transfers.lock().unwrap().get(transfer_id).cloned()
+    }
+
     pub fn take_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
         self.pending_transfers.lock().unwrap().remove(transfer_id)
     }
 
     pub fn list_pending(&self) -> Vec<PendingTransfer> {
         self.pending_transfers.lock().unwrap().values().cloned().collect()
+    }
+
+    pub fn is_receiving(&self) -> bool {
+        self.receiving.load(Ordering::Relaxed)
     }
 }

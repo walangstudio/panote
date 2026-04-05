@@ -2,18 +2,10 @@ use crate::{
     crypto::note::{decrypt_with_vault, encrypt_with_vault},
     db::queries::{self, NoteRow},
     notes::types::{NoteDetail, NoteInput, NoteMetadata},
-    state::AppState,
+    state::{now_secs, AppState},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use uuid::Uuid;
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
 
 // ----- Note commands -----
 
