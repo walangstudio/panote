@@ -43,6 +43,19 @@ export interface PendingTransfer {
   received_at: number;
 }
 
+export interface KnownPeer {
+  peer_id: string;
+  display_name: string | null;
+  last_transfer_at: number | null;
+}
+
+export interface PendingOffer {
+  offer_id: string;
+  from_peer: string;
+  note_count: number;
+  received_at: number;
+}
+
 // Notes
 export const noteCreate = (input: NoteInput) =>
   invoke<NoteMetadata>("note_create", { input });
@@ -55,11 +68,28 @@ export const noteGet = (id: string) =>
 
 // Transfer
 export const peersScan = () => invoke<Peer[]>("peers_scan");
+export const peerAddManual = (address: string) =>
+  invoke<Peer>("peer_add_manual", { address });
+export const deviceIps = () => invoke<string[]>("device_ips");
 export const noteSend = (noteId: string, peerId: string, passphrase: string) =>
   invoke<void>("note_send", { noteId, peerId, passphrase });
+export const notesSend = (noteIds: string[], peerId: string, passphrase: string) =>
+  invoke<void>("notes_send", { noteIds, peerId, passphrase });
 export const pendingTransfersList = () =>
   invoke<PendingTransfer[]>("pending_transfers_list");
+export const pendingOffersList = () =>
+  invoke<PendingOffer[]>("pending_offers_list");
+export const transferOfferRespond = (offerId: string, passphrase: string) =>
+  invoke<void>("transfer_offer_respond", { offerId, passphrase });
 export const noteReceiveAccept = (transferId: string, passphrase: string) =>
   invoke<string>("note_receive_accept", { transferId, passphrase });
 export const noteReceiveReject = (transferId: string) =>
   invoke<void>("note_receive_reject", { transferId });
+export const generatePairingCode = () => invoke<string>("generate_pairing_code");
+export const knownPeersList = () => invoke<KnownPeer[]>("known_peers_list");
+export const getDeviceName = () => invoke<string>("get_device_name");
+export const setDeviceName = (name: string) =>
+  invoke<void>("set_device_name", { name });
+export const startReceiving = () => invoke<void>("start_receiving");
+export const stopReceiving = () => invoke<void>("stop_receiving");
+export const isReceiving = () => invoke<boolean>("is_receiving");

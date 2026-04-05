@@ -48,27 +48,22 @@ pub fn run() {
                 }
             }
 
-            // Start TCP listener in background.
-            let listener_state = Arc::new(state.clone());
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = transfer::lan::start_listener(listener_state).await {
-                    eprintln!("[lan] listener error: {e}");
-                }
-            });
+            // TCP listener is NOT started here — user must toggle "Receive" on.
+            // This keeps port 47291 closed until explicitly enabled.
 
             // Start mDNS — store the daemon handle to keep it alive.
-            let device_name = format!(
-                "panote-{}",
-                std::env::var("COMPUTERNAME")
-                    .or_else(|_| std::env::var("HOSTNAME"))
-                    .unwrap_or_else(|_| "device".to_string())
-            );
+            let device_name = tauri::async_runtime::block_on(
+                transfer::commands::resolve_device_name(&state.db),
+            )
+            .unwrap_or_else(|_| "panote-device".into());
             match transfer::lan::start_mdns(&device_name, Arc::new(state.clone())) {
                 Ok(daemon) => {
                     app.manage(MdnsHandle(Mutex::new(daemon)));
                 }
                 Err(e) => eprintln!("[mdns] start error: {e}"),
             }
+
+            transfer::lan::start_beacon(&device_name, Arc::new(state.clone()));
 
             app.manage(state);
             Ok(())
@@ -81,11 +76,23 @@ pub fn run() {
             note_list,
             note_get,
             // Transfer
+            start_receiving,
+            stop_receiving,
+            is_receiving,
             peers_scan,
+            peer_add_manual,
+            device_ips,
             note_send,
+            notes_send,
+            transfer_offer_respond,
+            pending_offers_list,
             pending_transfers_list,
             note_receive_accept,
             note_receive_reject,
+            generate_pairing_code,
+            known_peers_list,
+            get_device_name,
+            set_device_name,
         ])
         .run(tauri::generate_context!())
         .expect("error while running panote");

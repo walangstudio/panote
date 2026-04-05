@@ -58,14 +58,17 @@ pub fn client_config(
 
 // ---- TOFU verifier ----
 
-/// In-memory TOFU store: maps peer hostname → cert fingerprint.
+/// In-memory TOFU store: maps peer address → cert fingerprint.
 /// On first connection: records fingerprint and accepts.
 /// On subsequent connections: accepts only if fingerprint matches.
-///
-/// TODO: persist to SQLite so TOFU state survives restarts.
+/// Fingerprints are persisted to SQLite and preloaded at startup.
 pub struct TofuVerifier {
     store: Mutex<HashMap<String, [u8; 32]>>,
     provider: Arc<CryptoProvider>,
+    /// Override key for the next verification.  Set before each outbound
+    /// connection so the verifier keys by peer IP instead of TLS SNI
+    /// (which collapses to "panote.local" for all IP addresses).
+    peer_address: Mutex<Option<String>>,
 }
 
 impl TofuVerifier {
@@ -73,7 +76,14 @@ impl TofuVerifier {
         Self {
             store: Mutex::new(HashMap::new()),
             provider,
+            peer_address: Mutex::new(None),
         }
+    }
+
+    /// Set the real peer address to use as the TOFU key for the next
+    /// TLS handshake.  Must be called before `TlsConnector::connect`.
+    pub fn set_peer_address(&self, addr: &str) {
+        *self.peer_address.lock().unwrap() = Some(addr.to_string());
     }
 
     /// Pre-load a known peer fingerprint (e.g., from DB on startup).
@@ -125,7 +135,12 @@ impl ServerCertVerifier for TofuVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
-        let hostname = server_name.to_str().to_string();
+        let hostname = self
+            .peer_address
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| server_name.to_str().to_string());
         if self.verify_and_record(&hostname, end_entity.as_ref()) {
             Ok(ServerCertVerified::assertion())
         } else {
