@@ -157,24 +157,25 @@
 <style>
   .ghost {
     position: fixed; z-index: 1000; pointer-events: none;
-    background: var(--accent); color: #fff;
-    padding: 0.4rem 0.75rem; border-radius: 7px;
-    font-size: 0.85rem; max-width: 200px;
+    background: var(--accent); color: var(--on-accent);
+    padding: 0.45rem 0.85rem; border-radius: var(--radius);
+    font-size: 0.85rem; max-width: 200px; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    box-shadow: 0 8px 24px var(--shadow-color-hover);
     opacity: 0.9;
   }
   .kanban {
     display: flex; gap: 1rem; padding: 1.5rem;
     overflow-x: auto; height: 100%; align-items: flex-start;
-    /* prevent page scroll while dragging on touch */
     touch-action: pan-y;
   }
   .column {
     width: 260px; flex-shrink: 0;
-    background: var(--surface); border-radius: 10px;
-    border: 1px solid var(--border); padding: 0.75rem;
+    background: var(--surface-glass); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border-radius: var(--radius); border: 1px solid var(--border);
+    padding: 0.75rem;
     display: flex; flex-direction: column; gap: 0.4rem;
+    box-shadow: 0 4px 16px var(--shadow-color);
   }
   .col-header {
     display: flex; align-items: center; gap: 0.4rem;
@@ -189,33 +190,38 @@
   .handle:active { cursor: grabbing; }
   .col-name {
     flex: 1; border: none; background: transparent;
-    font-weight: 600; font-size: 0.95rem; color: var(--text);
+    font-weight: 700; font-size: 0.95rem; color: var(--text);
     outline: none; min-width: 0;
   }
-  .del { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 1.1rem; line-height: 1; }
-  .del:hover { color: #e74c3c; }
+  .del { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 1.1rem; line-height: 1; transition: color 0.1s; }
+  .del:hover { color: var(--error); }
   .card {
-    background: var(--bg); border-radius: 7px;
+    background: var(--surface); border-radius: 12px;
     border: 1px solid var(--border); padding: 0.5rem;
     display: flex; align-items: flex-start; gap: 0.25rem;
+    box-shadow: 0 2px 8px var(--shadow-color);
+    transition: box-shadow 0.15s ease;
   }
+  .card:hover { box-shadow: 0 4px 12px var(--shadow-color-hover); }
   .card-text {
     flex: 1; border: none; background: transparent;
     resize: none; font-size: 0.9rem; color: var(--text);
     outline: none; line-height: 1.5; cursor: text;
   }
-  .card-del { background: none; border: none; cursor: pointer; color: var(--muted); }
-  .card-del:hover { color: #e74c3c; }
+  .card-del { background: none; border: none; cursor: pointer; color: var(--muted); transition: color 0.1s; }
+  .card-del:hover { color: var(--error); }
   .add-card {
-    padding: 0.4rem; border-radius: 6px;
-    border: 1px dashed var(--border); background: transparent;
+    padding: 0.45rem; border-radius: var(--radius-full);
+    border: 1.5px dashed var(--border); background: transparent;
     color: var(--muted); cursor: pointer; width: 100%; font-size: 0.85rem;
+    transition: all 0.15s ease;
   }
-  .add-card:hover { border-color: var(--accent); color: var(--accent); }
+  .add-card:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
   .add-col {
-    flex-shrink: 0; width: 200px; padding: 0.5rem; border-radius: 8px;
+    flex-shrink: 0; width: 200px; padding: 0.6rem; border-radius: var(--radius);
     border: 2px dashed var(--border); background: transparent;
     color: var(--muted); cursor: pointer; font-size: 0.9rem; align-self: flex-start;
+    transition: all 0.15s ease;
   }
-  .add-col:hover { border-color: var(--accent); color: var(--accent); }
+  .add-col:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
 </style>

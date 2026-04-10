@@ -73,33 +73,41 @@
     width: min(400px, 92vw);
   }
   .toast {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 1rem;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+    background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 1rem;
+    box-shadow: 0 8px 32px var(--shadow-color-hover);
   }
   .toast-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem; }
-  .from { font-size: 0.9rem; }
+  .from { font-size: 0.9rem; font-weight: 500; }
   .time { font-size: 0.75rem; color: var(--muted); }
   .offer-info { font-size: 0.82rem; color: var(--muted); margin: 0 0 0.5rem; }
   .toast-body { margin-bottom: 0.6rem; }
   .code-input {
-    width: 100%; padding: 0.5rem 0.75rem; border-radius: 8px;
+    width: 100%; padding: 0.55rem 0.85rem; border-radius: var(--radius-full);
     border: 1px solid var(--border); background: var(--input-bg);
     color: var(--text); font-size: 0.9rem; font-family: monospace;
     text-transform: uppercase; box-sizing: border-box;
+    transition: box-shadow 0.15s ease;
   }
-  .err { font-size: 0.78rem; color: #e74c3c; display: block; margin-top: 0.25rem; }
+  .code-input:focus { box-shadow: 0 0 0 2px var(--accent-muted); outline: none; }
+  .err { font-size: 0.78rem; color: var(--error); display: block; margin-top: 0.25rem; }
   .toast-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
   .btn-accept {
-    padding: 0.45rem 1rem; border-radius: 7px;
-    border: none; background: var(--accent); color: #fff;
+    padding: 0.45rem 1rem; border-radius: var(--radius-full);
+    border: none; background: var(--accent); color: var(--on-accent);
     font-weight: 600; cursor: pointer; font-size: 0.85rem;
+    box-shadow: 0 2px 8px var(--shadow-color);
+    transition: transform 0.1s ease;
   }
-  .btn-accept:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-accept:hover { transform: scale(1.03); }
+  .btn-accept:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
   .btn-reject {
-    padding: 0.45rem 0.85rem; border-radius: 7px;
+    padding: 0.45rem 0.85rem; border-radius: var(--radius-full);
     border: 1px solid var(--border); background: transparent;
     color: var(--muted); cursor: pointer; font-size: 0.85rem;
+    transition: all 0.15s ease;
   }
+  .btn-reject:hover { border-color: var(--accent); color: var(--accent); }
   .btn-reject:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

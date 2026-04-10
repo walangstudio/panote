@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type NoteKind = "text" | "markdown" | "checklist" | "code" | "kanban";
+export type NoteKind = "document" | "checklist" | "kanban" | "table";
 
 export interface NoteMetadata {
   id: string;
@@ -10,6 +10,12 @@ export interface NoteMetadata {
   created_at: number;
   updated_at: number;
   has_note_password: boolean;
+  content_hint?: string;
+  pinned: boolean;
+  bg_color?: string;
+  bg_image?: string;
+  show_preview: boolean;
+  preview_text?: string;
 }
 
 export interface NoteDetail {
@@ -20,6 +26,10 @@ export interface NoteDetail {
   tags: string[];
   created_at: number;
   updated_at: number;
+  pinned: boolean;
+  bg_color?: string;
+  bg_image?: string;
+  show_preview: boolean;
 }
 
 export interface NoteInput {
@@ -27,6 +37,11 @@ export interface NoteInput {
   title: string;
   content: unknown;
   tags: string[];
+  content_hint?: string;
+  pinned?: boolean;
+  bg_color?: string;
+  bg_image?: string;
+  show_preview?: boolean;
 }
 
 export interface Peer {
@@ -65,6 +80,8 @@ export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
 export const noteList = () => invoke<NoteMetadata[]>("note_list");
 export const noteGet = (id: string) =>
   invoke<NoteDetail>("note_get", { id });
+export const notePin = (id: string, pinned: boolean) =>
+  invoke<void>("note_pin", { id, pinned });
 
 // Transfer
 export const peersScan = () => invoke<Peer[]>("peers_scan");
