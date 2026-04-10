@@ -10,12 +10,14 @@ import { notes, refreshNotes } from "./notes";
 const fixture: NoteMetadata[] = [
   {
     id: "abc",
-    kind: "text",
+    kind: "document",
     title: "Test note",
     tags: ["a"],
     created_at: 1000,
     updated_at: 2000,
     has_note_password: false,
+    pinned: false,
+    show_preview: true,
   },
 ];
 
