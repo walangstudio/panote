@@ -75,6 +75,7 @@ pub fn run() {
             note_delete,
             note_list,
             note_get,
+            note_pin,
             // Transfer
             start_receiving,
             stop_receiving,

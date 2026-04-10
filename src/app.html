@@ -1,34 +1,76 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="candy-light">
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
     <title>Panote</title>
     <style>
-      :root {
-        --bg: #f8f8f8;
+      [data-theme="candy-light"] {
+        --bg: #fef7ff;
+        --bg-gradient: linear-gradient(135deg, #fef7ff 0%, #ffd6ee 50%, #eedcff 100%);
         --surface: #ffffff;
-        --hover: #f0f0f0;
-        --text: #1a1a1a;
-        --muted: #888;
-        --border: #e0e0e0;
-        --input-bg: #fff;
-        --accent: #5c67f2;
-        --accent-muted: #eef0ff;
+        --surface-glass: rgba(255, 255, 255, 0.7);
+        --surface-container: #f8eef8;
+        --surface-high: #f2e8f2;
+        --hover: #fdf0f8;
+        --text: #2e1a28;
+        --text-secondary: #604868;
+        --muted: #907898;
+        --border: #e8d8ec;
+        --input-bg: #ffffff;
+        --accent: #e040a0;
+        --accent-hover: #c4358a;
+        --accent-muted: rgba(224, 64, 160, 0.08);
+        --accent-surface: #ffd6ee;
+        --on-accent: #ffffff;
+        --secondary: #7c52aa;
+        --secondary-surface: #eedcff;
+        --tertiary: #0096cc;
+        --tertiary-surface: #c8eaff;
+        --error: #e53e3e;
+        --error-surface: #ffe8e8;
+        --success: #27ae60;
+        --shadow-color: rgba(224, 64, 160, 0.08);
+        --shadow-color-hover: rgba(224, 64, 160, 0.15);
+        --radius-sm: 0.5rem;
+        --radius: 1rem;
+        --radius-lg: 1.5rem;
+        --radius-full: 9999px;
       }
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #1a1b26;
-          --surface: #24283b;
-          --hover: #2d3149;
-          --text: #c0caf5;
-          --muted: #565f89;
-          --border: #3b4261;
-          --input-bg: #1f2335;
-          --accent: #7aa2f7;
-          --accent-muted: #1f2d5a;
-        }
+      [data-theme="candy-dark"] {
+        --bg: #1a1625;
+        --bg-gradient: linear-gradient(135deg, #1a1625 0%, #2a1530 50%, #1e1a30 100%);
+        --surface: #2b2538;
+        --surface-glass: rgba(43, 37, 56, 0.8);
+        --surface-container: #322c42;
+        --surface-high: #3d3650;
+        --hover: #3a3350;
+        --text: #e6e0ec;
+        --text-secondary: #b8a8c8;
+        --muted: #8a7a98;
+        --border: #4a4260;
+        --input-bg: #241e32;
+        --accent: #f06cb8;
+        --accent-hover: #e040a0;
+        --accent-muted: rgba(240, 108, 184, 0.12);
+        --accent-surface: #3d1a30;
+        --on-accent: #ffffff;
+        --secondary: #b08cda;
+        --secondary-surface: #2e2040;
+        --tertiary: #40b8e0;
+        --tertiary-surface: #0a2838;
+        --error: #f06060;
+        --error-surface: #3d1a1a;
+        --success: #40c870;
+        --shadow-color: rgba(0, 0, 0, 0.2);
+        --shadow-color-hover: rgba(0, 0, 0, 0.3);
+        --radius-sm: 0.5rem;
+        --radius: 1rem;
+        --radius-lg: 1.5rem;
+        --radius-full: 9999px;
       }
       *, *::before, *::after { box-sizing: border-box; }
       html { height: 100%; }
@@ -37,12 +79,16 @@
         height: 100%;
         padding-top: env(safe-area-inset-top, 0px);
         padding-bottom: env(safe-area-inset-bottom, 0px);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        background: var(--bg);
+        font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg-gradient), var(--bg);
         color: var(--text);
       }
       button { font-family: inherit; }
       a { color: var(--accent); }
+      .material-symbols-outlined {
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        vertical-align: middle;
+      }
     </style>
     %sveltekit.head%
   </head>

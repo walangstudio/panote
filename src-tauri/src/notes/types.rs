@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 pub enum NoteKind {
     Text,
     Markdown,
-    Checklist,
     Code,
+    Document,
+    Checklist,
     Kanban,
+    Table,
 }
 
 impl std::fmt::Display for NoteKind {
@@ -16,9 +18,11 @@ impl std::fmt::Display for NoteKind {
         let s = match self {
             NoteKind::Text => "text",
             NoteKind::Markdown => "markdown",
-            NoteKind::Checklist => "checklist",
             NoteKind::Code => "code",
+            NoteKind::Document => "document",
+            NoteKind::Checklist => "checklist",
             NoteKind::Kanban => "kanban",
+            NoteKind::Table => "table",
         };
         write!(f, "{s}")
     }
@@ -30,9 +34,11 @@ impl std::str::FromStr for NoteKind {
         match s {
             "text" => Ok(NoteKind::Text),
             "markdown" => Ok(NoteKind::Markdown),
-            "checklist" => Ok(NoteKind::Checklist),
             "code" => Ok(NoteKind::Code),
+            "document" => Ok(NoteKind::Document),
+            "checklist" => Ok(NoteKind::Checklist),
             "kanban" => Ok(NoteKind::Kanban),
+            "table" => Ok(NoteKind::Table),
             _ => anyhow::bail!("unknown note kind: {s}"),
         }
     }
@@ -95,6 +101,12 @@ pub struct NoteMetadata {
     pub created_at: i64,
     pub updated_at: i64,
     pub has_note_password: bool,
+    pub content_hint: Option<String>,
+    pub pinned: bool,
+    pub bg_color: Option<String>,
+    pub bg_image: Option<String>,
+    pub show_preview: bool,
+    pub preview_text: Option<String>,
 }
 
 /// Full note returned by note_get.
@@ -107,6 +119,10 @@ pub struct NoteDetail {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub pinned: bool,
+    pub bg_color: Option<String>,
+    pub bg_image: Option<String>,
+    pub show_preview: bool,
 }
 
 /// Input for note_create / note_update.
@@ -116,4 +132,13 @@ pub struct NoteInput {
     pub title: String,
     pub content: serde_json::Value,
     pub tags: Vec<String>,
+    pub content_hint: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub bg_color: Option<String>,
+    #[serde(default)]
+    pub bg_image: Option<String>,
+    #[serde(default)]
+    pub show_preview: Option<bool>,
 }
