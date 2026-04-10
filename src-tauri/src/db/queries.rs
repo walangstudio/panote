@@ -61,6 +61,12 @@ pub struct NoteRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub tags: String,
+    pub content_hint: Option<String>,
+    pub pinned: bool,
+    pub bg_color: Option<String>,
+    pub bg_image: Option<String>,
+    pub show_preview: bool,
+    pub preview_text: Option<String>,
 }
 
 fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
@@ -76,16 +82,22 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
         tags: r.get("tags"),
+        content_hint: r.get("content_hint"),
+        pinned: { let v: i32 = r.get("pinned"); v != 0 },
+        bg_color: r.get("bg_color"),
+        bg_image: r.get("bg_image"),
+        show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
+        preview_text: r.get("preview_text"),
     }
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags";
+    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text";
 
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
@@ -98,6 +110,12 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(row.created_at)
     .bind(row.updated_at)
     .bind(&row.tags)
+    .bind(&row.content_hint)
+    .bind(row.pinned as i32)
+    .bind(&row.bg_color)
+    .bind(&row.bg_image)
+    .bind(row.show_preview as i32)
+    .bind(&row.preview_text)
     .execute(pool)
     .await?;
     Ok(())
@@ -105,8 +123,9 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE notes SET title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=? WHERE id=?",
+        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=? WHERE id=?",
     )
+    .bind(&row.kind)
     .bind(&row.title_nonce)
     .bind(&row.title_ct)
     .bind(&row.nonce)
@@ -115,6 +134,12 @@ pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.note_nonce)
     .bind(row.updated_at)
     .bind(&row.tags)
+    .bind(&row.content_hint)
+    .bind(row.pinned as i32)
+    .bind(&row.bg_color)
+    .bind(&row.bg_image)
+    .bind(row.show_preview as i32)
+    .bind(&row.preview_text)
     .bind(&row.id)
     .execute(pool)
     .await?;
@@ -123,6 +148,15 @@ pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_delete(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM notes WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn note_pin(pool: &SqlitePool, id: &str, pinned: bool) -> anyhow::Result<()> {
+    sqlx::query("UPDATE notes SET pinned = ? WHERE id = ?")
+        .bind(pinned as i32)
         .bind(id)
         .execute(pool)
         .await?;

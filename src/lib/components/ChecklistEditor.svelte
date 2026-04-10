@@ -58,10 +58,13 @@
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
   .item {
     display: flex; align-items: center; gap: 0.5rem;
-    padding: 0.4rem 0.6rem; border-radius: 6px;
+    padding: 0.5rem 0.75rem; border-radius: var(--radius);
     background: var(--surface); border: 1px solid var(--border);
+    transition: box-shadow 0.15s ease;
   }
+  .item:hover { box-shadow: 0 2px 8px var(--shadow-color); }
   .item.done .text-input { text-decoration: line-through; color: var(--muted); }
+  .item input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px; }
   .text-input {
     flex: 1; border: none; background: transparent;
     color: var(--text); font-size: 0.95rem; outline: none;
@@ -69,13 +72,15 @@
   .add-sub, .del {
     background: none; border: none; cursor: pointer;
     font-size: 1rem; color: var(--muted); padding: 0 4px;
+    border-radius: var(--radius-full); transition: all 0.1s ease;
   }
-  .add-sub:hover, .del:hover { color: var(--accent); }
+  .add-sub:hover { color: var(--accent); }
+  .del:hover { color: var(--error); }
   .add-btn {
-    margin-top: 0.75rem; padding: 0.5rem 1rem;
-    border-radius: 8px; border: 1px dashed var(--border);
+    margin-top: 0.75rem; padding: 0.6rem 1rem;
+    border-radius: var(--radius-full); border: 1.5px dashed var(--border);
     background: transparent; color: var(--muted); cursor: pointer;
-    width: 100%;
+    width: 100%; font-weight: 500; transition: all 0.15s ease;
   }
-  .add-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .add-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
 </style>

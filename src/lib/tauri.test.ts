@@ -24,7 +24,7 @@ import {
   isReceiving,
 } from "./tauri";
 
-const input = { kind: "text" as const, title: "t", content: {}, tags: [] };
+const input = { kind: "document" as const, title: "t", content: {}, tags: [] };
 
 describe("tauri bindings", () => {
   beforeEach(() => vi.clearAllMocks());

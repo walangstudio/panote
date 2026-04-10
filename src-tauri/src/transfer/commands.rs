@@ -10,6 +10,39 @@ use tauri::State;
 use uuid::Uuid;
 use if_addrs;
 
+fn infer_content_hint(kind: &str, content: &serde_json::Value) -> Option<String> {
+    match kind {
+        "text" => return Some("plain".into()),
+        "markdown" => return Some("markdown".into()),
+        "code" => return Some("code".into()),
+        "document" => {}
+        _ => return None,
+    }
+    let body = content.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") && trimmed.len() > 3 && trimmed.as_bytes()[3].is_ascii_alphanumeric() {
+            return Some("code".into());
+        }
+    }
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            let rest = trimmed.trim_start_matches('#');
+            if rest.starts_with(' ') && trimmed.len() - rest.len() <= 6 {
+                return Some("markdown".into());
+            }
+        }
+        if trimmed.starts_with("> ") || trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+            return Some("markdown".into());
+        }
+    }
+    if body.contains("**") || body.contains("__") || body.contains("](") {
+        return Some("markdown".into());
+    }
+    Some("plain".into())
+}
+
 // ---- Receiving toggle ----
 
 #[tauri::command]
@@ -397,6 +430,8 @@ pub async fn import_blob(
     let (content_nonce, content_ct) = encrypt_with_vault(device_key, &content_json)?;
     let tags_json = serde_json::to_string(&blob.tags)?;
 
+    let content_hint = infer_content_hint(&blob.kind, &blob.content);
+
     let row = NoteRow {
         id: id.clone(),
         kind: blob.kind,
@@ -409,6 +444,12 @@ pub async fn import_blob(
         created_at: blob.created_at,
         updated_at: ts,
         tags: tags_json,
+        content_hint,
+        pinned: false,
+        bg_color: None,
+        bg_image: None,
+        show_preview: true,
+        preview_text: None,
     };
 
     queries::note_insert(&state.db, &row).await?;
@@ -654,5 +695,97 @@ mod tests {
         let decoded = decrypt_transfer(&salt, &nonce, &ct, passphrase).unwrap();
         assert_eq!(decoded.title, blob.title);
         assert_eq!(decoded.kind, blob.kind);
+    }
+
+    // ----- infer_content_hint -----
+
+    #[test]
+    fn hint_legacy_text_is_plain() {
+        assert_eq!(infer_content_hint("text", &json!({})).as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn hint_legacy_markdown_is_markdown() {
+        assert_eq!(infer_content_hint("markdown", &json!({})).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_legacy_code_is_code() {
+        assert_eq!(infer_content_hint("code", &json!({})).as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn hint_checklist_is_none() {
+        assert_eq!(infer_content_hint("checklist", &json!({})), None);
+    }
+
+    #[test]
+    fn hint_document_plain_text() {
+        let content = json!({ "body": "Just some plain text" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn hint_document_with_code_fence() {
+        let content = json!({ "body": "Some text\n```rust\nfn main() {}\n```" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("code"));
+    }
+
+    #[test]
+    fn hint_document_with_heading() {
+        let content = json!({ "body": "# My Title\nSome content" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_document_with_bold() {
+        let content = json!({ "body": "This has **bold** text" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_document_with_list() {
+        let content = json!({ "body": "- item one\n- item two" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_document_with_link() {
+        let content = json!({ "body": "Check [this](https://example.com)" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_document_with_blockquote() {
+        let content = json!({ "body": "> quoted text" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn hint_document_empty_body_is_plain() {
+        let content = json!({ "body": "" });
+        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("plain"));
+    }
+
+    #[tokio::test]
+    async fn import_blob_sets_content_hint_for_legacy_kind() {
+        let state = test_state().await;
+        let blob = sample_blob(); // kind: "markdown"
+        let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
+        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        assert_eq!(row.content_hint.as_deref(), Some("markdown"));
+    }
+
+    #[tokio::test]
+    async fn import_blob_sets_content_hint_for_document_kind() {
+        let state = test_state().await;
+        let blob = TransferBlob {
+            kind: "document".into(),
+            content: json!({ "body": "```python\nprint('hi')\n```" }),
+            ..sample_blob()
+        };
+        let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
+        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        assert_eq!(row.content_hint.as_deref(), Some("code"));
     }
 }
