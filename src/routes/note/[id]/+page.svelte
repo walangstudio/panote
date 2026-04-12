@@ -192,6 +192,41 @@
     </header>
 
     <div class="meta">
+      <div class="tags">
+        {#each tags as t}<span class="tag">{t}<button onclick={() => removeTag(t)}>
+          <span class="material-symbols-outlined" style="font-size: 14px;">close</span>
+        </button></span>{/each}
+        <input
+          class="tag-input"
+          placeholder="Add tags, comma separated…"
+          bind:value={tagInput}
+          enterkeyhint="done"
+          onkeydown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); } }}
+          oninput={() => { if (tagInput.includes(",")) addTag(); }}
+          onblur={addTag}
+        />
+      </div>
+    </div>
+
+    {#if error}<p class="error">{error}</p>{/if}
+
+    {#if transferOpen}
+      <TransferModal noteIds={id ? [id] : []} onclose={() => transferOpen = false} />
+    {/if}
+
+    <div class="editor-body">
+      {#if kind === "document"}
+        <MarkdownEditor bind:content initialPreview={modeParam === "edit" ? false : modeParam === "view" ? true : !isNew} />
+      {:else if kind === "checklist"}
+        <ChecklistEditor bind:content />
+      {:else if kind === "kanban"}
+        <KanbanEditor bind:content />
+      {:else if kind === "table"}
+        <TableEditor bind:content />
+      {/if}
+    </div>
+
+    <div class="editor-footer">
       <label class="preview-toggle">
         <input type="checkbox" bind:checked={showPreview} />
         <span>Show preview on list</span>
@@ -236,38 +271,6 @@
           </div>
         {/if}
       </div>
-      <div class="tags">
-        {#each tags as t}<span class="tag">{t}<button onclick={() => removeTag(t)}>
-          <span class="material-symbols-outlined" style="font-size: 14px;">close</span>
-        </button></span>{/each}
-        <input
-          class="tag-input"
-          placeholder="Add tags, comma separated…"
-          bind:value={tagInput}
-          enterkeyhint="done"
-          onkeydown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); } }}
-          oninput={() => { if (tagInput.includes(",")) addTag(); }}
-          onblur={addTag}
-        />
-      </div>
-    </div>
-
-    {#if error}<p class="error">{error}</p>{/if}
-
-    {#if transferOpen}
-      <TransferModal noteIds={id ? [id] : []} onclose={() => transferOpen = false} />
-    {/if}
-
-    <div class="editor-body">
-      {#if kind === "document"}
-        <MarkdownEditor bind:content initialPreview={modeParam === "edit" ? false : modeParam === "view" ? true : !isNew} />
-      {:else if kind === "checklist"}
-        <ChecklistEditor bind:content />
-      {:else if kind === "kanban"}
-        <KanbanEditor bind:content />
-      {:else if kind === "table"}
-        <TableEditor bind:content />
-      {/if}
     </div>
   </div>
 {/if}
@@ -320,6 +323,14 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface-container);
   }
+  .editor-footer {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 1.5rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface-container);
+    flex-shrink: 0;
+  }
+
   .tags { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
   .tag {
     display: inline-flex; align-items: center; gap: 2px;
@@ -347,12 +358,16 @@
     transition: all 0.15s ease;
   }
   .bg-toggle:hover { color: var(--accent); background: var(--accent-muted); }
-  .bg-backdrop { position: fixed; inset: 0; z-index: 19; }
+  .bg-backdrop {
+    position: fixed; inset: 0; z-index: 19;
+    background: rgba(0,0,0,0.35); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  }
   .bg-picker {
-    position: absolute; left: 0; top: calc(100% + 6px); z-index: 20;
+    position: fixed; inset: 0; z-index: 20;
+    margin: auto; width: fit-content; height: fit-content;
     background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 0.6rem; min-width: 200px;
+    padding: 1rem; min-width: 220px;
     box-shadow: 0 8px 24px var(--shadow-color-hover);
     display: flex; flex-direction: column; gap: 0.5rem;
   }
