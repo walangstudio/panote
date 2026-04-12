@@ -128,6 +128,7 @@
   }
 
   function removeRow(id: string) {
+    if (!confirm("Delete this row?")) return;
     content.rows = content.rows.filter((r: TableRow) => r.id !== id);
     content = { ...content };
   }
