@@ -169,6 +169,19 @@ describe("urlDescParser", () => {
     expect(result.rows[0].url).toBe("https://github.com/user/repo");
   });
 
+  it("normalizes -/ prefix to https://", () => {
+    const result = urlDescParser.parse("-/github.com/user/repo");
+    expect(result.rows[0].url).toBe("https://github.com/user/repo");
+  });
+
+  it("parses multiple -/ URLs into multiple rows", () => {
+    const input = `desc one\n\n-/github.com/a/b\n\ndesc two\n\n-/github.com/c/d`;
+    const result = urlDescParser.parse(input);
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[0].url).toBe("https://github.com/a/b");
+    expect(result.rows[1].url).toBe("https://github.com/c/d");
+  });
+
   it("handles URL-only input", () => {
     const result = urlDescParser.parse("https://example.com");
     expect(result.rows).toHaveLength(1);
