@@ -58,7 +58,7 @@ export function slugifyColumn(name: string, existing: string[]): string {
 }
 
 function normalizeUrl(raw: string): string {
-  return raw.startsWith("~/") ? "https://" + raw.slice(2) : raw;
+  return raw.startsWith("~/") || raw.startsWith("-/") ? "https://" + raw.slice(2) : raw;
 }
 
 // ---- CSV / PSV shared logic ----
@@ -228,7 +228,7 @@ export const kvParser: ImportParser = {
   },
 };
 
-const URL_GLOBAL_RE = /(?:https?:\/\/|~\/)[^\s]+/g;
+const URL_GLOBAL_RE = /(?:https?:\/\/|[~\-]\/)[^\s]+/g;
 
 export const urlDescParser: ImportParser = {
   id: "url-desc",
