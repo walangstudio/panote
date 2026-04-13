@@ -61,6 +61,9 @@ pub struct AppState {
     pub db: SqlitePool,
     /// Device key derived at startup from machine UID + app UUID. Never changes.
     pub device_key: [u8; 32],
+    /// Stable plaintext device identifier stamped onto notes as origin_device_id.
+    /// Travels with transferred/exported notes for dedup on re-receive.
+    pub device_uuid: String,
     pub peers: Arc<Mutex<Vec<Peer>>>,
     pub pending_transfers: Arc<Mutex<HashMap<String, PendingTransfer>>>,
     pub tofu: Arc<TofuVerifier>,
@@ -85,7 +88,7 @@ mod tests {
     async fn test_state() -> AppState {
         let pool = init_pool(":memory:").await.unwrap();
         let key = derive_key("key", &[0u8; 16]).unwrap();
-        AppState::new(pool, key)
+        AppState::new(pool, key, "test-device-uuid".into())
     }
 
     fn sample_transfer(id: &str) -> PendingTransfer {
@@ -124,11 +127,12 @@ mod tests {
 }
 
 impl AppState {
-    pub fn new(db: SqlitePool, device_key: [u8; 32]) -> Self {
+    pub fn new(db: SqlitePool, device_key: [u8; 32], device_uuid: String) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         Self {
             db,
             device_key,
+            device_uuid,
             peers: Arc::new(Mutex::new(Vec::new())),
             pending_transfers: Arc::new(Mutex::new(HashMap::new())),
             tofu: Arc::new(TofuVerifier::new(provider)),

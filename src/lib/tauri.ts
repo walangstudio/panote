@@ -110,3 +110,18 @@ export const setDeviceName = (name: string) =>
 export const startReceiving = () => invoke<void>("start_receiving");
 export const stopReceiving = () => invoke<void>("stop_receiving");
 export const isReceiving = () => invoke<boolean>("is_receiving");
+
+// Export / Import
+export type ImportResolution = "overwrite" | "skip" | "keepboth";
+
+export interface ImportSummary {
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+}
+
+export const notesExport = (appVersion: string) =>
+  invoke<string>("notes_export", { appVersion });
+export const notesImport = (contents: string, resolution: ImportResolution) =>
+  invoke<ImportSummary>("notes_import", { contents, resolution });

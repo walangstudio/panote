@@ -5,12 +5,14 @@
   import { noteDelete, notePin } from "$lib/tauri";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import TransferModal from "$lib/components/TransferModal.svelte";
+  import ConfirmModal from "$lib/components/ConfirmModal.svelte";
 
   let filter = $state("");
 
   let selecting = $state(false);
   let selected = $state(new Set<string>());
   let transferNoteIds = $state<string[] | null>(null);
+  let deleteTargetId = $state<string | null>(null);
   let sortOpen = $state(false);
   let menuNoteId = $state<string | null>(null);
   let fabOpen = $state(false);
@@ -41,8 +43,14 @@
     )
   );
 
-  async function doDelete(id: string) {
-    if (!confirm("Delete this note?")) return;
+  function doDelete(id: string) {
+    deleteTargetId = id;
+  }
+
+  async function confirmDelete() {
+    if (!deleteTargetId) return;
+    const id = deleteTargetId;
+    deleteTargetId = null;
     await noteDelete(id);
     await refreshNotes();
   }
@@ -252,6 +260,17 @@
   <TransferModal
     noteIds={transferNoteIds}
     onclose={() => { transferNoteIds = null; selecting = false; selected = new Set(); }}
+  />
+{/if}
+
+{#if deleteTargetId}
+  <ConfirmModal
+    title="Delete note?"
+    message="This note will be permanently deleted. This cannot be undone."
+    confirmLabel="Delete"
+    destructive
+    onconfirm={confirmDelete}
+    oncancel={() => deleteTargetId = null}
   />
 {/if}
 

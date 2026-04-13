@@ -5,6 +5,7 @@
   import { noteGet, noteCreate, noteUpdate, type NoteDetail, type NoteKind } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
   import TransferModal from "$lib/components/TransferModal.svelte";
+  import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
   import ChecklistEditor from "$lib/components/ChecklistEditor.svelte";
   import KanbanEditor from "$lib/components/KanbanEditor.svelte";
@@ -36,6 +37,7 @@
   let savedContent = $state("{}");
   let savedTags = $state("[]");
   let justSaved = $state(false);
+  let pendingNavUrl = $state<string | null>(null);
 
   const dirty = $derived(
     !justSaved && (
@@ -45,11 +47,22 @@
     )
   );
 
-  beforeNavigate(({ cancel }) => {
-    if (dirty && !confirm("You have unsaved changes. Leave without saving?")) {
-      cancel();
-    }
+  beforeNavigate(({ cancel, to }) => {
+    if (!dirty || pendingNavUrl !== null) return;
+    cancel();
+    pendingNavUrl = to?.url?.toString() ?? "";
   });
+
+  function discardAndNavigate() {
+    const target = pendingNavUrl;
+    pendingNavUrl = null;
+    justSaved = true;
+    if (target) {
+      goto(target);
+    } else {
+      history.back();
+    }
+  }
 
   onMount(async () => {
     if (isNew) {
@@ -273,6 +286,17 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if pendingNavUrl !== null}
+  <ConfirmModal
+    title="Unsaved changes"
+    message="You have unsaved changes. Leave without saving?"
+    confirmLabel="Discard"
+    destructive
+    onconfirm={discardAndNavigate}
+    oncancel={() => pendingNavUrl = null}
+  />
 {/if}
 
 <style>
