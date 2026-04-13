@@ -1,6 +1,6 @@
 [package]
 name = "panote"
-version = "0.3.0"
+version = "0.4.0"
 description = "Secure offline-first note-taking app with LAN/BLE transfer"
 authors = []
 edition = "2021"

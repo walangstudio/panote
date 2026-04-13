@@ -46,6 +46,8 @@ pub async fn note_create(
         bg_image: input.bg_image.clone(),
         show_preview: input.show_preview.unwrap_or(true),
         preview_text: preview_text.clone(),
+        origin_device_id: state.device_uuid.clone(),
+        origin_note_id: id.clone(),
     };
 
     queries::note_insert(&state.db, &row)
@@ -111,6 +113,8 @@ pub async fn note_update(
         bg_image: input.bg_image.clone(),
         show_preview: input.show_preview.unwrap_or(original.show_preview),
         preview_text: preview_text.clone(),
+        origin_device_id: original.origin_device_id,
+        origin_note_id: original.origin_note_id,
     };
 
     queries::note_update(&state.db, &row)

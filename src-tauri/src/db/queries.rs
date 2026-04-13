@@ -1,5 +1,6 @@
 use rand::{rngs::OsRng, RngCore};
 use sqlx::{Row, SqlitePool};
+use uuid::Uuid;
 
 // ----- Device config -----
 
@@ -23,6 +24,46 @@ pub async fn get_or_create_device_key(pool: &SqlitePool) -> anyhow::Result<[u8; 
         .execute(pool)
         .await?;
     Ok(key)
+}
+
+/// Load the stable device UUID used to mark note origin. Distinct from device_key:
+/// this is a plaintext identifier that travels with transferred notes so the
+/// receiver can recognize updates to previously-received notes. Generated on
+/// first access and persisted in device_config.
+pub async fn get_or_create_device_uuid(pool: &SqlitePool) -> anyhow::Result<String> {
+    if let Some(row) = sqlx::query("SELECT device_uuid FROM device_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await?
+    {
+        let existing: Option<String> = row.get("device_uuid");
+        if let Some(uuid) = existing {
+            if !uuid.is_empty() {
+                return Ok(uuid);
+            }
+        }
+    }
+    let uuid = Uuid::new_v4().to_string();
+    // device_config row is guaranteed to exist by the time this is called
+    // (get_or_create_device_key runs first at startup).
+    sqlx::query("UPDATE device_config SET device_uuid = ? WHERE id = 1")
+        .bind(&uuid)
+        .execute(pool)
+        .await?;
+    Ok(uuid)
+}
+
+/// Backfill origin_device_id / origin_note_id for rows created before migration 0010.
+/// Pre-existing notes are local-only so we map origin_device_id = this_device and
+/// origin_note_id = id. Safe to call repeatedly — only touches NULL rows.
+pub async fn backfill_note_origins(pool: &SqlitePool, device_uuid: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE notes SET origin_device_id = ?, origin_note_id = id \
+         WHERE origin_device_id IS NULL OR origin_note_id IS NULL",
+    )
+    .bind(device_uuid)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ----- Device settings -----
@@ -67,11 +108,15 @@ pub struct NoteRow {
     pub bg_image: Option<String>,
     pub show_preview: bool,
     pub preview_text: Option<String>,
+    pub origin_device_id: String,
+    pub origin_note_id: String,
 }
 
 fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
+    let origin_device_id: Option<String> = r.get("origin_device_id");
+    let origin_note_id: Option<String> = r.get("origin_note_id");
+    let id: String = r.get("id");
     NoteRow {
-        id: r.get("id"),
         kind: r.get("kind"),
         title_nonce: r.get("title_nonce"),
         title_ct: r.get("title_ct"),
@@ -88,16 +133,19 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         bg_image: r.get("bg_image"),
         show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
         preview_text: r.get("preview_text"),
+        origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
+        origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
+        id,
     }
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text";
+    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id";
 
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
@@ -116,6 +164,8 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.bg_image)
     .bind(row.show_preview as i32)
     .bind(&row.preview_text)
+    .bind(&row.origin_device_id)
+    .bind(&row.origin_note_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -123,7 +173,7 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=? WHERE id=?",
+        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=? WHERE id=?",
     )
     .bind(&row.kind)
     .bind(&row.title_nonce)
@@ -140,10 +190,29 @@ pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.bg_image)
     .bind(row.show_preview as i32)
     .bind(&row.preview_text)
+    .bind(&row.origin_device_id)
+    .bind(&row.origin_note_id)
     .bind(&row.id)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Find a note by its origin identity (origin_device_id, origin_note_id).
+/// Used by transfer/import to detect "same note, already received before".
+pub async fn note_find_by_origin(
+    pool: &SqlitePool,
+    origin_device_id: &str,
+    origin_note_id: &str,
+) -> anyhow::Result<Option<NoteRow>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE origin_device_id = ? AND origin_note_id = ?"
+    ))
+    .bind(origin_device_id)
+    .bind(origin_note_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(row_to_note))
 }
 
 pub async fn note_delete(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {

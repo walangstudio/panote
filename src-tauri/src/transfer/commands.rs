@@ -417,12 +417,35 @@ pub async fn known_peers_list(state: State<'_, AppState>) -> Result<Vec<KnownPee
 
 // ---- Import ----
 
+/// Outcome of importing a single blob — lets callers report "N new, M updated".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// No existing note matched the blob's origin → a fresh row was inserted.
+    Inserted,
+    /// An existing note with the same (origin_device_id, origin_note_id) was
+    /// overwritten in place, preserving its local PK.
+    Updated,
+}
+
 pub async fn import_blob(
     state: &AppState,
     device_key: &[u8; 32],
     blob: TransferBlob,
 ) -> anyhow::Result<String> {
-    let id = Uuid::new_v4().to_string();
+    let (id, _) = import_blob_detailed(state, device_key, blob).await?;
+    Ok(id)
+}
+
+/// Import a blob with dedup: if a note with the same origin already exists,
+/// update it in place; otherwise insert a fresh row. Returns (local_id, outcome).
+///
+/// Older senders may omit origin_device_id/origin_note_id — in that case we
+/// treat the blob as having no stable identity and always insert fresh.
+pub async fn import_blob_detailed(
+    state: &AppState,
+    device_key: &[u8; 32],
+    blob: TransferBlob,
+) -> anyhow::Result<(String, ImportOutcome)> {
     let ts = now_secs();
 
     let (title_nonce, title_ct) = encrypt_with_vault(device_key, blob.title.as_bytes())?;
@@ -431,6 +454,49 @@ pub async fn import_blob(
     let tags_json = serde_json::to_string(&blob.tags)?;
 
     let content_hint = infer_content_hint(&blob.kind, &blob.content);
+
+    let has_origin = !blob.origin_device_id.is_empty() && !blob.origin_note_id.is_empty();
+    let existing = if has_origin {
+        queries::note_find_by_origin(&state.db, &blob.origin_device_id, &blob.origin_note_id)
+            .await?
+    } else {
+        None
+    };
+
+    if let Some(prev) = existing {
+        let row = NoteRow {
+            id: prev.id.clone(),
+            kind: blob.kind,
+            title_nonce: title_nonce.to_vec(),
+            title_ct,
+            nonce: content_nonce.to_vec(),
+            content_ct,
+            note_salt: None,
+            note_nonce: None,
+            created_at: prev.created_at,
+            updated_at: ts,
+            tags: tags_json,
+            content_hint,
+            pinned: prev.pinned,
+            bg_color: prev.bg_color,
+            bg_image: prev.bg_image,
+            show_preview: prev.show_preview,
+            preview_text: None,
+            origin_device_id: blob.origin_device_id,
+            origin_note_id: blob.origin_note_id,
+        };
+        queries::note_update(&state.db, &row).await?;
+        return Ok((prev.id, ImportOutcome::Updated));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let (origin_device_id, origin_note_id) = if has_origin {
+        (blob.origin_device_id, blob.origin_note_id)
+    } else {
+        // Legacy sender with no origin info — attribute to this device as if
+        // the note had been created locally so future round-trips dedup.
+        (state.device_uuid.clone(), id.clone())
+    };
 
     let row = NoteRow {
         id: id.clone(),
@@ -450,10 +516,12 @@ pub async fn import_blob(
         bg_image: None,
         show_preview: true,
         preview_text: None,
+        origin_device_id,
+        origin_note_id,
     };
 
     queries::note_insert(&state.db, &row).await?;
-    Ok(id)
+    Ok((id, ImportOutcome::Inserted))
 }
 
 #[cfg(test)]
@@ -470,7 +538,7 @@ mod tests {
     async fn test_state() -> AppState {
         let pool = init_pool(":memory:").await.unwrap();
         let key = derive_key("test-device-key", &[0u8; 16]).unwrap();
-        AppState::new(pool, key)
+        AppState::new(pool, key, "test-local-device".into())
     }
 
     fn sample_blob() -> TransferBlob {
@@ -482,6 +550,8 @@ mod tests {
             tags: vec!["shared".into()],
             created_at: 1700000000,
             updated_at: 1700000001,
+            origin_device_id: "alice-device".into(),
+            origin_note_id: "orig-id-from-sender".into(),
         }
     }
 
