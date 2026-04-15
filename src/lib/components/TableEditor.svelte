@@ -19,11 +19,19 @@
   let showImport = $state(false);
   let rowToDelete = $state<string | null>(null);
 
+  let activeRowId = $state<string | null>(null);
+  let rowModalMode = $state<"view" | "edit">("view");
+  let editCells = $state<Record<string, string>>({});
+
   // Column setup state
   let setupNames = $state<string[]>([]);
 
   // Add row form state
   let newRowCells = $state<Record<string, string>>({});
+
+  function isLongText(v: string): boolean {
+    return v.length > 60 || v.includes("\n");
+  }
 
   onMount(() => {
     if (content.columns.length === 0) openColumnSetup();
@@ -119,18 +127,47 @@
     showImport = false;
   }
 
-  // ---- Inline editing ----
+  // ---- Row detail modal ----
 
-  function updateCell(rowId: string, colId: string, value: string) {
-    const row = content.rows.find((r: TableRow) => r.id === rowId);
-    if (row) {
-      row.cells[colId] = value;
-      content = { ...content };
-    }
+  function openRow(id: string) {
+    const row = content.rows.find((r: TableRow) => r.id === id);
+    if (!row) return;
+    activeRowId = id;
+    rowModalMode = "view";
+    editCells = { ...row.cells };
   }
 
-  function removeRow(id: string) {
-    rowToDelete = id;
+  function closeRowModal() {
+    activeRowId = null;
+    rowModalMode = "view";
+  }
+
+  function enterEditMode() {
+    const row = content.rows.find((r: TableRow) => r.id === activeRowId);
+    if (!row) return;
+    editCells = { ...row.cells };
+    rowModalMode = "edit";
+  }
+
+  function cancelEdit() {
+    const row = content.rows.find((r: TableRow) => r.id === activeRowId);
+    if (row) editCells = { ...row.cells };
+    rowModalMode = "view";
+  }
+
+  function saveEdit() {
+    const row = content.rows.find((r: TableRow) => r.id === activeRowId);
+    if (!row) return;
+    row.cells = { ...editCells };
+    content = { ...content };
+    rowModalMode = "view";
+  }
+
+  function handleRowKey(e: KeyboardEvent, id: string) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openRow(id);
+    }
   }
 
   function confirmRemoveRow() {
@@ -139,6 +176,7 @@
     rowToDelete = null;
     content.rows = content.rows.filter((r: TableRow) => r.id !== id);
     content = { ...content };
+    if (activeRowId === id) closeRowModal();
   }
 
   function isUrl(value: string): boolean {
@@ -171,44 +209,43 @@
             {#each content.columns as col}
               <th>{col.name}</th>
             {/each}
-            <th class="actions-col"></th>
           </tr>
         </thead>
         <tbody>
           {#each content.rows as row (row.id)}
-            <tr>
+            <tr
+              class="row-clickable"
+              role="button"
+              tabindex="0"
+              onclick={() => openRow(row.id)}
+              onkeydown={(e) => handleRowKey(e, row.id)}
+            >
               {#each content.columns as col}
+                {@const val = row.cells[col.id] ?? ""}
                 <td>
-                  {#if isUrl(row.cells[col.id] ?? "")}
+                  {#if isUrl(val)}
                     <div class="url-cell">
-                      <a href={row.cells[col.id]} target="_blank" rel="noopener" class="url-link">
+                      <a
+                        href={val}
+                        target="_blank"
+                        rel="noopener"
+                        class="url-link"
+                        onclick={(e) => e.stopPropagation()}
+                      >
                         <span class="material-symbols-outlined" style="font-size: 14px;">open_in_new</span>
                       </a>
-                      <input
-                        class="cell-input"
-                        value={row.cells[col.id] ?? ""}
-                        onchange={(e) => updateCell(row.id, col.id, (e.target as HTMLInputElement).value)}
-                      />
+                      <span class="cell-text">{val}</span>
                     </div>
                   {:else}
-                    <input
-                      class="cell-input"
-                      value={row.cells[col.id] ?? ""}
-                      onchange={(e) => updateCell(row.id, col.id, (e.target as HTMLInputElement).value)}
-                    />
+                    <span class="cell-text">{val}</span>
                   {/if}
                 </td>
               {/each}
-              <td class="actions-col">
-                <button class="row-del" onclick={() => removeRow(row.id)} title="Delete row">
-                  <span class="material-symbols-outlined" style="font-size: 16px;">close</span>
-                </button>
-              </td>
             </tr>
           {/each}
           {#if content.rows.length === 0}
             <tr>
-              <td colspan={content.columns.length + 1} class="empty-row">
+              <td colspan={content.columns.length} class="empty-row">
                 No rows yet. Click "Add Row" or "Import" to get started.
               </td>
             </tr>
@@ -294,12 +331,21 @@
       {#each content.columns as col, i}
         <label class="form-field">
           <span class="form-label">{col.name}</span>
-          <input
-            class="form-input"
-            bind:value={newRowCells[col.id]}
-            placeholder={col.name}
-            onkeydown={(e) => handleRowKeydown(e, i === content.columns.length - 1)}
-          />
+          {#if isLongText(newRowCells[col.id] ?? "")}
+            <textarea
+              class="form-input"
+              rows="4"
+              bind:value={newRowCells[col.id]}
+              placeholder={col.name}
+            ></textarea>
+          {:else}
+            <input
+              class="form-input"
+              bind:value={newRowCells[col.id]}
+              placeholder={col.name}
+              onkeydown={(e) => handleRowKeydown(e, i === content.columns.length - 1)}
+            />
+          {/if}
         </label>
       {/each}
     </div>
@@ -309,6 +355,58 @@
       <button class="btn-primary" onclick={saveRow}>Save</button>
     </div>
   </div>
+{/if}
+
+<!-- Row Detail Modal -->
+{#if activeRowId}
+  {@const row = content.rows.find((r: TableRow) => r.id === activeRowId)}
+  {#if row}
+    <div class="backdrop" role="presentation" onclick={closeRowModal}></div>
+    <div class="modal" role="dialog" aria-modal="true">
+      <button class="modal-close" onclick={closeRowModal} aria-label="Close">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+      <h2>{rowModalMode === "edit" ? "Edit Row" : "Row Details"}</h2>
+      <p class="modal-subtitle">
+        {rowModalMode === "edit" ? "Update field values" : "Tap Edit to change values"}
+      </p>
+
+      <div class="row-form">
+        {#each content.columns as col}
+          {@const viewVal = row.cells[col.id] ?? ""}
+          {@const editVal = editCells[col.id] ?? ""}
+          <label class="form-field">
+            <span class="form-label">{col.name}</span>
+            {#if rowModalMode === "view"}
+              {#if isLongText(viewVal)}
+                <div class="view-value view-long">{viewVal || "—"}</div>
+              {:else if isUrl(viewVal)}
+                <a class="view-value view-url" href={viewVal} target="_blank" rel="noopener">{viewVal}</a>
+              {:else}
+                <div class="view-value">{viewVal || "—"}</div>
+              {/if}
+            {:else if isLongText(editVal)}
+              <textarea class="form-input" rows="4" bind:value={editCells[col.id]}></textarea>
+            {:else}
+              <input class="form-input" bind:value={editCells[col.id]} />
+            {/if}
+          </label>
+        {/each}
+      </div>
+
+      <div class="modal-actions">
+        {#if rowModalMode === "view"}
+          <button class="btn-cancel btn-destructive" onclick={() => { rowToDelete = activeRowId; }}>
+            Delete
+          </button>
+          <button class="btn-primary" onclick={enterEditMode}>Edit</button>
+        {:else}
+          <button class="btn-cancel" onclick={cancelEdit}>Cancel</button>
+          <button class="btn-primary" onclick={saveEdit}>Save</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <!-- Import Modal -->
@@ -368,19 +466,22 @@
     position: sticky; top: 0; z-index: 1;
   }
   td {
-    padding: 0.35rem 0.5rem;
+    padding: 0.6rem 0.75rem;
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
+    max-width: 220px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 0.88rem;
+    color: var(--text);
   }
-  .actions-col { width: 36px; text-align: center; }
-  .cell-input {
-    width: 100%; border: none; background: transparent;
-    color: var(--text); font-size: 0.88rem; outline: none;
-    padding: 0.3rem 0.25rem; border-radius: var(--radius-sm);
-    transition: background 0.1s ease;
-  }
-  .cell-input:focus { background: var(--surface-container); }
-  .url-cell { display: flex; align-items: center; gap: 0.3rem; }
+  tbody tr.row-clickable { cursor: pointer; transition: background 0.1s ease; }
+  tbody tr.row-clickable:hover { background: var(--hover); }
+  tbody tr.row-clickable:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .cell-text { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .url-cell { display: flex; align-items: center; gap: 0.3rem; min-width: 0; }
+  .url-cell .cell-text { flex: 1; min-width: 0; }
   .url-link {
     flex-shrink: 0; display: flex; align-items: center;
     color: var(--accent); text-decoration: none;
@@ -388,13 +489,16 @@
     transition: background 0.1s ease;
   }
   .url-link:hover { background: var(--accent-muted); }
-  .row-del {
-    background: none; border: none; cursor: pointer; color: var(--muted);
-    padding: 4px; border-radius: var(--radius-full);
-    display: flex; align-items: center; justify-content: center;
-    transition: all 0.1s ease;
+  .view-value {
+    padding: 0.55rem 0.75rem; border-radius: var(--radius);
+    background: var(--surface-container); color: var(--text);
+    font-size: 0.9rem; word-break: break-word;
   }
-  .row-del:hover { color: var(--error); background: var(--hover); }
+  .view-long { white-space: pre-wrap; min-height: 4.5rem; }
+  .view-url { color: var(--accent); text-decoration: none; display: block; }
+  .view-url:hover { text-decoration: underline; }
+  .btn-destructive { border-color: var(--error); color: var(--error); }
+  .btn-destructive:hover { background: var(--error); color: var(--on-accent); border-color: var(--error); }
   .empty-row {
     text-align: center; color: var(--muted); padding: 2rem !important;
     font-size: 0.88rem;
@@ -487,7 +591,8 @@
   .form-input {
     padding: 0.5rem 0.75rem; border: 1px solid var(--border);
     border-radius: var(--radius); background: var(--surface); color: var(--text);
-    font-size: 0.9rem; outline: none;
+    font-size: 0.9rem; outline: none; font-family: inherit;
+    width: 100%; box-sizing: border-box; resize: vertical;
   }
   .form-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
   .form-input::placeholder { color: var(--muted); }
