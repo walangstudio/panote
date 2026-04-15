@@ -58,7 +58,7 @@ export function slugifyColumn(name: string, existing: string[]): string {
 }
 
 function normalizeUrl(raw: string): string {
-  return raw.startsWith("~/") ? "https://" + raw.slice(2) : raw;
+  return raw.startsWith("~/") || raw.startsWith("-/") ? "https://" + raw.slice(2) : raw;
 }
 
 // ---- CSV / PSV shared logic ----
@@ -228,7 +228,7 @@ export const kvParser: ImportParser = {
   },
 };
 
-const URL_GLOBAL_RE = /(?:https?:\/\/|~\/)[^\s]+/g;
+const URL_GLOBAL_RE = /(?:https?:\/\/|[~\-]\/)[^\s]+/g;
 
 export const urlDescParser: ImportParser = {
   id: "url-desc",
@@ -255,17 +255,17 @@ export const urlDescParser: ImportParser = {
       return { columns, rows: [{ url: "", desc }] };
     }
 
-    // URL[0] gets: text before it + text after it (until URL[1]).
-    // URL[i>0] gets: text after it (until URL[i+1] or end). Between-text belongs to preceding URL.
+    // Each URL's desc = text between the previous URL (or start) and this URL.
+    // The last URL also gets any trailing text after it.
     const rows: Record<string, string>[] = [];
 
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i];
-      const prefix = i === 0 ? text.slice(0, match.start) : "";
-      const suffixEnd = i + 1 < matches.length ? matches[i + 1].start : text.length;
-      const suffix = text.slice(match.end, suffixEnd);
+      const descStart = i === 0 ? 0 : matches[i - 1].end;
+      const before = text.slice(descStart, match.start);
+      const trailing = i === matches.length - 1 ? text.slice(match.end) : "";
 
-      const desc = (prefix + " " + suffix).replace(/\s+/g, " ").trim();
+      const desc = (before + " " + trailing).replace(/\s+/g, " ").trim();
       rows.push({ url: normalizeUrl(match.url), desc });
     }
 

@@ -159,14 +159,29 @@ describe("urlDescParser", () => {
     const result = urlDescParser.parse(input);
     expect(result.rows).toHaveLength(2);
     expect(result.rows[0].url).toBe("https://example.com/a");
-    expect(result.rows[0].desc).toBe("first desc second desc");
+    expect(result.rows[0].desc).toBe("first desc");
     expect(result.rows[1].url).toBe("https://example.com/b");
-    expect(result.rows[1].desc).toBe("third");
+    expect(result.rows[1].desc).toBe("second desc third");
   });
 
   it("normalizes ~/ prefix to https://", () => {
     const result = urlDescParser.parse("~/github.com/user/repo");
     expect(result.rows[0].url).toBe("https://github.com/user/repo");
+  });
+
+  it("normalizes -/ prefix to https://", () => {
+    const result = urlDescParser.parse("-/github.com/user/repo");
+    expect(result.rows[0].url).toBe("https://github.com/user/repo");
+  });
+
+  it("parses multiple -/ URLs into multiple rows", () => {
+    const input = `desc one\n\n-/github.com/a/b\n\ndesc two\n\n-/github.com/c/d`;
+    const result = urlDescParser.parse(input);
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[0].url).toBe("https://github.com/a/b");
+    expect(result.rows[0].desc).toBe("desc one");
+    expect(result.rows[1].url).toBe("https://github.com/c/d");
+    expect(result.rows[1].desc).toBe("desc two");
   });
 
   it("handles URL-only input", () => {
@@ -191,6 +206,15 @@ describe("urlDescParser", () => {
   it("handles http:// URLs", () => {
     const result = urlDescParser.parse("desc http://example.com");
     expect(result.rows[0].url).toBe("http://example.com");
+  });
+
+  it("assigns pre-URL text as that URL's desc, trailing text to last URL", () => {
+    const input = "desc A\n\n-/github.com/a/a\n\ndesc B\n\n-/github.com/b/b\n\ndesc C trailing\n\n-/github.com/c/c";
+    const result = urlDescParser.parse(input);
+    expect(result.rows).toHaveLength(3);
+    expect(result.rows[0].desc).toBe("desc A");
+    expect(result.rows[1].desc).toBe("desc B");
+    expect(result.rows[2].desc).toBe("desc C trailing");
   });
 
   it("handles text only before URL", () => {
