@@ -11,6 +11,15 @@ pub struct TransferBlob {
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Sender's device UUID — stamped into origin_device_id on the receiver so
+    /// re-sends of the same note update the existing row instead of duplicating.
+    /// Defaults to empty for older senders; receiver treats that as "unknown origin"
+    /// and always creates a fresh row.
+    #[serde(default)]
+    pub origin_device_id: String,
+    /// Sender's local id for this note. Pair with origin_device_id for dedup.
+    #[serde(default)]
+    pub origin_note_id: String,
 }
 
 impl TransferBlob {
@@ -37,6 +46,8 @@ mod tests {
             tags: vec!["rust".into(), "notes".into()],
             created_at: 1700000000,
             updated_at: 1700000001,
+            origin_device_id: "device-a".into(),
+            origin_note_id: "test-uuid-1234".into(),
         }
     }
 

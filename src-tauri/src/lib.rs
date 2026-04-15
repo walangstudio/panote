@@ -5,6 +5,7 @@ mod state;
 mod transfer;
 
 use notes::commands::*;
+use notes::export::{notes_export, notes_import};
 use state::AppState;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -35,7 +36,16 @@ pub fn run() {
                 tauri::async_runtime::block_on(db::queries::get_or_create_device_key(&pool))
                     .expect("device key init failed");
 
-            let state = AppState::new(pool, device_key);
+            // Stable device UUID for note origin tracking (separate from device_key).
+            let device_uuid =
+                tauri::async_runtime::block_on(db::queries::get_or_create_device_uuid(&pool))
+                    .expect("device uuid init failed");
+
+            // Backfill origin fields on any notes that predate migration 0010.
+            tauri::async_runtime::block_on(db::queries::backfill_note_origins(&pool, &device_uuid))
+                .expect("note origin backfill failed");
+
+            let state = AppState::new(pool, device_key, device_uuid);
 
             // Restore TOFU fingerprints from DB so they survive restarts.
             if let Ok(known) = tauri::async_runtime::block_on(db::queries::known_peers_list(&state.db)) {
@@ -94,6 +104,9 @@ pub fn run() {
             known_peers_list,
             get_device_name,
             set_device_name,
+            // Export / Import
+            notes_export,
+            notes_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running panote");
