@@ -8,6 +8,7 @@
     type TableRow,
   } from "$lib/tableParsers";
   import TableImportModal from "$lib/components/TableImportModal.svelte";
+  import ConfirmModal from "$lib/components/ConfirmModal.svelte";
 
   let { content = $bindable({ columns: [], rows: [] }) } = $props<{
     content: TableContent;
@@ -16,6 +17,7 @@
   let showColumnSetup = $state(false);
   let showAddRow = $state(false);
   let showImport = $state(false);
+  let rowToDelete = $state<string | null>(null);
 
   // Column setup state
   let setupNames = $state<string[]>([]);
@@ -128,7 +130,13 @@
   }
 
   function removeRow(id: string) {
-    if (!confirm("Delete this row?")) return;
+    rowToDelete = id;
+  }
+
+  function confirmRemoveRow() {
+    if (!rowToDelete) return;
+    const id = rowToDelete;
+    rowToDelete = null;
     content.rows = content.rows.filter((r: TableRow) => r.id !== id);
     content = { ...content };
   }
@@ -310,6 +318,17 @@
     customParsers={content.customParsers}
     onimport={handleImport}
     onclose={() => showImport = false}
+  />
+{/if}
+
+{#if rowToDelete}
+  <ConfirmModal
+    title="Delete row?"
+    message="This row will be removed from the table."
+    confirmLabel="Delete"
+    destructive
+    onconfirm={confirmRemoveRow}
+    oncancel={() => rowToDelete = null}
   />
 {/if}
 

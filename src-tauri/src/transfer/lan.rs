@@ -256,7 +256,6 @@ async fn handle_transfer_offer(
     offer_id: String,
     note_count: u32,
 ) -> anyhow::Result<()> {
-    use crate::transfer::commands::import_blob;
 
     let offer = crate::state::PendingOffer {
         offer_id: offer_id.clone(),
@@ -307,9 +306,17 @@ async fn handle_transfer_offer(
             return Err(anyhow::anyhow!("sender rejected: {reason}"));
         }
         Message::SendNote { from_peer, transfer_salt, transfer_nonce, transfer_ct } => {
+            use crate::transfer::commands::{import_blob_detailed, ImportOutcome};
+
+            let mut inserted = 0u32;
+            let mut updated = 0u32;
+
             // Decrypt and import the first note.
             let blob = decrypt_transfer(&transfer_salt, &transfer_nonce, &transfer_ct, &passphrase)?;
-            import_blob(state.as_ref(), &state.device_key, blob).await?;
+            match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
+                ImportOutcome::Inserted => inserted += 1,
+                ImportOutcome::Updated => updated += 1,
+            }
             let _ = queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
 
             // Read remaining notes (note_count - 1).
@@ -318,7 +325,10 @@ async fn handle_transfer_offer(
                 let msg: Message = serde_json::from_slice(&frame)?;
                 if let Message::SendNote { transfer_salt, transfer_nonce, transfer_ct, .. } = msg {
                     let blob = decrypt_transfer(&transfer_salt, &transfer_nonce, &transfer_ct, &passphrase)?;
-                    import_blob(state.as_ref(), &state.device_key, blob).await?;
+                    match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
+                        ImportOutcome::Inserted => inserted += 1,
+                        ImportOutcome::Updated => updated += 1,
+                    }
                 }
             }
 
@@ -326,8 +336,15 @@ async fn handle_transfer_offer(
             let ack = serde_json::to_vec(&Message::Ack { transfer_id: offer_id })?;
             write_frame(tls, &ack).await?;
 
-            // Notify frontend to refresh notes.
-            app_handle.emit("notes-received", ()).ok();
+            // Notify frontend with import summary so it can show a toast.
+            #[derive(serde::Serialize, Clone)]
+            struct ReceiveSummary<'a> { from_peer: &'a str, inserted: u32, updated: u32 }
+            app_handle
+                .emit(
+                    "notes-received",
+                    ReceiveSummary { from_peer: &from_peer, inserted, updated },
+                )
+                .ok();
         }
         _ => {
             return Err(anyhow::anyhow!("unexpected message after TransferAccept"));
@@ -575,13 +592,15 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
     let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
 
     let blob = TransferBlob {
-        id: row.id,
+        id: row.id.clone(),
         kind: row.kind,
         title,
         content,
         tags,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        origin_device_id: row.origin_device_id,
+        origin_note_id: row.origin_note_id,
     };
     blob.encode()
 }

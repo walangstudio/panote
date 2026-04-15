@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving, deviceIps } from "$lib/tauri";
+  import { getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving, deviceIps, notesExport, notesImport, type ImportResolution, type ImportSummary } from "$lib/tauri";
   import { getVersion } from "@tauri-apps/api/app";
   import { toggleDarkMode, theme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
+  import ConfirmModal from "$lib/components/ConfirmModal.svelte";
 
   let appVersion = $state("");
   let deviceName = $state("");
@@ -13,6 +14,79 @@
   let receiving = $state(false);
   let myIps = $state<string[]>([]);
   let showQr = $state(false);
+
+  let exporting = $state(false);
+  let importing = $state(false);
+  let pendingImportContents = $state<string | null>(null);
+  let importResolution = $state<ImportResolution>("overwrite");
+  let statusMessage = $state("");
+  let fileInput = $state<HTMLInputElement | null>(null);
+
+  async function doExport() {
+    if (exporting) return;
+    exporting = true;
+    statusMessage = "";
+    try {
+      const json = await notesExport(appVersion || "unknown");
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `panote-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      statusMessage = "Backup downloaded.";
+    } catch (e) {
+      statusMessage = `Export failed: ${e}`;
+    } finally {
+      exporting = false;
+    }
+  }
+
+  function triggerImportPicker() {
+    fileInput?.click();
+  }
+
+  async function onFilePicked(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    try {
+      pendingImportContents = await file.text();
+      importResolution = "overwrite";
+    } catch (err) {
+      statusMessage = `Could not read file: ${err}`;
+    }
+  }
+
+  async function confirmImport() {
+    const contents = pendingImportContents;
+    pendingImportContents = null;
+    if (!contents) return;
+    importing = true;
+    statusMessage = "";
+    try {
+      const summary: ImportSummary = await notesImport(contents, importResolution);
+      const parts: string[] = [];
+      if (summary.imported) parts.push(`${summary.imported} new`);
+      if (summary.updated) parts.push(`${summary.updated} updated`);
+      if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+      if (summary.errors.length) parts.push(`${summary.errors.length} errors`);
+      statusMessage = parts.length ? `Imported: ${parts.join(", ")}.` : "Nothing to import.";
+    } catch (e) {
+      statusMessage = `Import failed: ${e}`;
+    } finally {
+      importing = false;
+    }
+  }
+
+  function cancelImport() {
+    pendingImportContents = null;
+  }
 
   onMount(async () => {
     appVersion = await getVersion();
@@ -130,6 +204,47 @@
   </section>
 
   <section class="card">
+    <h2 class="section-title">Data</h2>
+    <button class="setting-row" onclick={doExport} disabled={exporting}>
+      <span class="setting-icon">
+        <span class="material-symbols-outlined">file_download</span>
+      </span>
+      <div class="setting-text">
+        <span class="setting-label">Export all notes</span>
+        <span class="setting-desc">{exporting ? "Exporting…" : "Download a backup JSON file"}</span>
+      </div>
+      <span class="material-symbols-outlined chevron">chevron_right</span>
+    </button>
+    <button class="setting-row" onclick={triggerImportPicker} disabled={importing}>
+      <span class="setting-icon">
+        <span class="material-symbols-outlined">file_upload</span>
+      </span>
+      <div class="setting-text">
+        <span class="setting-label">Import from file</span>
+        <span class="setting-desc">{importing ? "Importing…" : "Restore notes from a backup"}</span>
+      </div>
+      <span class="material-symbols-outlined chevron">chevron_right</span>
+    </button>
+    {#if statusMessage}
+      <div class="setting-row">
+        <span class="setting-icon">
+          <span class="material-symbols-outlined">info</span>
+        </span>
+        <div class="setting-text">
+          <span class="setting-desc">{statusMessage}</span>
+        </div>
+      </div>
+    {/if}
+    <input
+      bind:this={fileInput}
+      type="file"
+      accept="application/json,.json"
+      style="display:none"
+      onchange={onFilePicked}
+    />
+  </section>
+
+  <section class="card">
     <h2 class="section-title">About</h2>
     <div class="setting-row">
       <span class="setting-icon">
@@ -145,6 +260,17 @@
 
 {#if showQr}
   <QrShowModal onclose={() => showQr = false} />
+{/if}
+
+{#if pendingImportContents !== null}
+  <ConfirmModal
+    title="Import notes?"
+    message="Existing notes with the same origin will be overwritten. Notes new to this device will be added."
+    confirmLabel="Overwrite &amp; import"
+    cancelLabel="Cancel"
+    onconfirm={confirmImport}
+    oncancel={cancelImport}
+  />
 {/if}
 
 <style>
