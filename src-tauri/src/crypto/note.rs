@@ -20,7 +20,6 @@ pub fn decrypt_with_vault(
 
 /// Apply an additional per-note encryption layer on top of already-vault-encrypted bytes.
 /// Returns (note_salt, note_nonce, double-encrypted ciphertext).
-#[allow(dead_code)]
 pub fn apply_note_password(
     password: &str,
     vault_ct: &[u8],
@@ -31,8 +30,26 @@ pub fn apply_note_password(
     Ok((salt, nonce, ct))
 }
 
+/// Recover the vault ciphertext from a (possibly) protected note row.
+/// If the note has no password layer, returns the content as-is. If it does,
+/// `password` must be supplied (`None` → `Err`), and a wrong password also errors.
+/// Shared by note_get, transfer send, and export so the peel logic lives once.
+pub fn peel_vault_ct(
+    note_salt: Option<&[u8]>,
+    note_nonce: Option<&[u8]>,
+    content_ct: &[u8],
+    password: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    match (note_salt, note_nonce) {
+        (Some(salt), Some(nonce)) => {
+            let pw = password.ok_or_else(|| anyhow::anyhow!("locked"))?;
+            remove_note_password(pw, salt, nonce, content_ct)
+        }
+        _ => Ok(content_ct.to_vec()),
+    }
+}
+
 /// Strip the per-note encryption layer. Returns the vault-encrypted bytes.
-#[allow(dead_code)]
 pub fn remove_note_password(
     password: &str,
     note_salt: &[u8],

@@ -2,10 +2,14 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { notes, refreshNotes, sortPref, sortNotes, type SortField } from "$lib/stores/notes";
-  import { noteDelete, notePin } from "$lib/tauri";
+  import {
+    noteDelete, notePin,
+    noteProtect, noteUnprotect, noteChangePassword, notesProtect, notesUnprotect,
+  } from "$lib/tauri";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import TransferModal from "$lib/components/TransferModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
+  import PasswordModal from "$lib/components/PasswordModal.svelte";
 
   let filter = $state("");
 
@@ -16,6 +20,35 @@
   let sortOpen = $state(false);
   let menuNoteId = $state<string | null>(null);
   let fabOpen = $state(false);
+
+  type PwMode = "set" | "change" | "remove";
+  let pwModal = $state<{ mode: PwMode; ids: string[]; isBatch: boolean } | null>(null);
+
+  // Only batch set/remove override the modal's default heading; everything else
+  // returns undefined so PasswordModal falls back to its own per-mode title.
+  const pwHeading = $derived(
+    pwModal?.isBatch && pwModal.mode !== "change"
+      ? pwModal.mode === "set"
+        ? `Protect ${pwModal.ids.length} notes`
+        : `Remove protection from ${pwModal.ids.length} notes`
+      : undefined,
+  );
+
+  async function handlePassword(v: { password: string; oldPassword?: string }) {
+    if (!pwModal) return;
+    const { mode, ids, isBatch } = pwModal;
+    if (mode === "set") {
+      if (isBatch) await notesProtect(ids, v.password);
+      else await noteProtect(ids[0], v.password);
+    } else if (mode === "change") {
+      await noteChangePassword(ids[0], v.oldPassword ?? "", v.password);
+    } else {
+      if (isBatch) await notesUnprotect(ids, v.password);
+      else await noteUnprotect(ids[0], v.password);
+    }
+    await refreshNotes();
+    if (isBatch) { selecting = false; selected = new Set(); }
+  }
 
   const fabKinds = [
     { id: "document", icon: "edit_note", label: "Document" },
@@ -210,6 +243,21 @@
                 <span class="material-symbols-outlined" style="font-size: 18px;">edit</span>
                 Edit
               </button>
+              {#if note.has_note_password}
+                <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "change", ids: [note.id], isBatch: false }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">password</span>
+                  Change password
+                </button>
+                <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "remove", ids: [note.id], isBatch: false }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">lock_open</span>
+                  Remove password
+                </button>
+              {:else}
+                <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "set", ids: [note.id], isBatch: false }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">lock</span>
+                  Set password
+                </button>
+              {/if}
               <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); menuNoteId = null; doDelete(note.id); }}>
                 <span class="material-symbols-outlined" style="font-size: 18px;">delete</span>
                 Delete
@@ -252,8 +300,25 @@
 {#if selecting && selected.size > 0}
   <div class="action-bar">
     <span class="sel-count">{selected.size} selected</span>
-    <button class="btn-send" onclick={sendSelected}>Send selected</button>
+    <div class="bar-actions">
+      <button class="btn-ghost" onclick={() => pwModal = { mode: "set", ids: Array.from(selected), isBatch: true }} aria-label="Protect selected">
+        <span class="material-symbols-outlined">lock</span>
+      </button>
+      <button class="btn-ghost" onclick={() => pwModal = { mode: "remove", ids: Array.from(selected), isBatch: true }} aria-label="Remove protection">
+        <span class="material-symbols-outlined">lock_open</span>
+      </button>
+      <button class="btn-send" onclick={sendSelected}>Send selected</button>
+    </div>
   </div>
+{/if}
+
+{#if pwModal}
+  <PasswordModal
+    mode={pwModal.mode}
+    title={pwHeading}
+    onsubmit={handlePassword}
+    onclose={() => pwModal = null}
+  />
 {/if}
 
 {#if transferNoteIds}
@@ -467,6 +532,16 @@
     box-shadow: 0 -4px 16px var(--shadow-color);
   }
   .sel-count { font-size: 0.9rem; color: var(--muted); font-weight: 500; }
+  .bar-actions { display: flex; align-items: center; gap: 0.6rem; }
+  .btn-ghost {
+    width: 40px; height: 40px; border-radius: var(--radius-full);
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-secondary); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s ease;
+  }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+  .btn-ghost .material-symbols-outlined { font-size: 20px; }
   .btn-send {
     padding: 0.6rem 1.4rem; border-radius: var(--radius-full);
     border: none; background: var(--accent); color: var(--on-accent);

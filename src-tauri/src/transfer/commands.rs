@@ -227,6 +227,7 @@ pub async fn note_send(
     note_id: String,
     peer_id: String,
     passphrase: String,
+    note_password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let peer = {
@@ -239,10 +240,11 @@ pub async fn note_send(
     };
 
     let (address, port, via, peer_name) = peer;
+    let note_password = note_password.filter(|s| !s.is_empty());
     let device_name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
     let result = match via {
         TransportKind::Lan => {
-            super::lan::send_note(&state, &note_id, &address, port, &passphrase, &device_name).await
+            super::lan::send_note(&state, &note_id, &address, port, &passphrase, &device_name, note_password.as_deref()).await
         }
         TransportKind::Ble => {
             super::ble::send_note(&state, &note_id, &peer_id).await
@@ -261,6 +263,7 @@ pub async fn notes_send(
     note_ids: Vec<String>,
     peer_id: String,
     passphrase: String,
+    note_password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let peer = {
@@ -273,10 +276,11 @@ pub async fn notes_send(
     };
 
     let (address, port, via, peer_name) = peer;
+    let note_password = note_password.filter(|s| !s.is_empty());
     let device_name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
     let result = match via {
         TransportKind::Lan => {
-            super::lan::send_notes(&state, &note_ids, &address, port, &passphrase, &device_name).await
+            super::lan::send_notes(&state, &note_ids, &address, port, &passphrase, &device_name, note_password.as_deref()).await
         }
         TransportKind::Ble => Err("BLE batch send not supported".into()),
     };
@@ -441,6 +445,21 @@ pub async fn import_blob(
 ///
 /// Older senders may omit origin_device_id/origin_note_id — in that case we
 /// treat the blob as having no stable identity and always insert fresh.
+/// Wrap vault ciphertext in the per-note password layer when a password is
+/// given; otherwise pass it through unprotected. Returns (content_ct, salt, nonce).
+fn seal_content(
+    vault_ct: Vec<u8>,
+    password: Option<&str>,
+) -> anyhow::Result<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> {
+    match password {
+        Some(pw) if !pw.is_empty() => {
+            let (salt, nonce, double_ct) = crate::crypto::note::apply_note_password(pw, &vault_ct)?;
+            Ok((double_ct, Some(salt.to_vec()), Some(nonce.to_vec())))
+        }
+        _ => Ok((vault_ct, None, None)),
+    }
+}
+
 pub async fn import_blob_detailed(
     state: &AppState,
     device_key: &[u8; 32],
@@ -450,7 +469,7 @@ pub async fn import_blob_detailed(
 
     let (title_nonce, title_ct) = encrypt_with_vault(device_key, blob.title.as_bytes())?;
     let content_json = serde_json::to_vec(&blob.content)?;
-    let (content_nonce, content_ct) = encrypt_with_vault(device_key, &content_json)?;
+    let (content_nonce, vault_ct) = encrypt_with_vault(device_key, &content_json)?;
     let tags_json = serde_json::to_string(&blob.tags)?;
 
     let content_hint = infer_content_hint(&blob.kind, &blob.content);
@@ -464,6 +483,26 @@ pub async fn import_blob_detailed(
     };
 
     if let Some(prev) = existing {
+        // Decide how to protect the incoming content. Prefer the sender's
+        // attached password; otherwise inherit the recipient's existing local
+        // protection so a re-send can't silently strip a password they applied.
+        let effective_pw = blob
+            .note_password
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                if prev.note_salt.is_some() {
+                    state.note_password(&prev.id)
+                } else {
+                    None
+                }
+            });
+        if prev.note_salt.is_some() && effective_pw.is_none() {
+            // Locally protected and we have no password to re-protect the new
+            // content with — refuse to overwrite rather than silently expose it.
+            return Ok((prev.id, ImportOutcome::Updated));
+        }
+        let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, effective_pw.as_deref())?;
         let row = NoteRow {
             id: prev.id.clone(),
             kind: blob.kind,
@@ -471,8 +510,8 @@ pub async fn import_blob_detailed(
             title_ct,
             nonce: content_nonce.to_vec(),
             content_ct,
-            note_salt: None,
-            note_nonce: None,
+            note_salt,
+            note_nonce,
             created_at: prev.created_at,
             updated_at: ts,
             tags: tags_json,
@@ -498,6 +537,7 @@ pub async fn import_blob_detailed(
         (state.device_uuid.clone(), id.clone())
     };
 
+    let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, blob.note_password.as_deref())?;
     let row = NoteRow {
         id: id.clone(),
         kind: blob.kind,
@@ -505,8 +545,8 @@ pub async fn import_blob_detailed(
         title_ct,
         nonce: content_nonce.to_vec(),
         content_ct,
-        note_salt: None,
-        note_nonce: None,
+        note_salt,
+        note_nonce,
         created_at: blob.created_at,
         updated_at: ts,
         tags: tags_json,
@@ -552,6 +592,7 @@ mod tests {
             updated_at: 1700000001,
             origin_device_id: "alice-device".into(),
             origin_note_id: "orig-id-from-sender".into(),
+            note_password: None,
         }
     }
 
@@ -563,6 +604,28 @@ mod tests {
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
         assert_eq!(row.kind, "markdown");
         assert!(row.note_salt.is_none());
+    }
+
+    #[tokio::test]
+    async fn import_blob_with_note_password_arrives_protected() {
+        let state = test_state().await;
+        let blob = TransferBlob { note_password: Some("recipient-pw".into()), ..sample_blob() };
+        let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
+        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+
+        // Note is locked on arrival: device key alone can't read the content.
+        assert!(row.note_salt.is_some(), "imported note must be password-protected");
+        assert!(decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct).is_err());
+
+        // The attached password unwraps it.
+        let salt = row.note_salt.clone().unwrap();
+        let nonce = row.note_nonce.clone().unwrap();
+        let vault_ct =
+            crate::crypto::note::remove_note_password("recipient-pw", &salt, &nonce, &row.content_ct)
+                .unwrap();
+        let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct).unwrap();
+        let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
+        assert_eq!(content, blob.content);
     }
 
     #[tokio::test]

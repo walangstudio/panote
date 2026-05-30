@@ -6,11 +6,7 @@ use uuid::Uuid;
 
 /// Load the device key, generating and persisting a new random one on first launch.
 pub async fn get_or_create_device_key(pool: &SqlitePool) -> anyhow::Result<[u8; 32]> {
-    if let Some(row) = sqlx::query("SELECT device_key FROM device_config WHERE id = 1")
-        .fetch_optional(pool)
-        .await?
-    {
-        let bytes: Vec<u8> = row.get("device_key");
+    if let Some(bytes) = device_key_raw(pool).await? {
         if bytes.len() == 32 {
             let mut key = [0u8; 32];
             key.copy_from_slice(&bytes);
@@ -19,11 +15,43 @@ pub async fn get_or_create_device_key(pool: &SqlitePool) -> anyhow::Result<[u8; 
     }
     let mut key = [0u8; 32];
     OsRng.fill_bytes(&mut key);
-    sqlx::query("INSERT INTO device_config (id, device_key) VALUES (1, ?)")
-        .bind(key.as_slice())
+    set_device_key(pool, &key).await?;
+    Ok(key)
+}
+
+/// Raw device_key blob from the device_config row. `None` if the row doesn't
+/// exist (genuine first run); `Some(empty)` after the key was scrubbed into the
+/// OS keychain. Callers must distinguish these to avoid minting a fresh key
+/// (which would orphan every existing note).
+pub async fn device_key_raw(pool: &SqlitePool) -> anyhow::Result<Option<Vec<u8>>> {
+    let row = sqlx::query("SELECT device_key FROM device_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<Vec<u8>, _>("device_key")))
+}
+
+/// Insert or replace the device key. Upsert so it never panics on the
+/// single-row PRIMARY KEY when the row already exists.
+pub async fn set_device_key(pool: &SqlitePool, key: &[u8]) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO device_config (id, device_key) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET device_key = excluded.device_key",
+    )
+    .bind(key)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Blank the plaintext device_key in the DB after it's been moved to the OS
+/// secure store. Keeps the row (device_uuid lives here too); writes a zero-length
+/// blob so the NOT NULL constraint holds.
+pub async fn scrub_device_key(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query("UPDATE device_config SET device_key = ? WHERE id = 1")
+        .bind(Vec::<u8>::new())
         .execute(pool)
         .await?;
-    Ok(key)
+    Ok(())
 }
 
 /// Load the stable device UUID used to mark note origin. Distinct from device_key:

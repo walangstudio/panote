@@ -192,6 +192,7 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         updated_at: row.updated_at,
         origin_device_id: row.origin_device_id,
         origin_note_id: row.origin_note_id,
+        note_password: None,
     }
     .encode()
 }
