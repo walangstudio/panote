@@ -28,6 +28,8 @@
   let myIps = $state<string[]>([]);
   let showQr = $state(false);
   let scanQr = $state(false);
+  let notePassword = $state("");
+  let pwReveal = $state(false);
 
   onMount(async () => {
     recentPeers = await knownPeersList().catch(() => []);
@@ -62,7 +64,7 @@
     if (!selectedPeer) return;
     step = "sending";
     try {
-      await notesSend(noteIds, selectedPeer.id, pairingCode);
+      await notesSend(noteIds, selectedPeer.id, pairingCode, notePassword.trim() || undefined);
       step = "done";
     } catch (e) {
       errorMsg = String(e);
@@ -187,6 +189,25 @@
       {pairingCode.slice(0, 3)}-{pairingCode.slice(3)}
     </div>
     <p class="muted" style="font-size: 0.8rem;">Sending to: <strong>{selectedPeer?.name}</strong></p>
+
+    <div class="section-label" style="margin-top: 1rem;">Protect on recipient device (optional)</div>
+    <p class="muted" style="font-size: 0.78rem; margin-top: 0;">
+      Set a password and the {noteIds.length === 1 ? "note arrives" : "notes arrive"} locked on the other device.
+      Leave blank to send unprotected.
+    </p>
+    <div class="manual-row">
+      <input
+        class="manual-input"
+        style="font-family: inherit;"
+        type={pwReveal ? "text" : "password"}
+        placeholder="New password (optional)"
+        bind:value={notePassword}
+      />
+      <button class="btn-connect" type="button" onclick={() => pwReveal = !pwReveal} aria-label="Toggle password visibility">
+        <span class="material-symbols-outlined" style="font-size: 18px;">{pwReveal ? "visibility_off" : "visibility"}</span>
+      </button>
+    </div>
+
     <div class="actions">
       <button class="btn-cancel" onclick={() => step = "peers"}>Back</button>
       <button class="btn-primary" onclick={confirmSend}>Send</button>

@@ -26,11 +26,17 @@ export interface NoteDetail {
   tags: string[];
   created_at: number;
   updated_at: number;
+  has_note_password: boolean;
   pinned: boolean;
   bg_color?: string;
   bg_image?: string;
   show_preview: boolean;
 }
+
+/// Sentinel error strings shared with the Rust backend (notes/commands.rs).
+/// note_get / note_update return LOCKED when a protected note isn't unlocked.
+export const LOCKED = "locked";
+export const WRONG_PASSWORD = "wrong password";
 
 export interface NoteInput {
   kind: NoteKind;
@@ -83,15 +89,38 @@ export const noteGet = (id: string) =>
 export const notePin = (id: string, pinned: boolean) =>
   invoke<void>("note_pin", { id, pinned });
 
+// Per-note password
+export const noteProtect = (id: string, password: string) =>
+  invoke<void>("note_protect", { id, password });
+export const noteUnprotect = (id: string, password: string) =>
+  invoke<void>("note_unprotect", { id, password });
+export const noteChangePassword = (id: string, oldPassword: string, newPassword: string) =>
+  invoke<void>("note_change_password", { id, oldPassword, newPassword });
+export const noteUnlock = (id: string, password: string) =>
+  invoke<void>("note_unlock", { id, password });
+export const noteLock = (id: string) => invoke<void>("note_lock", { id });
+export const notesProtect = (ids: string[], password: string) =>
+  invoke<void>("notes_protect", { ids, password });
+export const notesUnprotect = (ids: string[], password: string) =>
+  invoke<void>("notes_unprotect", { ids, password });
+
 // Transfer
 export const peersScan = () => invoke<Peer[]>("peers_scan");
 export const peerAddManual = (address: string) =>
   invoke<Peer>("peer_add_manual", { address });
 export const deviceIps = () => invoke<string[]>("device_ips");
-export const noteSend = (noteId: string, peerId: string, passphrase: string) =>
-  invoke<void>("note_send", { noteId, peerId, passphrase });
-export const notesSend = (noteIds: string[], peerId: string, passphrase: string) =>
-  invoke<void>("notes_send", { noteIds, peerId, passphrase });
+export const noteSend = (
+  noteId: string,
+  peerId: string,
+  passphrase: string,
+  notePassword?: string,
+) => invoke<void>("note_send", { noteId, peerId, passphrase, notePassword });
+export const notesSend = (
+  noteIds: string[],
+  peerId: string,
+  passphrase: string,
+  notePassword?: string,
+) => invoke<void>("notes_send", { noteIds, peerId, passphrase, notePassword });
 export const pendingTransfersList = () =>
   invoke<PendingTransfer[]>("pending_transfers_list");
 export const pendingOffersList = () =>

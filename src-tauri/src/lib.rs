@@ -31,10 +31,12 @@ pub fn run() {
             let pool = tauri::async_runtime::block_on(db::init_pool(&db_path_str))
                 .expect("db init failed");
 
-            // Load or generate the device key (random, stored in DB on first launch).
-            let device_key =
-                tauri::async_runtime::block_on(db::queries::get_or_create_device_key(&pool))
-                    .expect("device key init failed");
+            // Load the device key from the OS secure store, migrating it out of
+            // the DB on first run (Android keeps it in the app-private DB).
+            let device_key = tauri::async_runtime::block_on(
+                crypto::keystore::load_or_migrate_device_key(&pool),
+            )
+            .expect("device key init failed");
 
             // Stable device UUID for note origin tracking (separate from device_key).
             let device_uuid =
@@ -86,6 +88,14 @@ pub fn run() {
             note_list,
             note_get,
             note_pin,
+            // Per-note password
+            note_protect,
+            note_unprotect,
+            note_change_password,
+            note_unlock,
+            note_lock,
+            notes_protect,
+            notes_unprotect,
             // Transfer
             start_receiving,
             stop_receiving,
