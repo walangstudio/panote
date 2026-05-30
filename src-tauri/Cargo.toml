@@ -46,3 +46,8 @@ btleplug = "0.11"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 anyhow = "1"
+
+# OS secure store for the device key (Win Credential Manager / macOS Keychain /
+# Linux secret-service). Not available on Android — see crypto::keystore.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

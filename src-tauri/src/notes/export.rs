@@ -139,9 +139,40 @@ pub async fn notes_export(
         .map_err(|e| e.to_string())?;
 
     let mut entries = Vec::with_capacity(rows.len());
-    for row in rows {
+    let mut locked = 0usize;
+    for mut row in rows {
+        // Protected notes carry a password layer over the vault ciphertext. Peel
+        // it with the session-cached password. A note that can't be peeled (not
+        // unlocked this session) is counted, not silently dropped — exporting it
+        // in plaintext anyway would defeat the password, so we fail loudly below.
+        if row.note_salt.is_some() {
+            let password = state.note_password(&row.id);
+            match crate::crypto::note::peel_vault_ct(
+                row.note_salt.as_deref(),
+                row.note_nonce.as_deref(),
+                &row.content_ct,
+                password.as_deref(),
+            ) {
+                Ok(vault_ct) => {
+                    row.content_ct = vault_ct;
+                    row.note_salt = None;
+                    row.note_nonce = None;
+                }
+                Err(_) => {
+                    locked += 1;
+                    continue;
+                }
+            }
+        }
         let entry = row_to_entry(key, &row).map_err(|e| e.to_string())?;
         entries.push(entry);
+    }
+    if locked > 0 {
+        return Err(format!(
+            "{locked} password-protected note(s) must be unlocked before export, \
+             otherwise they would be left out of the backup. Open each protected \
+             note to unlock it this session, then export again."
+        ));
     }
 
     let device_name = crate::transfer::commands::resolve_device_name(&state.db)
@@ -274,6 +305,7 @@ async fn insert_as_blob(
         updated_at: entry.updated_at,
         origin_device_id: entry.origin_device_id.clone(),
         origin_note_id: entry.origin_note_id.clone(),
+        note_password: None,
     };
 
     let (local_id, outcome) = import_blob_detailed(state, &state.device_key, blob).await?;

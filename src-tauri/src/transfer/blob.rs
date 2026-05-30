@@ -20,6 +20,12 @@ pub struct TransferBlob {
     /// Sender's local id for this note. Pair with origin_device_id for dedup.
     #[serde(default)]
     pub origin_note_id: String,
+    /// Optional password the recipient should apply to lock this note on arrival.
+    /// Lets the sender protect the note on the destination without sharing their
+    /// own device password. Travels inside the encrypted payload only. Defaults
+    /// to None (note arrives unprotected, as before).
+    #[serde(default)]
+    pub note_password: Option<String>,
 }
 
 impl TransferBlob {
@@ -48,6 +54,7 @@ mod tests {
             updated_at: 1700000001,
             origin_device_id: "device-a".into(),
             origin_note_id: "test-uuid-1234".into(),
+            note_password: None,
         }
     }
 
