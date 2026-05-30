@@ -416,8 +416,9 @@ pub async fn send_note(
     port: u16,
     passphrase: &str,
     device_name: &str,
+    note_password: Option<&str>,
 ) -> Result<(), String> {
-    let blob_bytes = build_blob(state, note_id)
+    let blob_bytes = build_blob(state, note_id, note_password)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -487,7 +488,20 @@ pub async fn send_notes(
     port: u16,
     passphrase: &str,
     device_name: &str,
+    note_password: Option<&str>,
 ) -> Result<(), String> {
+    // Build every blob up front so a locked or missing note fails before we
+    // connect or transmit anything — otherwise earlier notes would already be
+    // delivered when a later one errors (partial, non-atomic send).
+    let mut blobs = Vec::with_capacity(note_ids.len());
+    for note_id in note_ids {
+        blobs.push(
+            build_blob(state, note_id, note_password)
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+    }
+
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let client_cfg = tls::client_config(state.tofu.clone(), provider)
         .map_err(|e| e.to_string())?;
@@ -535,16 +549,12 @@ pub async fn send_notes(
         return Err("recipient entered the wrong code".into());
     }
 
-    // 4. Send all notes
-    for note_id in note_ids {
-        let blob_bytes = build_blob(state, note_id)
-            .await
-            .map_err(|e| e.to_string())?;
-
+    // 4. Send all notes (blobs were built up front, so no note can fail here).
+    for blob_bytes in &blobs {
         let transfer_salt = random_salt();
         let transfer_key = derive_key(passphrase, &transfer_salt).map_err(|e| e.to_string())?;
         let (transfer_nonce, transfer_ct) =
-            encrypt(&transfer_key, &blob_bytes).map_err(|e| e.to_string())?;
+            encrypt(&transfer_key, blob_bytes).map_err(|e| e.to_string())?;
 
         let msg = Message::SendNote {
             from_peer: device_name.to_string(),
@@ -576,8 +586,15 @@ pub async fn send_notes(
 }
 
 /// Decrypt the note with the device key and return its plaintext bytes.
-async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> {
-    use crate::crypto::note::decrypt_with_vault;
+/// For a protected note the session-cached password is used to peel the
+/// password layer; sending a locked note errors until it's unlocked.
+/// `note_password` is an optional new password to lock the note on the recipient.
+async fn build_blob(
+    state: &AppState,
+    note_id: &str,
+    note_password: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    use crate::crypto::note::{decrypt_with_vault, peel_vault_ct};
 
     let row = queries::note_get(&state.db, note_id)
         .await?
@@ -586,7 +603,24 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
     let title_bytes = decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct)?;
     let title = String::from_utf8(title_bytes)?;
 
-    let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct)?;
+    // A protected note must be unlocked this session to be sent.
+    let password = if row.note_salt.is_some() {
+        Some(
+            state
+                .note_password(note_id)
+                .ok_or_else(|| anyhow::anyhow!("unlock the note before sending"))?,
+        )
+    } else {
+        None
+    };
+    let vault_ct = peel_vault_ct(
+        row.note_salt.as_deref(),
+        row.note_nonce.as_deref(),
+        &row.content_ct,
+        password.as_deref(),
+    )?;
+
+    let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct)?;
     let content: serde_json::Value = serde_json::from_slice(&content_bytes)?;
 
     let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
@@ -601,6 +635,7 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         updated_at: row.updated_at,
         origin_device_id: row.origin_device_id,
         origin_note_id: row.origin_note_id,
+        note_password: note_password.map(|s| s.to_string()),
     };
     blob.encode()
 }

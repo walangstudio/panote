@@ -78,6 +78,9 @@ pub struct AppState {
     pub receiving: Arc<AtomicBool>,
     /// Handle to the listener task so it can be aborted on toggle-off.
     pub listener_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Passwords for notes unlocked this session (note_id -> password).
+    /// In-memory only — cleared on app exit, so protected notes re-prompt on restart.
+    pub unlocked: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[cfg(test)]
@@ -141,7 +144,26 @@ impl AppState {
             offer_responses: Arc::new(Mutex::new(HashMap::new())),
             receiving: Arc::new(AtomicBool::new(false)),
             listener_task: Arc::new(Mutex::new(None)),
+            unlocked: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Record the password that unlocked a note for the rest of the session.
+    pub fn unlock_note(&self, note_id: &str, password: &str) {
+        self.unlocked
+            .lock()
+            .unwrap()
+            .insert(note_id.to_string(), password.to_string());
+    }
+
+    /// Return the cached unlock password for a note, if any.
+    pub fn note_password(&self, note_id: &str) -> Option<String> {
+        self.unlocked.lock().unwrap().get(note_id).cloned()
+    }
+
+    /// Forget a note's cached password (re-locks it for this session).
+    pub fn lock_note(&self, note_id: &str) {
+        self.unlocked.lock().unwrap().remove(note_id);
     }
 
     pub fn add_pending(&self, transfer: PendingTransfer) {

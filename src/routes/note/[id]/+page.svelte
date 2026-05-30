@@ -2,10 +2,15 @@
   import { page } from "$app/state";
   import { onMount } from "svelte";
   import { goto, beforeNavigate } from "$app/navigation";
-  import { noteGet, noteCreate, noteUpdate, type NoteDetail, type NoteKind } from "$lib/tauri";
+  import {
+    noteGet, noteCreate, noteUpdate,
+    noteUnlock, noteLock, noteProtect, noteUnprotect, noteChangePassword,
+    LOCKED, type NoteKind,
+  } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
   import TransferModal from "$lib/components/TransferModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
+  import PasswordModal from "$lib/components/PasswordModal.svelte";
   import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
   import ChecklistEditor from "$lib/components/ChecklistEditor.svelte";
   import KanbanEditor from "$lib/components/KanbanEditor.svelte";
@@ -13,7 +18,7 @@
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { detectFormat } from "$lib/detectFormat";
 
-  const id = $derived(page.params.id);
+  const id = $derived(page.params.id ?? "");
   const isNew = $derived(id === "new");
   const kindParam = $derived((page.url.searchParams.get("kind") ?? "document") as NoteKind);
   const modeParam = $derived(page.url.searchParams.get("mode"));
@@ -21,6 +26,12 @@
   let loading = $state(true);
   let saving = $state(false);
   let error = $state("");
+  let hasPassword = $state(false);
+  let locked = $state(false);
+
+  type PwMode = "set" | "change" | "remove";
+  let pwModal = $state<{ mode: PwMode } | null>(null);
+  let needUnlockForSave = $state(false);
 
   let kind = $state<NoteKind>("document");
   let title = $state("");
@@ -74,6 +85,10 @@
       loading = false;
       return;
     }
+    await loadNote();
+  });
+
+  async function loadNote() {
     try {
       const note = await noteGet(id);
       kind = note.kind;
@@ -83,14 +98,48 @@
       showPreview = note.show_preview;
       bgColor = note.bg_color ?? undefined;
       bgImage = note.bg_image ?? undefined;
+      hasPassword = note.has_note_password;
       savedTitle = title;
       savedContent = JSON.stringify(content);
       savedTags = JSON.stringify(tags);
+      locked = false;
+      error = "";
     } catch (e) {
-      error = String(e);
+      if (String(e) === LOCKED) {
+        locked = true;
+        hasPassword = true;
+      } else {
+        error = String(e);
+      }
     }
     loading = false;
-  });
+  }
+
+  async function unlock(v: { password: string }) {
+    await noteUnlock(id, v.password);
+    await loadNote();
+  }
+
+  async function handlePassword(v: { password: string; oldPassword?: string }) {
+    if (!pwModal) return;
+    const m = pwModal.mode;
+    if (m === "set") await noteProtect(id, v.password);
+    else if (m === "change") await noteChangePassword(id, v.oldPassword ?? "", v.password);
+    else await noteUnprotect(id, v.password);
+    hasPassword = m !== "remove";
+    await refreshNotes();
+  }
+
+  async function lockButtonClick() {
+    if (!hasPassword) {
+      pwModal = { mode: "set" };
+    } else {
+      // Already protected and unlocked this session — re-lock and leave.
+      await noteLock(id);
+      justSaved = true;
+      goto("/");
+    }
+  }
 
   async function save() {
     addTag();
@@ -108,9 +157,21 @@
       justSaved = true;
       goto("/");
     } catch (e) {
-      error = String(e);
+      // The note got re-locked this session (e.g. cache cleared); prompt for the
+      // password and retry the save so the user's edits aren't lost.
+      if (String(e) === LOCKED) {
+        needUnlockForSave = true;
+      } else {
+        error = String(e);
+      }
     }
     saving = false;
+  }
+
+  async function unlockForSave(v: { password: string }) {
+    await noteUnlock(id, v.password);
+    needUnlockForSave = false;
+    await save();
   }
 
   function addTag() {
@@ -168,6 +229,16 @@
 
 {#if loading}
   <div class="loading">Loading…</div>
+{:else if locked}
+  <div class="lock-gate">
+    <span class="material-symbols-outlined lock-gate-icon">lock</span>
+    <p>This note is password-protected.</p>
+  </div>
+  <PasswordModal
+    mode="unlock"
+    onsubmit={unlock}
+    onclose={() => { if (locked) goto("/"); }}
+  />
 {:else}
   <div class="editor-layout"
     style:background-color={bgColor}
@@ -187,6 +258,12 @@
         {saving ? "Saving…" : "Save"}
       </button>
       {#if !isNew}
+        <button class="lock-btn" class:active={hasPassword} onclick={lockButtonClick}
+          aria-label={hasPassword ? "Lock and exit" : "Set password"}>
+          <span class="material-symbols-outlined" style={hasPassword ? "font-variation-settings: 'FILL' 1;" : ""}>
+            {hasPassword ? "lock" : "lock_open"}
+          </span>
+        </button>
         <div class="menu-wrap">
           <button class="menu-btn" onclick={() => menuOpen = !menuOpen} aria-label="More options">
             <span class="material-symbols-outlined">more_vert</span>
@@ -198,6 +275,21 @@
                 <span class="material-symbols-outlined" style="font-size: 18px;">send</span>
                 Send note
               </button></li>
+              {#if hasPassword}
+                <li><button onclick={() => { menuOpen = false; pwModal = { mode: "change" }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">password</span>
+                  Change password
+                </button></li>
+                <li><button class="danger" onclick={() => { menuOpen = false; pwModal = { mode: "remove" }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">lock_open</span>
+                  Remove password
+                </button></li>
+              {:else}
+                <li><button onclick={() => { menuOpen = false; pwModal = { mode: "set" }; }}>
+                  <span class="material-symbols-outlined" style="font-size: 18px;">lock</span>
+                  Set password
+                </button></li>
+              {/if}
             </ul>
           {/if}
         </div>
@@ -299,8 +391,39 @@
   />
 {/if}
 
+{#if pwModal && !locked}
+  <PasswordModal
+    mode={pwModal.mode}
+    onsubmit={handlePassword}
+    onclose={() => pwModal = null}
+  />
+{/if}
+
+{#if needUnlockForSave}
+  <PasswordModal
+    mode="unlock"
+    title="Unlock to save"
+    onsubmit={unlockForSave}
+    onclose={() => needUnlockForSave = false}
+  />
+{/if}
+
 <style>
   .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
+  .lock-gate {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 0.75rem; color: var(--muted);
+  }
+  .lock-gate-icon { font-size: 48px; opacity: 0.5; }
+  .lock-btn {
+    background: var(--accent-muted); border: none; border-radius: var(--radius-full);
+    color: var(--accent); cursor: pointer; padding: 0.35rem; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s ease;
+  }
+  .lock-btn:hover { background: var(--accent); color: var(--on-accent); }
+  .lock-btn.active { color: var(--accent); }
+  .lock-btn .material-symbols-outlined { font-size: 20px; }
   .editor-layout { display: flex; flex-direction: column; height: 100%; }
   header {
     display: flex; align-items: center; gap: 0.75rem;
@@ -461,4 +584,5 @@
     transition: background 0.1s ease;
   }
   .menu-dropdown li button:hover { background: var(--hover); }
+  .menu-dropdown li button.danger { color: var(--error); }
 </style>
