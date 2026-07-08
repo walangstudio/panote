@@ -22,14 +22,26 @@
   let receiving = $state(false);
   let showNewNote = $state(false);
 
+  function startPoll() {
+    if (pollTimer) return;
+    pollOffers();
+    pollTimer = setInterval(pollOffers, 3000);
+  }
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    offers = [];
+  }
+
   async function toggleReceive() {
     try {
       if (receiving) {
         await stopReceiving();
         receiving = false;
+        stopPoll();
       } else {
         await startReceiving();
         receiving = true;
+        startPoll();
       }
     } catch {}
   }
@@ -41,14 +53,15 @@
   onMount(async () => {
     unsubTheme = initTheme();
     if (!isTauri) return;
-    pollOffers();
-    pollTimer = setInterval(pollOffers, 3000);
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
     unlistenReceived = await listen("notes-received", () => {
       pollOffers();
       refreshNotes();
     });
-    try { receiving = await checkReceiving(); } catch {}
+    try {
+      receiving = await checkReceiving();
+      if (receiving) startPoll();
+    } catch {}
   });
 
   onDestroy(() => {

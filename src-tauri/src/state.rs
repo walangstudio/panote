@@ -81,6 +81,10 @@ pub struct AppState {
     /// Passwords for notes unlocked this session (note_id -> password).
     /// In-memory only — cleared on app exit, so protected notes re-prompt on restart.
     pub unlocked: Arc<Mutex<HashMap<String, String>>>,
+    /// Recent transfer-offer timestamps per peer address, for rate-limiting (N2).
+    pub offer_attempts: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+    /// Consecutive failed pairing-passphrase attempts per peer address, for lockout (K5).
+    pub passphrase_failures: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 #[cfg(test)]
@@ -127,6 +131,24 @@ mod tests {
         let state = test_state().await;
         assert!(state.peek_pending("no-such-id").is_none());
     }
+
+    #[tokio::test]
+    async fn offer_attempts_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.allow_offer_attempt(&format!("10.0.0.{i}"));
+        }
+        assert!(state.offer_attempts.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
+    }
+
+    #[tokio::test]
+    async fn passphrase_failures_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.record_passphrase_failure(&format!("10.0.0.{i}"));
+        }
+        assert!(state.passphrase_failures.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
+    }
 }
 
 impl AppState {
@@ -145,7 +167,78 @@ impl AppState {
             receiving: Arc::new(AtomicBool::new(false)),
             listener_task: Arc::new(Mutex::new(None)),
             unlocked: Arc::new(Mutex::new(HashMap::new())),
+            offer_attempts: Arc::new(Mutex::new(HashMap::new())),
+            passphrase_failures: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Cap on distinct peer keys tracked by `offer_attempts` / `passphrase_failures`.
+    /// Without this, a spray of one-off source IPs would grow both maps for
+    /// the process lifetime (unbounded memory) since neither is otherwise
+    /// pruned by key count — only by the offer-window retention inside a
+    /// single key's own timestamp list.
+    // ponytail: a real DoS is better mitigated by K10's inbound connection
+    // semaphore than by this map cap; this just bounds worst-case memory.
+    const MAX_TRACKED_PEERS: usize = 1024;
+
+    /// Rate-limit transfer-offer creation per peer address (N2): at most
+    /// `MAX_OFFERS_PER_WINDOW` offers per `OFFER_WINDOW_SECS` per peer.
+    /// Records the attempt and returns whether it's still within budget.
+    pub fn allow_offer_attempt(&self, peer_addr: &str) -> bool {
+        const OFFER_WINDOW_SECS: i64 = 60;
+        const MAX_OFFERS_PER_WINDOW: usize = 10;
+
+        let now = now_secs();
+        let mut attempts = self.offer_attempts.lock().unwrap();
+
+        // Opportunistically drop peers whose whole window has expired so the
+        // map doesn't grow unbounded across many distinct source IPs.
+        attempts.retain(|_, timestamps| {
+            timestamps.retain(|&t| now - t < OFFER_WINDOW_SECS);
+            !timestamps.is_empty()
+        });
+
+        if !attempts.contains_key(peer_addr) && attempts.len() >= Self::MAX_TRACKED_PEERS {
+            // Still too many distinct peers after pruning stale ones — evict
+            // the least-recently-active entry rather than grow forever.
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, v)| v.iter().max().copied().unwrap_or(i64::MIN))
+                .map(|(k, _)| k.clone())
+            {
+                attempts.remove(&oldest);
+            }
+        }
+
+        let entry = attempts.entry(peer_addr.to_string()).or_default();
+        if entry.len() >= MAX_OFFERS_PER_WINDOW {
+            return false;
+        }
+        entry.push(now);
+        true
+    }
+
+    /// Whether `peer_addr` is locked out of pairing-passphrase attempts (K5).
+    pub fn passphrase_locked_out(&self, peer_addr: &str) -> bool {
+        const MAX_FAILURES: u32 = 5;
+        *self.passphrase_failures.lock().unwrap().get(peer_addr).unwrap_or(&0) >= MAX_FAILURES
+    }
+
+    pub fn record_passphrase_failure(&self, peer_addr: &str) {
+        let mut failures = self.passphrase_failures.lock().unwrap();
+        if !failures.contains_key(peer_addr) && failures.len() >= Self::MAX_TRACKED_PEERS {
+            // No timestamps here to pick a true least-recently-used entry —
+            // evict an arbitrary one so the map can't grow unbounded across
+            // many distinct source IPs. Good enough for a cap, not a real LRU.
+            if let Some(k) = failures.keys().next().cloned() {
+                failures.remove(&k);
+            }
+        }
+        *failures.entry(peer_addr.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn reset_passphrase_failures(&self, peer_addr: &str) {
+        self.passphrase_failures.lock().unwrap().remove(peer_addr);
     }
 
     /// Record the password that unlocked a note for the rest of the session.

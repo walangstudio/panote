@@ -224,11 +224,11 @@ pub async fn notes_import(
 // ----- Helpers -----
 
 fn row_to_entry(key: &[u8; 32], row: &NoteRow) -> anyhow::Result<NoteExportEntryV1> {
-    let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct)?;
+    let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct, row.id.as_bytes())?;
     let title = String::from_utf8(title_bytes)?;
-    let content_bytes = decrypt_with_vault(key, &row.nonce, &row.content_ct)?;
+    let content_bytes = decrypt_with_vault(key, &row.nonce, &row.content_ct, row.id.as_bytes())?;
     let content: serde_json::Value = serde_json::from_slice(&content_bytes)?;
-    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
+    let tags = crate::notes::commands::decrypt_tags(key, &row.id, &row.tags)?;
 
     Ok(NoteExportEntryV1 {
         id: row.id.clone(),

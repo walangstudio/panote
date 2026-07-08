@@ -8,7 +8,7 @@
     LOCKED, type NoteKind,
   } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
-  import TransferModal from "$lib/components/TransferModal.svelte";
+  import { recordNoteSaved } from "$lib/gamekit/store";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
@@ -49,6 +49,63 @@
   let savedTags = $state("[]");
   let justSaved = $state(false);
   let pendingNavUrl = $state<string | null>(null);
+  let updatedAt = $state<number | undefined>();
+
+  // Auto-contrast ink for custom backgrounds
+  let imgInkResolved = $state<"dark" | "light" | null>(null);
+
+  // ponytail: defense in depth — backend already validates bg_image is a data:image/... URI.
+  function safeBgImageUrl(bgImage: string | undefined): string | undefined {
+    return bgImage && bgImage.startsWith("data:image/") ? `url(${bgImage})` : undefined;
+  }
+
+  function isLightColor(c: string): boolean {
+    const hex = c.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    let r: number, g: number, b: number;
+    if (hex) {
+      let h = hex[1];
+      if (h.length === 3) h = h.split("").map(x => x + x).join("");
+      r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+    } else {
+      const m = c.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+      if (!m) return true;
+      r = +m[1]; g = +m[2]; b = +m[3];
+    }
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6;
+  }
+
+  function analyzeImageInk(url: string) {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = 16; c.height = 16;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(img, 0, 0, 16, 16);
+        const d = ctx.getImageData(0, 0, 16, 16).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        imgInkResolved = sum / (d.length / 4) / 255 > 0.6 ? "dark" : "light";
+      } catch { imgInkResolved = "dark"; }
+    };
+    img.onerror = () => { imgInkResolved = "dark"; };
+    img.src = url;
+  }
+
+  $effect(() => {
+    if (bgImage) {
+      analyzeImageInk(bgImage);
+    } else {
+      imgInkResolved = null;
+    }
+  });
+
+  const editorInk = $derived((): "dark" | "light" | null => {
+    if (bgColor) return isLightColor(bgColor) ? "dark" : "light";
+    if (bgImage) return imgInkResolved ?? "dark";
+    return null;
+  });
 
   const dirty = $derived(
     !justSaved && (
@@ -99,6 +156,7 @@
       bgColor = note.bg_color ?? undefined;
       bgImage = note.bg_image ?? undefined;
       hasPassword = note.has_note_password;
+      updatedAt = note.updated_at;
       savedTitle = title;
       savedContent = JSON.stringify(content);
       savedTags = JSON.stringify(tags);
@@ -134,7 +192,6 @@
     if (!hasPassword) {
       pwModal = { mode: "set" };
     } else {
-      // Already protected and unlocked this session — re-lock and leave.
       await noteLock(id);
       justSaved = true;
       goto("/");
@@ -153,12 +210,12 @@
       } else {
         await noteUpdate(id, input);
       }
+      // Gamification — never let a tracking error block the save.
+      try { await recordNoteSaved({ isNew, kind, content }); } catch (e) { console.error("gamekit", e); }
       await refreshNotes();
       justSaved = true;
       goto("/");
     } catch (e) {
-      // The note got re-locked this session (e.g. cache cleared); prompt for the
-      // password and retry the save so the user's edits aren't lost.
       if (String(e) === LOCKED) {
         needUnlockForSave = true;
       } else {
@@ -225,85 +282,256 @@
     if (k === "table") return { columns: [], rows: [] };
     return {};
   }
+
+  function formatRelative(unixSecs: number): string {
+    const HOUR = 3_600_000, DAY = 24 * HOUR;
+    const diff = Date.now() - unixSecs * 1000;
+    if (diff < HOUR) return Math.max(1, Math.round(diff / 60_000)) + "m";
+    if (diff < DAY) return Math.round(diff / HOUR) + "h";
+    if (diff < 7 * DAY) return Math.round(diff / DAY) + "d";
+    return new Date(unixSecs * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  // Channel colors by kind (mirrors home screen kindColor map)
+  const kindChannel: Record<string, "accent" | "secondary" | "tertiary"> = {
+    document: "accent",
+    table: "secondary",
+    checklist: "tertiary",
+    kanban: "tertiary",
+  };
+  const kindIconName: Record<string, string> = {
+    document: "edit_note",
+    table: "table_chart",
+    checklist: "checklist",
+    kanban: "view_kanban",
+  };
+  const kindLabel: Record<string, string> = {
+    document: "Document",
+    table: "Table",
+    checklist: "Checklist",
+    kanban: "Kanban",
+  };
+
+  const BG_SWATCHES: (string | null)[] = [
+    null, "#ffe3f1", "#ffe9c7", "#fff7c2", "#d9f5e0", "#cdeeff", "#e7dcff", "#f3dcec",
+  ];
+
+  // Title textarea auto-grow
+  function autoGrowTitle(node: HTMLTextAreaElement) {
+    function resize() {
+      node.style.height = "auto";
+      node.style.height = node.scrollHeight + "px";
+    }
+    node.addEventListener("input", resize);
+    resize();
+    return { destroy() { node.removeEventListener("input", resize); } };
+  }
+
+  // LockGate inline state
+  let lockPw = $state("");
+  let lockPwErr = $state(false);
+
+  async function inlineUnlock() {
+    if (!lockPw) { lockPwErr = true; return; }
+    try {
+      await noteUnlock(id, lockPw);
+      lockPw = "";
+      lockPwErr = false;
+      await loadNote();
+    } catch {
+      lockPwErr = true;
+    }
+  }
 </script>
 
 {#if loading}
   <div class="loading">Loading…</div>
 {:else if locked}
   <div class="lock-gate">
-    <span class="material-symbols-outlined lock-gate-icon">lock</span>
-    <p>This note is password-protected.</p>
+    <div class="lock-gate-circle">
+      <span class="material-symbols-outlined" style="font-size: 36px; font-variation-settings: 'FILL' 1;">lock</span>
+    </div>
+    <div class="lock-gate-text">
+      <div class="lock-gate-title">This note is locked</div>
+      <div class="lock-gate-sub">Enter the password to view it.</div>
+    </div>
+    <input
+      type="password"
+      class="lock-gate-input"
+      class:error={lockPwErr}
+      placeholder="Password"
+      bind:value={lockPw}
+      autofocus
+      oninput={() => lockPwErr = false}
+      onkeydown={(e) => { if (e.key === "Enter") inlineUnlock(); }}
+    />
+    <button class="unlock-btn" onclick={inlineUnlock}>
+      <span class="material-symbols-outlined" style="font-size: 20px; font-variation-settings: 'wght' 600;">lock_open</span>
+      Unlock
+    </button>
   </div>
-  <PasswordModal
-    mode="unlock"
-    onsubmit={unlock}
-    onclose={() => { if (locked) goto("/"); }}
-  />
 {:else}
-  <div class="editor-layout"
+  <div
+    class="editor-layout"
+    class:dark-ink={editorInk() === "dark"}
+    class:light-ink={editorInk() === "light"}
+    class:has-bg-image={!!bgImage}
     style:background-color={bgColor}
-    style:background-image={bgImage ? `url(${bgImage})` : undefined}
+    style:background-image={safeBgImageUrl(bgImage)}
     style:background-size={bgImage ? "cover" : undefined}
     style:background-position={bgImage ? "center" : undefined}
   >
-    <header>
-      <button class="header-menu-btn" onclick={() => $sidebarOpen = true} aria-label="Open menu">
-        <span class="material-symbols-outlined">menu</span>
-      </button>
-      <a href="/" class="back">
-        <span class="material-symbols-outlined">arrow_back</span>
+    <!-- Glass sticky header -->
+    <header class="editor-header">
+      <a href="/" class="round-icon" aria-label="Back">
+        <span class="material-symbols-outlined" style="font-size: 20px;">arrow_back</span>
       </a>
-      <input class="title-input" placeholder="Title…" bind:value={title} />
-      <button class="save-btn" onclick={save} disabled={saving}>
-        {saving ? "Saving…" : "Save"}
-      </button>
+      <div class="header-spacer"></div>
+      <!-- Kind chip -->
+      <div class="kind-chip {kindChannel[kind] ?? 'accent'}">
+        <span class="material-symbols-outlined" style="font-size: 16px; font-variation-settings: 'FILL' 1;">{kindIconName[kind] ?? "edit_note"}</span>
+        {kindLabel[kind] ?? kind}
+      </div>
+      <!-- more_vert overflow trigger -->
       {#if !isNew}
-        <button class="lock-btn" class:active={hasPassword} onclick={lockButtonClick}
-          aria-label={hasPassword ? "Lock and exit" : "Set password"}>
-          <span class="material-symbols-outlined" style={hasPassword ? "font-variation-settings: 'FILL' 1;" : ""}>
-            {hasPassword ? "lock" : "lock_open"}
-          </span>
+        <button
+          class="bare-icon"
+          class:active={menuOpen}
+          onclick={() => menuOpen = !menuOpen}
+          aria-label="More options"
+        >
+          <span class="material-symbols-outlined" style="font-size: 22px; font-variation-settings: 'FILL' {menuOpen ? 1 : 0};">more_vert</span>
         </button>
-        <div class="menu-wrap">
-          <button class="menu-btn" onclick={() => menuOpen = !menuOpen} aria-label="More options">
-            <span class="material-symbols-outlined">more_vert</span>
-          </button>
-          {#if menuOpen}
-            <div class="menu-backdrop" role="presentation" onclick={() => menuOpen = false}></div>
-            <ul class="menu-dropdown">
-              <li><button onclick={() => { menuOpen = false; transferOpen = true; }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;">send</span>
-                Send note
-              </button></li>
-              {#if hasPassword}
-                <li><button onclick={() => { menuOpen = false; pwModal = { mode: "change" }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">password</span>
-                  Change password
-                </button></li>
-                <li><button class="danger" onclick={() => { menuOpen = false; pwModal = { mode: "remove" }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">lock_open</span>
-                  Remove password
-                </button></li>
-              {:else}
-                <li><button onclick={() => { menuOpen = false; pwModal = { mode: "set" }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">lock</span>
-                  Set password
-                </button></li>
-              {/if}
-            </ul>
-          {/if}
-        </div>
       {/if}
     </header>
 
-    <div class="meta">
-      <div class="tags">
-        {#each tags as t}<span class="tag">{t}<button onclick={() => removeTag(t)}>
-          <span class="material-symbols-outlined" style="font-size: 14px;">close</span>
-        </button></span>{/each}
+    <!-- Overflow dropdown -->
+    {#if menuOpen}
+      <div class="menu-backdrop" role="presentation" onclick={() => menuOpen = false}></div>
+      <div class="overflow-menu">
+        <button class="overflow-item" onclick={() => { menuOpen = false; bgMenuOpen = true; }}>
+          <span class="material-symbols-outlined" style="font-size: 20px;">palette</span>
+          Background
+        </button>
+        <button class="overflow-item" onclick={() => { menuOpen = false; transferOpen = true; }}>
+          <span class="material-symbols-outlined" style="font-size: 20px;">send</span>
+          Transfer
+        </button>
+        {#if hasPassword}
+          <button class="overflow-item" onclick={() => { menuOpen = false; pwModal = { mode: "change" }; }}>
+            <span class="material-symbols-outlined" style="font-size: 20px;">password</span>
+            Change password
+          </button>
+          <button class="overflow-item" onclick={() => { menuOpen = false; pwModal = { mode: "remove" }; }}>
+            <span class="material-symbols-outlined" style="font-size: 20px;">lock_open</span>
+            Remove password
+          </button>
+        {:else}
+          <button class="overflow-item" onclick={() => { menuOpen = false; lockButtonClick(); }}>
+            <span class="material-symbols-outlined" style="font-size: 20px;">lock</span>
+            Set password
+          </button>
+        {/if}
+        <div class="overflow-divider"></div>
+        <button class="overflow-item danger" onclick={() => { menuOpen = false; }}>
+          <span class="material-symbols-outlined" style="font-size: 20px;">delete</span>
+          Delete
+        </button>
+      </div>
+    {/if}
+
+    <!-- Content area -->
+    <div class="editor-content">
+      <!-- Title -->
+      <textarea
+        class="title-input"
+        placeholder="Untitled"
+        bind:value={title}
+        rows={1}
+        use:autoGrowTitle
+      ></textarea>
+
+      <!-- Edited subline -->
+      {#if updatedAt}
+        <div class="edited-line">Edited {formatRelative(updatedAt)} ago</div>
+      {/if}
+
+      {#if error}<p class="error">{error}</p>{/if}
+
+      <!-- Background sheet (inline, below title) -->
+      {#if bgMenuOpen}
+        <div class="bg-sheet">
+          <div class="bg-sheet-header">
+            <span class="bg-sheet-label">Background</span>
+            <button class="bare-icon small" onclick={() => bgMenuOpen = false} aria-label="Close">
+              <span class="material-symbols-outlined" style="font-size: 20px;">close</span>
+            </button>
+          </div>
+          <div class="bg-swatches">
+            {#each BG_SWATCHES as c}
+              <button
+                class="swatch"
+                class:active={c === null ? (!bgColor && !bgImage) : bgColor === c}
+                style:background-color={c ?? undefined}
+                style:background={c === null ? "var(--surface)" : undefined}
+                aria-label={c ?? "none"}
+                onclick={() => { bgColor = c ?? undefined; bgImage = undefined; }}
+              >
+                {#if c === null}
+                  <span class="material-symbols-outlined" style="font-size: 16px; color: var(--muted);">format_color_reset</span>
+                {/if}
+              </button>
+            {/each}
+            <!-- Image swatch -->
+            <button
+              class="swatch image-swatch"
+              class:active={!!bgImage}
+              aria-label="image"
+              onclick={() => document.getElementById("bg-file-input-editor")?.click()}
+            >
+              <span class="material-symbols-outlined" style="font-size: 16px; color: var(--muted);">image</span>
+            </button>
+          </div>
+          <input type="file" accept="image/png,image/jpeg,image/webp,image/gif"
+            class="bg-file-input" id="bg-file-input-editor" onchange={handleBgImageUpload} />
+          {#if bgImage}
+            <div class="bg-preview-row">
+              <span class="bg-preview-thumb" style:background-image={safeBgImageUrl(bgImage)}></span>
+              <button class="bg-clear-btn" onclick={() => { bgImage = undefined; }}>
+                <span class="material-symbols-outlined" style="font-size: 14px;">close</span>
+                Remove
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Body editors -->
+      <div class="editor-body">
+        {#if kind === "document"}
+          <MarkdownEditor bind:content initialPreview={modeParam === "edit" ? false : modeParam === "view" ? true : !isNew} />
+        {:else if kind === "checklist"}
+          <ChecklistEditor bind:content />
+        {:else if kind === "kanban"}
+          <KanbanEditor bind:content />
+        {:else if kind === "table"}
+          <TableEditor bind:content />
+        {/if}
+      </div>
+
+      <!-- Tags -->
+      <div class="tags-row">
+        {#each tags as t}
+          <span class="tag-chip">
+            #{t}
+            <button class="tag-remove" onclick={() => removeTag(t)} aria-label="Remove tag">
+              <span class="material-symbols-outlined" style="font-size: 13px;">close</span>
+            </button>
+          </span>
+        {/each}
         <input
           class="tag-input"
-          placeholder="Add tags, comma separated…"
+          placeholder="+ tag"
           bind:value={tagInput}
           enterkeyhint="done"
           onkeydown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); } }}
@@ -313,70 +541,23 @@
       </div>
     </div>
 
-    {#if error}<p class="error">{error}</p>{/if}
-
-    {#if transferOpen}
-      <TransferModal noteIds={id ? [id] : []} onclose={() => transferOpen = false} />
-    {/if}
-
-    <div class="editor-body">
-      {#if kind === "document"}
-        <MarkdownEditor bind:content initialPreview={modeParam === "edit" ? false : modeParam === "view" ? true : !isNew} />
-      {:else if kind === "checklist"}
-        <ChecklistEditor bind:content />
-      {:else if kind === "kanban"}
-        <KanbanEditor bind:content />
-      {:else if kind === "table"}
-        <TableEditor bind:content />
-      {/if}
-    </div>
-
+    <!-- Footer -->
     <div class="editor-footer">
       <label class="preview-toggle">
         <input type="checkbox" bind:checked={showPreview} />
         <span>Show preview on list</span>
       </label>
-      <div class="bg-wrap">
-        <button class="bg-toggle" onclick={() => bgMenuOpen = !bgMenuOpen} aria-label="Background">
-          <span class="material-symbols-outlined" style="font-size: 18px;">palette</span>
-        </button>
-        {#if bgMenuOpen}
-          <div class="bg-backdrop" role="presentation" onclick={() => bgMenuOpen = false}></div>
-          <div class="bg-picker">
-            <div class="bg-swatches">
-              <button class="swatch clear" class:active={!bgColor} onclick={() => { bgColor = undefined; bgImage = undefined; }}
-                aria-label="Clear">
-                <span class="material-symbols-outlined" style="font-size: 16px;">block</span>
-              </button>
-              {#each ["#fef3c7","#dcfce7","#dbeafe","#f3e8ff","#fce7f3","#ffedd5","#e0f2fe","#f1f5f9"] as c}
-                <button class="swatch" class:active={bgColor === c} style:background-color={c}
-                  onclick={() => { bgColor = c; bgImage = undefined; }}></button>
-              {/each}
-            </div>
-            <input class="bg-url-input" type="text" placeholder="Background image URL…"
-              value={bgImage ?? ""}
-              onchange={(e) => { bgImage = (e.target as HTMLInputElement).value || undefined; }} />
-            <div class="bg-upload-row">
-              <input type="file" accept="image/png,image/jpeg,image/webp,image/gif"
-                class="bg-file-input" id="bg-file-input" onchange={handleBgImageUpload} />
-              <label for="bg-file-input" class="bg-upload-btn">
-                <span class="material-symbols-outlined" style="font-size: 16px;">upload</span>
-                Upload image
-              </label>
-            </div>
-            {#if bgImage}
-              <div class="bg-preview-row">
-                <span class="bg-preview-thumb" style:background-image="url({bgImage})"></span>
-                <button class="bg-clear-btn" onclick={() => { bgImage = undefined; }}>
-                  <span class="material-symbols-outlined" style="font-size: 14px;">close</span>
-                  Remove
-                </button>
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
+      <div class="footer-spacer"></div>
+      <button class="save-btn" onclick={save} disabled={saving}>
+        {saving ? "Saving…" : "Save"}
+      </button>
     </div>
+
+    {#if transferOpen}
+      {#await import("$lib/components/TransferModal.svelte") then { default: TransferModal }}
+        <TransferModal noteIds={id ? [id] : []} onclose={() => transferOpen = false} />
+      {/await}
+    {/if}
   </div>
 {/if}
 
@@ -409,144 +590,191 @@
 {/if}
 
 <style>
-  .loading { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--muted); }
-  .lock-gate {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    height: 100%; gap: 0.75rem; color: var(--muted);
-  }
-  .lock-gate-icon { font-size: 48px; opacity: 0.5; }
-  .lock-btn {
-    background: var(--accent-muted); border: none; border-radius: var(--radius-full);
-    color: var(--accent); cursor: pointer; padding: 0.35rem; flex-shrink: 0;
+  /* ── Loading ── */
+  .loading {
     display: flex; align-items: center; justify-content: center;
-    transition: all 0.15s ease;
-  }
-  .lock-btn:hover { background: var(--accent); color: var(--on-accent); }
-  .lock-btn.active { color: var(--accent); }
-  .lock-btn .material-symbols-outlined { font-size: 20px; }
-  .editor-layout { display: flex; flex-direction: column; height: 100%; }
-  header {
-    display: flex; align-items: center; gap: 0.75rem;
-    padding: 0.75rem 1.5rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 2px 12px var(--shadow-color);
-  }
-  .header-menu-btn {
-    background: none; border: none; cursor: pointer; color: var(--text-secondary);
-    display: flex; align-items: center; padding: 0.25rem; border-radius: var(--radius-full);
-    flex-shrink: 0; transition: all 0.15s ease;
-  }
-  .header-menu-btn:hover { color: var(--accent); background: var(--accent-muted); }
-  .back {
-    text-decoration: none; color: var(--accent);
-    width: 36px; height: 36px; border-radius: var(--radius-full);
-    background: var(--accent-muted); display: flex; align-items: center; justify-content: center;
-    transition: all 0.15s ease; flex-shrink: 0;
-  }
-  .back:hover { background: var(--accent); color: var(--on-accent); }
-  .title-input {
-    flex: 1; font-size: 1.2rem; font-weight: 900;
-    border: none; background: transparent; color: var(--text); outline: none;
-  }
-  .title-input::placeholder { color: var(--muted); }
-  .save-btn {
-    padding: 0.5rem 1.25rem; border-radius: var(--radius-full);
-    border: none; background: var(--accent); color: var(--on-accent);
-    font-weight: 700; cursor: pointer;
-    box-shadow: 0 2px 8px var(--shadow-color);
-    transition: transform 0.1s ease;
-  }
-  .save-btn:hover { transform: scale(1.03); }
-  .save-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-  @media (max-width: 640px) {
-    header { padding: 0.5rem 0.75rem; gap: 0.5rem; }
-    .title-input { font-size: 1rem; min-width: 0; }
-    .save-btn { padding: 0.45rem 0.85rem; flex-shrink: 0; }
-  }
-  .meta {
-    display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
-    padding: 0.6rem 1.5rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-container);
-  }
-  .editor-footer {
-    display: flex; align-items: center; gap: 0.75rem;
-    padding: 0.5rem 1.5rem;
-    border-top: 1px solid var(--border);
-    background: var(--surface-container);
-    flex-shrink: 0;
+    height: 100%; color: var(--muted);
   }
 
-  .tags { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-  .tag {
-    display: inline-flex; align-items: center; gap: 2px;
+  /* ── Lock gate ── */
+  .lock-gate {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; padding: 3rem 1.5rem; text-align: center; min-height: 100%;
+  }
+  .lock-gate-circle {
+    width: 72px; height: 72px; border-radius: var(--radius-full);
     background: var(--accent-muted); color: var(--accent);
-    border-radius: var(--radius-full); padding: 3px 10px; font-size: 0.78rem; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
   }
-  .tag button {
-    background: none; border: none; cursor: pointer; color: inherit; padding: 0;
-    display: flex; align-items: center;
+  .lock-gate-title { font-weight: 700; font-size: 1.05rem; margin-bottom: 4px; }
+  .lock-gate-sub { color: var(--muted); font-size: 0.85rem; }
+  .lock-gate-input {
+    width: 100%; max-width: 260px; padding: 0.7rem 1rem; text-align: center;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text);
+    font-family: inherit; font-size: 0.95rem; outline: none;
+    transition: border-color 0.15s ease;
   }
-  .tag-input {
-    border: none; background: transparent; color: var(--text);
-    font-size: 0.85rem; outline: none; min-width: 180px; flex: 1;
+  .lock-gate-input:focus { border-color: var(--accent); }
+  .lock-gate-input.error { border-color: var(--error); }
+  .unlock-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 0.7rem 1.2rem; border: none; cursor: pointer;
+    border-radius: var(--radius-full); font-family: inherit;
+    font-size: 0.95rem; font-weight: 700;
+    background: var(--accent); color: var(--on-accent);
+    box-shadow: 0 2px 8px var(--shadow-color);
+    transition: transform 0.12s ease;
   }
-  .tag-input::placeholder { color: var(--muted); }
-  .preview-toggle {
-    display: flex; align-items: center; gap: 0.4rem;
-    font-size: 0.78rem; color: var(--text-secondary); cursor: pointer; white-space: nowrap;
+  .unlock-btn:hover { transform: scale(1.03); }
+
+  /* ── Layout ── */
+  .editor-layout {
+    display: flex; flex-direction: column; min-height: 100%;
+    position: relative;
   }
-  .preview-toggle input { accent-color: var(--accent); cursor: pointer; }
-  .bg-wrap { position: relative; flex-shrink: 0; }
-  .bg-toggle {
-    background: none; border: none; cursor: pointer; color: var(--text-secondary);
-    display: flex; align-items: center; padding: 0.25rem; border-radius: var(--radius-full);
-    transition: all 0.15s ease;
+  .editor-layout.has-bg-image {
+    background-size: cover; background-position: center;
   }
-  .bg-toggle:hover { color: var(--accent); background: var(--accent-muted); }
-  .bg-backdrop {
-    position: fixed; inset: 0; z-index: 19;
-    background: rgba(0,0,0,0.35); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px);
+  /* Overlay tint for image backgrounds so content stays legible */
+  .editor-layout.has-bg-image.dark-ink::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background: rgba(255,255,255,0.45);
   }
-  .bg-picker {
-    position: fixed; inset: 0; z-index: 20;
-    margin: auto; width: fit-content; height: fit-content;
-    background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 1rem; min-width: 220px;
+  .editor-layout.has-bg-image.light-ink::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background: rgba(0,0,0,0.4);
+  }
+  .editor-layout > * { position: relative; z-index: 1; }
+
+  /* ── Glass sticky header ── */
+  .editor-header {
+    position: sticky; top: 0; z-index: 15;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0.7rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-glass);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  }
+  .header-spacer { flex: 1; }
+
+  /* RoundIcon — 36px circle, accent-muted bg, accent color */
+  .round-icon {
+    width: 36px; height: 36px; border-radius: var(--radius-full);
+    display: flex; align-items: center; justify-content: center;
+    background: var(--accent-muted); color: var(--accent);
+    text-decoration: none; flex-shrink: 0;
+    transition: background 0.15s ease, color 0.15s ease;
+    border: none; cursor: pointer;
+  }
+  .round-icon:hover { background: var(--accent); color: var(--on-accent); }
+
+  /* Kind chip pill */
+  .kind-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0.3rem 0.7rem 0.3rem 0.5rem;
+    border-radius: var(--radius-full);
+    font-size: 0.78rem; font-weight: 700;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .kind-chip.accent   { background: var(--accent-surface);    color: var(--accent); }
+  .kind-chip.secondary { background: var(--secondary-surface); color: var(--secondary); }
+  .kind-chip.tertiary  { background: var(--tertiary-surface);  color: var(--tertiary); }
+
+  /* BareIcon — no border/bg, hover → accent-muted pill */
+  .bare-icon {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-full); border: none; cursor: pointer;
+    background: transparent; color: var(--text-secondary);
+    transition: background 0.15s ease, color 0.15s ease;
+    flex-shrink: 0;
+  }
+  .bare-icon:hover { background: var(--accent-muted); color: var(--accent); }
+  .bare-icon.active { color: var(--accent); }
+  .bare-icon.small { width: 28px; height: 28px; }
+
+  /* ── Overflow dropdown ── */
+  .menu-backdrop { position: fixed; inset: 0; z-index: 19; }
+  .overflow-menu {
+    position: absolute; top: 56px; right: 12px; z-index: 20;
+    width: 220px;
+    background: var(--surface-glass);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     box-shadow: 0 8px 24px var(--shadow-color-hover);
-    display: flex; flex-direction: column; gap: 0.5rem;
+    padding: 6px;
+    display: flex; flex-direction: column; gap: 2px;
   }
-  .bg-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+  .overflow-item {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%; text-align: left;
+    padding: 0.6rem 0.7rem; border: none; background: transparent; cursor: pointer;
+    border-radius: var(--radius-sm);
+    font-family: inherit; font-size: 0.9rem; font-weight: 500;
+    color: var(--text-secondary);
+    transition: background 0.1s ease;
+  }
+  .overflow-item:hover { background: var(--hover); }
+  .overflow-item.danger { color: var(--error); }
+  .overflow-divider { height: 1px; background: var(--border); margin: 4px 6px; }
+
+  /* ── Content area ── */
+  .editor-content {
+    flex: 1; padding: 1.1rem 1.25rem 2rem;
+    display: flex; flex-direction: column;
+  }
+
+  /* Title textarea */
+  .title-input {
+    width: 100%; border: none; outline: none; background: transparent; resize: none;
+    font-family: inherit; font-weight: 900; font-size: 1.45rem; line-height: 1.2;
+    color: var(--text); margin-bottom: 4px; overflow: hidden;
+    min-height: 0;
+  }
+  .title-input::placeholder { color: var(--muted); }
+
+  /* Edited subline */
+  .edited-line {
+    font-size: 0.78rem; font-weight: 500; color: var(--muted);
+    margin-bottom: 18px;
+  }
+
+  /* Error */
+  .error { color: var(--error); font-size: 0.85rem; margin: 0 0 0.5rem; }
+
+  /* ── Background sheet ── */
+  .bg-sheet {
+    margin-bottom: 14px; padding: 0.9rem 1rem;
+    border-radius: var(--radius);
+    background: var(--surface-container);
+  }
+  .bg-sheet-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .bg-sheet-label { font-size: 0.85rem; font-weight: 700; color: var(--text-secondary); }
+  .bg-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
   .swatch {
-    width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent;
-    cursor: pointer; transition: all 0.1s ease;
+    width: 34px; height: 34px; border-radius: var(--radius-full);
+    cursor: pointer; border: 1px solid rgba(0,0,0,0.08);
+    display: flex; align-items: center; justify-content: center;
+    transition: border 0.1s ease, box-shadow 0.1s ease;
+    flex-shrink: 0;
   }
-  .swatch.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
-  .swatch.clear {
-    background: var(--surface-container); display: flex; align-items: center; justify-content: center;
-    color: var(--muted);
+  .swatch:first-child { border: 1px solid var(--border); }
+  .swatch.active { border: 2px solid var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
+  .image-swatch {
+    background: repeating-linear-gradient(
+      45deg, var(--surface), var(--surface) 4px,
+      var(--surface-high) 4px, var(--surface-high) 8px
+    );
+    border: 1px solid var(--border);
   }
-  .bg-url-input {
-    width: 100%; padding: 0.35rem 0.5rem; border: 1px solid var(--border);
-    border-radius: var(--radius-sm); background: var(--surface-container);
-    color: var(--text); font-size: 0.78rem; outline: none;
-  }
-  .bg-url-input:focus { border-color: var(--accent); }
-  .bg-upload-row { display: flex; align-items: center; }
   .bg-file-input { display: none; }
-  .bg-upload-btn {
-    display: flex; align-items: center; gap: 0.4rem;
-    padding: 0.3rem 0.6rem; border-radius: var(--radius-sm);
-    background: var(--surface-container); border: 1px solid var(--border);
-    color: var(--text-secondary); font-size: 0.78rem; font-weight: 500;
-    cursor: pointer; transition: all 0.15s ease;
-  }
-  .bg-upload-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .bg-preview-row {
-    display: flex; align-items: center; gap: 0.5rem;
-  }
+  .bg-preview-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 8px; }
   .bg-preview-thumb {
     width: 40px; height: 28px; border-radius: 4px;
     background-size: cover; background-position: center;
@@ -560,29 +788,72 @@
     transition: background 0.1s ease;
   }
   .bg-clear-btn:hover { background: var(--error-surface); }
-  .editor-body { flex: 1; overflow: auto; }
-  .error { color: var(--error); font-size: 0.85rem; margin: 0.5rem 1.5rem; }
-  .menu-wrap { position: relative; flex-shrink: 0; }
-  .menu-btn {
-    background: var(--accent-muted); border: none; border-radius: var(--radius-full);
-    color: var(--accent); cursor: pointer; padding: 0.35rem;
-    display: flex; align-items: center; justify-content: center;
-    transition: all 0.15s ease;
+
+  /* ── Editor body ── */
+  .editor-body { flex: 1; }
+
+  /* ── Tags ── */
+  .tags-row {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin-top: 26px;
   }
-  .menu-btn:hover { background: var(--accent); color: var(--on-accent); }
-  .menu-backdrop { position: fixed; inset: 0; z-index: 10; }
-  .menu-dropdown {
-    position: absolute; right: 0; top: calc(100% + 6px); z-index: 11;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); list-style: none; margin: 0; padding: 0.4rem;
-    min-width: 160px; box-shadow: 0 8px 32px var(--shadow-color-hover);
+  .tag-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 0.25em 0.7em; border-radius: var(--radius-full);
+    font-size: 0.78rem; font-weight: 600;
+    background: var(--accent-muted); color: var(--accent);
   }
-  .menu-dropdown li button {
-    width: 100%; text-align: left; background: none; border: none;
-    padding: 0.55rem 0.85rem; color: var(--text); cursor: pointer; font-size: 0.9rem;
-    border-radius: var(--radius-sm); display: flex; align-items: center; gap: 0.5rem;
-    transition: background 0.1s ease;
+  .tag-remove {
+    background: none; border: none; cursor: pointer; color: inherit;
+    padding: 0; display: flex; align-items: center;
   }
-  .menu-dropdown li button:hover { background: var(--hover); }
-  .menu-dropdown li button.danger { color: var(--error); }
+  .tag-input {
+    border: none; background: transparent; outline: none;
+    font-family: inherit; font-size: 0.82rem; color: var(--muted);
+    width: 70px;
+  }
+  .tag-input::placeholder { color: var(--muted); }
+
+  /* ── Footer ── */
+  .editor-footer {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 1rem 0.5rem 1.25rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface-container);
+    flex-shrink: 0;
+  }
+  .footer-spacer { flex: 1; }
+  .preview-toggle {
+    display: flex; align-items: center; gap: 0.4rem;
+    font-size: 0.78rem; color: var(--text-secondary); cursor: pointer; white-space: nowrap;
+  }
+  .preview-toggle input { accent-color: var(--accent); cursor: pointer; }
+  .save-btn {
+    padding: 0.5rem 1.25rem; border-radius: var(--radius-full);
+    border: none; background: var(--accent); color: var(--on-accent);
+    font-weight: 700; cursor: pointer;
+    box-shadow: 0 2px 8px var(--shadow-color);
+    transition: transform 0.1s ease;
+  }
+  .save-btn:hover { transform: scale(1.03); }
+  .save-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+  /* ── Auto-contrast ink ── */
+  .editor-layout.dark-ink .title-input { color: #2e1a28; }
+  .editor-layout.dark-ink .title-input::placeholder { color: #604868; }
+  .editor-layout.dark-ink .edited-line { color: #604868; }
+  .editor-layout.dark-ink .tag-chip { background: rgba(0,0,0,0.08); color: #604868; }
+  .editor-layout.dark-ink .tag-input { color: #604868; }
+
+  .editor-layout.light-ink .title-input { color: #ffffff; }
+  .editor-layout.light-ink .title-input::placeholder { color: rgba(255,255,255,0.6); }
+  .editor-layout.light-ink .edited-line { color: rgba(255,255,255,0.88); }
+  .editor-layout.light-ink .tag-chip { background: rgba(255,255,255,0.22); color: #ffffff; }
+  .editor-layout.light-ink .tag-input { color: rgba(255,255,255,0.88); }
+
+  @media (max-width: 640px) {
+    .editor-header { padding: 0.5rem 0.6rem; }
+    .editor-content { padding: 0.9rem 1rem 2rem; }
+    .title-input { font-size: 1.3rem; }
+  }
 </style>

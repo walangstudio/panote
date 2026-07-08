@@ -29,41 +29,47 @@
   onDestroy(() => { window.removeEventListener("keydown", onKey); });
 </script>
 
-<div class="backdrop" role="presentation" onclick={oncancel}></div>
-<div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-  <h2 id="confirm-title">{title}</h2>
-  <p class="message">{message}</p>
-  <div class="actions">
-    <button class="btn-cancel" onclick={oncancel}>{cancelLabel}</button>
-    <button class="btn-confirm" class:destructive onclick={onconfirm}>{confirmLabel}</button>
+<div class="overlay">
+  <div class="backdrop" role="presentation" onclick={oncancel}></div>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h2 id="confirm-title">{title}</h2>
+    <p class="message">{message}</p>
+    <div class="actions">
+      <button class="btn-cancel" onclick={oncancel}>{cancelLabel}</button>
+      <button class="btn-confirm" class:destructive onclick={onconfirm}>{confirmLabel}</button>
+    </div>
   </div>
 </div>
 
 <style>
-  .backdrop {
+  .overlay {
     position: fixed; inset: 0; z-index: 100;
-    background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center; padding: 1.1rem;
+  }
+  .backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    animation: panote-fade-in 0.15s ease;
   }
   .modal {
-    position: fixed; z-index: 101;
-    top: 50%; left: 50%; transform: translate(-50%, -50%);
-    background: var(--surface-glass);
-    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    position: relative; z-index: 101;
+    background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 1.5rem 1.75rem;
-    width: min(400px, 92vw);
+    border-radius: var(--radius-lg); padding: 1.5rem 1.6rem;
+    width: min(400px, 92%);
     box-shadow: 0 16px 48px var(--shadow-color-hover);
+    animation: panote-pop-in 0.18s ease;
   }
   h2 {
-    margin: 0 0 0.5rem;
+    margin: 0 0 0.8rem;
     font-size: 1.1rem; font-weight: 700;
     color: var(--text);
   }
   .message {
-    margin: 0 0 1.25rem;
+    margin: 0 0 1.4rem;
     font-size: 0.9rem;
     color: var(--text-secondary);
-    line-height: 1.45;
+    line-height: 1.5;
   }
   .actions {
     display: flex; gap: 0.6rem; justify-content: flex-end;
@@ -71,14 +77,14 @@
   .btn-cancel {
     padding: 0.55rem 1rem; border-radius: var(--radius-full);
     border: 1px solid var(--border); background: transparent;
-    color: var(--muted); cursor: pointer; font-weight: 600;
+    color: var(--muted); cursor: pointer; font-weight: 600; font-family: inherit;
     transition: all 0.15s ease;
   }
   .btn-cancel:hover { border-color: var(--accent); color: var(--accent); }
   .btn-confirm {
     padding: 0.55rem 1.25rem; border-radius: var(--radius-full);
     border: none; background: var(--accent); color: var(--on-accent);
-    font-weight: 600; cursor: pointer;
+    font-weight: 600; cursor: pointer; font-family: inherit;
     box-shadow: 0 2px 8px var(--shadow-color);
     transition: transform 0.1s ease;
   }

@@ -28,12 +28,52 @@ pub struct TransferBlob {
     pub note_password: Option<String>,
 }
 
+/// Max allowed JSON nesting depth in a decoded blob (N4) — rejects deeply
+/// nested payloads before they reach the recursive `serde_json` deserializer,
+/// which could otherwise stack-overflow the receiver.
+const MAX_JSON_DEPTH: usize = 64;
+
+/// Scan raw JSON bytes and return the maximum `{}`/`[]` nesting depth,
+/// ignoring brackets inside string literals.
+fn max_json_depth(bytes: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max_depth
+}
+
 impl TransferBlob {
     pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
         Ok(serde_json::to_vec(self)?)
     }
 
     pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            max_json_depth(bytes) <= MAX_JSON_DEPTH,
+            "transfer blob JSON nesting too deep (max {MAX_JSON_DEPTH})"
+        );
         Ok(serde_json::from_slice(bytes)?)
     }
 }
@@ -73,6 +113,23 @@ mod tests {
         assert_eq!(v["kind"], "markdown");
         assert_eq!(v["title"], "My secret note");
         assert_eq!(v["tags"], json!(["rust", "notes"]));
+    }
+
+    #[test]
+    fn decode_deeply_nested_content_rejected() {
+        // N4: 100 levels of nested arrays inside `content` must be rejected
+        // before serde_json's recursive deserializer ever touches it.
+        let nested = "[".repeat(100) + &"]".repeat(100);
+        let bad = format!(
+            r#"{{"id":"x","kind":"markdown","title":"t","content":{nested},"tags":[],"created_at":0,"updated_at":0}}"#
+        );
+        assert!(TransferBlob::decode(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn decode_shallow_content_accepted() {
+        let blob = sample();
+        assert!(TransferBlob::decode(&blob.encode().unwrap()).is_ok());
     }
 
     #[test]

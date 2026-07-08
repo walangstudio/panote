@@ -143,6 +143,23 @@ pub async fn set_device_name(name: String, state: State<'_, AppState>) -> Result
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_theme(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    queries::device_setting_get(&state.db, "theme")
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
+    if theme != "candy-light" && theme != "candy-dark" {
+        return Err("invalid theme".into());
+    }
+    queries::device_setting_set(&state.db, "theme", &theme)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve the device name: user-set > env var > cert-hash fallback.
 pub async fn resolve_device_name(pool: &sqlx::SqlitePool) -> anyhow::Result<String> {
     if let Some(name) = queries::device_setting_get(pool, "device_name").await? {
@@ -467,11 +484,6 @@ pub async fn import_blob_detailed(
 ) -> anyhow::Result<(String, ImportOutcome)> {
     let ts = now_secs();
 
-    let (title_nonce, title_ct) = encrypt_with_vault(device_key, blob.title.as_bytes())?;
-    let content_json = serde_json::to_vec(&blob.content)?;
-    let (content_nonce, vault_ct) = encrypt_with_vault(device_key, &content_json)?;
-    let tags_json = serde_json::to_string(&blob.tags)?;
-
     let content_hint = infer_content_hint(&blob.kind, &blob.content);
 
     let has_origin = !blob.origin_device_id.is_empty() && !blob.origin_note_id.is_empty();
@@ -481,6 +493,17 @@ pub async fn import_blob_detailed(
     } else {
         None
     };
+
+    // N3: encrypt bound to the id this row will actually be stored under —
+    // an update reuses the existing row's id, an insert mints a fresh one.
+    let target_id = existing.as_ref().map(|p| p.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (title_nonce, title_ct) =
+        encrypt_with_vault(device_key, blob.title.as_bytes(), target_id.as_bytes())?;
+    let content_json = serde_json::to_vec(&blob.content)?;
+    let (content_nonce, vault_ct) =
+        encrypt_with_vault(device_key, &content_json, target_id.as_bytes())?;
+    let tags_stored = crate::notes::commands::encrypt_tags(device_key, &target_id, &blob.tags)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(prev) = existing {
         // Decide how to protect the incoming content. Prefer the sender's
@@ -514,7 +537,7 @@ pub async fn import_blob_detailed(
             note_nonce,
             created_at: prev.created_at,
             updated_at: ts,
-            tags: tags_json,
+            tags: tags_stored,
             content_hint,
             pinned: prev.pinned,
             bg_color: prev.bg_color,
@@ -523,12 +546,15 @@ pub async fn import_blob_detailed(
             preview_text: None,
             origin_device_id: blob.origin_device_id,
             origin_note_id: blob.origin_note_id,
+            rc_salt: None,
+            rc_nonce: None,
+            rc_ct: None,
         };
         queries::note_update(&state.db, &row).await?;
         return Ok((prev.id, ImportOutcome::Updated));
     }
 
-    let id = Uuid::new_v4().to_string();
+    let id = target_id;
     let (origin_device_id, origin_note_id) = if has_origin {
         (blob.origin_device_id, blob.origin_note_id)
     } else {
@@ -549,7 +575,7 @@ pub async fn import_blob_detailed(
         note_nonce,
         created_at: blob.created_at,
         updated_at: ts,
-        tags: tags_json,
+        tags: tags_stored,
         content_hint,
         pinned: false,
         bg_color: None,
@@ -558,6 +584,9 @@ pub async fn import_blob_detailed(
         preview_text: None,
         origin_device_id,
         origin_note_id,
+        rc_salt: None,
+        rc_nonce: None,
+        rc_ct: None,
     };
 
     queries::note_insert(&state.db, &row).await?;
@@ -615,7 +644,10 @@ mod tests {
 
         // Note is locked on arrival: device key alone can't read the content.
         assert!(row.note_salt.is_some(), "imported note must be password-protected");
-        assert!(decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct).is_err());
+        assert!(
+            decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
+                .is_err()
+        );
 
         // The attached password unwraps it.
         let salt = row.note_salt.clone().unwrap();
@@ -623,7 +655,8 @@ mod tests {
         let vault_ct =
             crate::crypto::note::remove_note_password("recipient-pw", &salt, &nonce, &row.content_ct)
                 .unwrap();
-        let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct).unwrap();
+        let content_bytes =
+            decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes()).unwrap();
         let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
         assert_eq!(content, blob.content);
     }
@@ -635,7 +668,8 @@ mod tests {
         let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
         let title_bytes =
-            decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct).unwrap();
+            decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
+                .unwrap();
         assert_eq!(String::from_utf8(title_bytes).unwrap(), blob.title);
     }
 
@@ -646,7 +680,8 @@ mod tests {
         let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
         let content_bytes =
-            decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct).unwrap();
+            decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
+                .unwrap();
         let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
         assert_eq!(content, blob.content);
     }
@@ -657,7 +692,7 @@ mod tests {
         let blob = TransferBlob { tags: vec!["rust".into(), "shared".into()], ..sample_blob() };
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap();
+        let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags).unwrap();
         assert_eq!(tags, vec!["rust", "shared"]);
     }
 
@@ -686,7 +721,9 @@ mod tests {
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
         let wrong_key = derive_key("different-key", &[0u8; 16]).unwrap();
-        assert!(decrypt_with_vault(&wrong_key, &row.title_nonce, &row.title_ct).is_err());
+        assert!(
+            decrypt_with_vault(&wrong_key, &row.title_nonce, &row.title_ct, row.id.as_bytes()).is_err()
+        );
     }
 
     #[tokio::test]
@@ -731,13 +768,14 @@ mod tests {
     #[tokio::test]
     async fn wrong_passphrase_leaves_transfer_pending() {
         use crate::crypto::vault::{derive_key, encrypt, random_salt};
+        use crate::transfer::lan::TRANSFER_AAD;
 
         let state = test_state().await;
         let passphrase = "correct";
         let salt = random_salt();
         let key = derive_key(passphrase, &salt).unwrap();
         let blob_bytes = sample_blob().encode().unwrap();
-        let (nonce, ct) = encrypt(&key, &blob_bytes).unwrap();
+        let (nonce, ct) = encrypt(&key, &blob_bytes, TRANSFER_AAD).unwrap();
 
         let transfer = crate::state::PendingTransfer {
             transfer_id: "t-retry".into(),
@@ -761,13 +799,14 @@ mod tests {
     #[tokio::test]
     async fn correct_passphrase_after_wrong_succeeds() {
         use crate::crypto::vault::{derive_key, encrypt, random_salt};
+        use crate::transfer::lan::TRANSFER_AAD;
 
         let state = test_state().await;
         let passphrase = "correct";
         let salt = random_salt();
         let key = derive_key(passphrase, &salt).unwrap();
         let blob_bytes = sample_blob().encode().unwrap();
-        let (nonce, ct) = encrypt(&key, &blob_bytes).unwrap();
+        let (nonce, ct) = encrypt(&key, &blob_bytes, TRANSFER_AAD).unwrap();
 
         let transfer = crate::state::PendingTransfer {
             transfer_id: "t-retry2".into(),
@@ -800,14 +839,14 @@ mod tests {
     #[test]
     fn decrypt_transfer_wrong_passphrase_fails() {
         use crate::crypto::vault::{derive_key, encrypt, random_salt};
-        use crate::transfer::lan::decrypt_transfer;
+        use crate::transfer::lan::{decrypt_transfer, TRANSFER_AAD};
 
         let passphrase = "correct-pass";
         let salt = random_salt();
         let key = derive_key(passphrase, &salt).unwrap();
         let blob = sample_blob();
         let blob_bytes = blob.encode().unwrap();
-        let (nonce, ct) = encrypt(&key, &blob_bytes).unwrap();
+        let (nonce, ct) = encrypt(&key, &blob_bytes, TRANSFER_AAD).unwrap();
 
         // Wrong passphrase should fail
         assert!(decrypt_transfer(&salt, &nonce, &ct, "wrong-pass").is_err());
@@ -816,14 +855,14 @@ mod tests {
     #[test]
     fn decrypt_transfer_correct_passphrase_succeeds() {
         use crate::crypto::vault::{derive_key, encrypt, random_salt};
-        use crate::transfer::lan::decrypt_transfer;
+        use crate::transfer::lan::{decrypt_transfer, TRANSFER_AAD};
 
         let passphrase = "shared-secret-42";
         let salt = random_salt();
         let key = derive_key(passphrase, &salt).unwrap();
         let blob = sample_blob();
         let blob_bytes = blob.encode().unwrap();
-        let (nonce, ct) = encrypt(&key, &blob_bytes).unwrap();
+        let (nonce, ct) = encrypt(&key, &blob_bytes, TRANSFER_AAD).unwrap();
 
         let decoded = decrypt_transfer(&salt, &nonce, &ct, passphrase).unwrap();
         assert_eq!(decoded.title, blob.title);

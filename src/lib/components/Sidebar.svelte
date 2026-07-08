@@ -27,7 +27,7 @@
 {/if}
 <aside class="drawer" class:open={$sidebarOpen}>
   <div class="drawer-header">
-    <span class="logo-text">Panote</span>
+    <span class="logo-text">panote</span>
     <button class="close-btn" onclick={() => sidebarOpen.set(false)} aria-label="Close menu">
       <span class="material-symbols-outlined">close</span>
     </button>
@@ -40,7 +40,7 @@
 
   <nav>
     <a href="/" class="nav-item" class:active={activeTab === "notes"} onclick={nav}>
-      <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' {activeTab === 'notes' ? 1 : 0};">description</span>
+      <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' {activeTab === 'notes' ? 1 : 0};">sticky_note_2</span>
       <span>Notes</span>
     </a>
     <a href="/settings" class="nav-item" class:active={activeTab === "settings"} onclick={nav}>
@@ -51,7 +51,7 @@
 
   <div class="drawer-bottom">
     <button class="receive-row" onclick={ontogglereceive}>
-      <span class="material-symbols-outlined" style="font-size: 20px;">download</span>
+      <span class="material-symbols-outlined" style="font-size: 20px;">wifi_tethering</span>
       <span class="receive-label">Receiving</span>
       <span class="toggle-pill" class:active={receiving}>
         <span class="toggle-knob"></span>
@@ -59,8 +59,9 @@
     </button>
 
     <button class="theme-toggle" onclick={toggleDarkMode}>
-      <span class="material-symbols-outlined">{$theme === "candy-dark" ? "light_mode" : "dark_mode"}</span>
-      <span>{$theme === "candy-dark" ? "Light mode" : "Dark mode"}</span>
+      <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">{$theme === "candy-dark" ? "light_mode" : "dark_mode"}</span>
+      <span class="theme-label">{$theme === "candy-dark" ? "Light theme" : "Dark theme"}</span>
+      <span class="material-symbols-outlined" style="font-size: 20px; color: var(--muted);">swap_horiz</span>
     </button>
   </div>
 </aside>
@@ -89,8 +90,11 @@
     padding: 0 0.5rem; margin-bottom: 0.5rem;
   }
   .logo-text {
-    font-size: 1.5rem; font-weight: 900; color: var(--accent);
+    font-size: 1.5rem; font-weight: 900;
     letter-spacing: -0.02em;
+    background: linear-gradient(120deg, var(--accent), var(--secondary));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: var(--accent);
   }
   .close-btn {
     background: var(--accent-muted); border: none; border-radius: var(--radius-full);
@@ -162,4 +166,5 @@
     transition: all 0.15s ease;
   }
   .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .theme-label { flex: 1; text-align: left; }
 </style>

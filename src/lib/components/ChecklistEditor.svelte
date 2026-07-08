@@ -8,6 +8,9 @@
 
   let { content = $bindable({ items: [] as CheckItem[] }) } = $props<{ content: { items: CheckItem[] } }>();
 
+  // ponytail: hard depth cap guards against a maliciously/corruptly deep imported checklist
+  const MAX_DEPTH = 20;
+
   function addItem(list: CheckItem[]) {
     list.push({ id: crypto.randomUUID(), text: "", checked: false, children: [] });
     content = { ...content };
@@ -38,19 +41,19 @@
               placeholder="Item…"
               onchange={() => content = { ...content }}
             />
-            <button class="add-sub" onclick={() => addItem(item.children)} title="Add sub-item">+</button>
+            <button class="add-sub" onclick={() => addItem(item.children ??= [])} title="Add sub-item">+</button>
             <button class="del" onclick={() => removeItem(items, item.id)} title="Delete">×</button>
           </label>
-          {#if item.children.length > 0}
-            {@render renderItems(item.children, depth + 1)}
+          {#if (item.children?.length ?? 0) > 0 && depth < MAX_DEPTH}
+            {@render renderItems(item.children ?? [], depth + 1)}
           {/if}
         </li>
       {/each}
     </ul>
   {/snippet}
 
-  {@render renderItems(content.items, 0)}
-  <button class="add-btn" onclick={() => addItem(content.items)}>+ Add item</button>
+  {@render renderItems(content.items ?? [], 0)}
+  <button class="add-btn" onclick={() => addItem(content.items ??= [])}>+ Add item</button>
 </div>
 
 <style>

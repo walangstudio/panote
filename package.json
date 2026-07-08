@@ -16,6 +16,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@gamekit/core": "file:../../react/gamekit/packages/core",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@types/dompurify": "^3.0.5",
@@ -23,7 +24,9 @@
     "dompurify": "^3.3.3",
     "highlight.js": "^11.11.1",
     "html5-qrcode": "^2.3.8",
+    "katex": "^0.17.0",
     "marked": "^17.0.5",
+    "marked-katex-extension": "^5.1.10",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

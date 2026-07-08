@@ -1,9 +1,28 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { marked } from "marked";
+  import { Marked } from "marked";
   import DOMPurify from "dompurify";
-  import hljs from "highlight.js";
+  import markedKatex from "marked-katex-extension";
+  import hljs from "highlight.js/lib/core";
+  import javascript from "highlight.js/lib/languages/javascript";
+  import typescript from "highlight.js/lib/languages/typescript";
+  import python from "highlight.js/lib/languages/python";
+  import rust from "highlight.js/lib/languages/rust";
+  import go from "highlight.js/lib/languages/go";
+  import bash from "highlight.js/lib/languages/bash";
+  import json from "highlight.js/lib/languages/json";
+  import yaml from "highlight.js/lib/languages/yaml";
+  import xml from "highlight.js/lib/languages/xml";
+  import css from "highlight.js/lib/languages/css";
+  import markdown from "highlight.js/lib/languages/markdown";
+  import sql from "highlight.js/lib/languages/sql";
   import "highlight.js/styles/github-dark.min.css";
+
+  for (const [name, lang] of Object.entries({
+    javascript, typescript, python, rust, go, bash, json, yaml, xml, css, markdown, sql,
+  })) {
+    hljs.registerLanguage(name, lang);
+  }
 
   let { content = $bindable({ body: "" }), initialPreview = true } = $props<{ content: { body: string }, initialPreview?: boolean }>();
 
@@ -112,42 +131,66 @@
     emojiOpen = false;
   }
 
+  // Escape LaTeX specials so arbitrary selected text survives inside \text{}.
+  function escapeLatexText(s: string): string {
+    return s
+      .replace(/\\/g, "\\textbackslash{}")
+      .replace(/([{}$&#%_])/g, "\\$1")
+      .replace(/~/g, "\\textasciitilde{}")
+      .replace(/\^/g, "\\textasciicircum{}");
+  }
+
   async function insertColor(color: string) {
     if (!textareaEl) return;
     const { selectionStart: s, selectionEnd: e } = textareaEl;
-    const sel = content.body.slice(s, e) || "colored text";
-    const open = `<span style="color:${color}">`;
-    const insert = `${open}${sel}</span>`;
+    const raw = content.body.slice(s, e) || "colored text";
+    const escaped = escapeLatexText(raw);
+    // GitHub-style: inline math `$\textcolor{#hex}{\text{...}}$`.
+    const prefix = `$\\textcolor{${color}}{\\text{`;
+    const insert = `${prefix}${escaped}}}$`;
     content.body = content.body.slice(0, s) + insert + content.body.slice(e);
     await tick();
-    const newStart = s + open.length;
+    const caret = s + prefix.length;
     textareaEl.focus();
-    textareaEl.setSelectionRange(newStart, newStart + sel.length);
+    textareaEl.setSelectionRange(caret, caret + escaped.length);
     colorOpen = false;
   }
 
-  const renderer = new marked.Renderer();
-  renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-    let highlighted: string;
-    if (lang && hljs.getLanguage(lang)) {
-      highlighted = hljs.highlight(text, { language: lang }).value;
-    } else {
-      highlighted = hljs.highlightAuto(text).value;
-    }
-    return `<pre><code class="hljs">${highlighted}</code></pre>`;
-  };
-  marked.use({ renderer });
-
-  DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
-    if (data.attrName === "style") {
-      if (!/^color:\s*#[0-9a-fA-F]{3,8}$/.test(data.attrValue.trim())) {
-        data.attrValue = "";
-      }
-    }
+  // Local marked instance so we never mutate the global `marked` singleton.
+  const md = new Marked();
+  md.use({
+    renderer: {
+      code({ text, lang }: { text: string; lang?: string }) {
+        const highlighted = lang && hljs.getLanguage(lang)
+          ? hljs.highlight(text, { language: lang }).value
+          : hljs.highlightAuto(text).value;
+        return `<pre><code class="hljs">${highlighted}</code></pre>`;
+      },
+    },
   });
+  // GitHub-style colored text: `$\textcolor{#hex}{\text{...}}$` rendered as
+  // MathML (no inline CSS → keeps the sanitizer's style lockdown intact).
+  md.use(markedKatex({ throwOnError: false, output: "mathml" }));
+
+  // Only inline text color is allowed via `style`; nothing else.
+  const COLOR_STYLE = /^color:\s*#[0-9a-fA-F]{3,8}$/;
+
+  // Sanitize WITHOUT a global DOMPurify hook: DOMPurify strips scripts /
+  // handlers / dangerous URIs, then a scoped DOM pass drops any `style`
+  // that isn't exactly a hex color. Re-serialising already-sanitized DOM
+  // and only removing attributes can't reintroduce markup.
+  function sanitize(html: string): string {
+    const clean = DOMPurify.sanitize(html, { ADD_ATTR: ["style", "mathcolor"], FORBID_TAGS: ["style"] });
+    const root = document.createElement("div");
+    root.innerHTML = clean;
+    for (const el of root.querySelectorAll("[style]")) {
+      if (!COLOR_STYLE.test((el.getAttribute("style") ?? "").trim())) el.removeAttribute("style");
+    }
+    return root.innerHTML;
+  }
 
   let preview = $state(initialPreview);
-  let rendered = $derived(DOMPurify.sanitize(marked(content.body ?? "") as string, { ADD_ATTR: ["style"] }));
+  let rendered = $derived(sanitize(md.parse(content.body ?? "") as string));
 </script>
 
 <div class="md-editor">

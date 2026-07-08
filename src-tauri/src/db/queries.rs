@@ -138,6 +138,10 @@ pub struct NoteRow {
     pub preview_text: Option<String>,
     pub origin_device_id: String,
     pub origin_note_id: String,
+    /// Optional recovery-code wrap of the vault ciphertext (migration 0011).
+    pub rc_salt: Option<Vec<u8>>,
+    pub rc_nonce: Option<Vec<u8>>,
+    pub rc_ct: Option<Vec<u8>>,
 }
 
 fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
@@ -163,17 +167,20 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         preview_text: r.get("preview_text"),
         origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
+        rc_salt: r.get("rc_salt"),
+        rc_nonce: r.get("rc_nonce"),
+        rc_ct: r.get("rc_ct"),
         id,
     }
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id";
+    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct";
 
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
@@ -194,6 +201,9 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.preview_text)
     .bind(&row.origin_device_id)
     .bind(&row.origin_note_id)
+    .bind(&row.rc_salt)
+    .bind(&row.rc_nonce)
+    .bind(&row.rc_ct)
     .execute(pool)
     .await?;
     Ok(())
@@ -201,7 +211,7 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=? WHERE id=?",
+        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=?, rc_salt=?, rc_nonce=?, rc_ct=? WHERE id=?",
     )
     .bind(&row.kind)
     .bind(&row.title_nonce)
@@ -220,6 +230,9 @@ pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.preview_text)
     .bind(&row.origin_device_id)
     .bind(&row.origin_note_id)
+    .bind(&row.rc_salt)
+    .bind(&row.rc_nonce)
+    .bind(&row.rc_ct)
     .bind(&row.id)
     .execute(pool)
     .await?;
@@ -292,6 +305,16 @@ pub async fn device_identity_insert(
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO device_identity (id, cert_der, key_der) VALUES (1, ?, ?)")
         .bind(cert_der)
+        .bind(key_der)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Overwrite the stored `key_der` in place, leaving `cert_der` untouched.
+/// Used to re-encrypt a legacy plaintext key the first time it's read (K7).
+pub async fn device_identity_update_key(pool: &SqlitePool, key_der: &[u8]) -> anyhow::Result<()> {
+    sqlx::query("UPDATE device_identity SET key_der = ? WHERE id = 1")
         .bind(key_der)
         .execute(pool)
         .await?;
@@ -527,10 +550,27 @@ mod tests {
     }
 }
 
+/// Lists every note, newest-first. Used by export/import, which must see the
+/// full set — do not add pagination here; see `note_list_page` for the
+/// bounded variant used by the frontend list view (K14).
 pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
     let rows = sqlx::query(&format!(
         "SELECT {SELECT_COLS} FROM notes ORDER BY updated_at DESC"
     ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_note).collect())
+}
+
+/// Lists notes newest-first, bounded by `limit`/`offset` (K14) so the
+/// frontend list view can't force decrypting every note in the database at
+/// once.
+pub async fn note_list_page(pool: &SqlitePool, limit: i64, offset: i64) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+    ))
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(row_to_note).collect())

@@ -94,6 +94,8 @@ pub fn run() {
             note_change_password,
             note_unlock,
             note_lock,
+            note_add_recovery,
+            note_recover,
             notes_protect,
             notes_unprotect,
             // Transfer
@@ -114,6 +116,8 @@ pub fn run() {
             known_peers_list,
             get_device_name,
             set_device_name,
+            get_theme,
+            set_theme,
             // Export / Import
             notes_export,
             notes_import,

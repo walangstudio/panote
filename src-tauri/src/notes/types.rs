@@ -120,6 +120,7 @@ pub struct NoteDetail {
     pub created_at: i64,
     pub updated_at: i64,
     pub has_note_password: bool,
+    pub has_recovery: bool,
     pub pinned: bool,
     pub bg_color: Option<String>,
     pub bg_image: Option<String>,

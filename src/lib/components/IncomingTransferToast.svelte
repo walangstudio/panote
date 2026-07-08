@@ -10,6 +10,9 @@
   let codes = $state<Record<string, string>>({});
   let busy = $state<Record<string, boolean>>({});
   let errors = $state<Record<string, string>>({});
+  let dismissed = $state<Set<string>>(new Set());
+
+  let visibleOffers = $derived(offers.filter((o) => !dismissed.has(o.offer_id)));
 
   async function accept(o: PendingOffer) {
     const code = (codes[o.offer_id] ?? "").replace(/-/g, "").toUpperCase();
@@ -26,25 +29,21 @@
   }
 
   function dismiss(o: PendingOffer) {
-    // Just remove from UI — the sender will time out
-    onupdate();
-  }
-
-  function formatTime(ts: number) {
-    return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    // Hide for this session — the sender will time out
+    dismissed = new Set(dismissed).add(o.offer_id);
   }
 </script>
 
-{#if offers.length > 0}
+{#if visibleOffers.length > 0}
   <div class="toast-stack">
-    {#each offers as o (o.offer_id)}
+    {#each visibleOffers as o (o.offer_id)}
       <div class="toast">
-        <div class="toast-header">
-          <span class="from">From: <strong>{o.from_peer}</strong></span>
-          <span class="time">{formatTime(o.received_at)}</span>
-        </div>
-        <p class="offer-info">{o.note_count} {o.note_count === 1 ? "note" : "notes"}</p>
-        <div class="toast-body">
+        <span class="badge">
+          <span class="material-symbols-outlined">download</span>
+        </span>
+        <div class="text-block">
+          <div class="line1">{o.from_peer} wants to send</div>
+          <div class="line2">{o.note_count} {o.note_count === 1 ? "note" : "notes"}</div>
           <input
             class="code-input"
             placeholder="Enter code (e.g. K4X-7P2)"
@@ -55,8 +54,8 @@
             <span class="err">{errors[o.offer_id]}</span>
           {/if}
         </div>
-        <div class="toast-actions">
-          <button class="btn-reject" onclick={() => dismiss(o)} disabled={busy[o.offer_id]}>Dismiss</button>
+        <div class="actions">
+          <button class="btn-decline" onclick={() => dismiss(o)} disabled={busy[o.offer_id]}>Dismiss</button>
           <button class="btn-accept" onclick={() => accept(o)} disabled={busy[o.offer_id]}>
             {busy[o.offer_id] ? "Accepting…" : "Accept"}
           </button>
@@ -68,46 +67,142 @@
 
 <style>
   .toast-stack {
-    position: fixed; bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);
-    z-index: 200; display: flex; flex-direction: column; gap: 0.75rem;
-    width: min(400px, 92vw);
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
+
   .toast {
-    background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0.7rem 0.8rem;
+    border-radius: var(--radius);
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 1rem;
-    box-shadow: 0 8px 32px var(--shadow-color-hover);
+    box-shadow: 0 8px 24px var(--shadow-color-hover);
+    background: var(--surface-glass);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    animation: panote-slide-down 0.22s ease;
   }
-  .toast-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem; }
-  .from { font-size: 0.9rem; font-weight: 500; }
-  .time { font-size: 0.75rem; color: var(--muted); }
-  .offer-info { font-size: 0.82rem; color: var(--muted); margin: 0 0 0.5rem; }
-  .toast-body { margin-bottom: 0.6rem; }
+
+  .badge {
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius-full);
+    background: var(--tertiary-surface);
+    color: var(--tertiary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 20px;
+  }
+
+  .text-block {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .line1 {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .line2 {
+    font-size: 0.78rem;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .code-input {
-    width: 100%; padding: 0.55rem 0.85rem; border-radius: var(--radius-full);
-    border: 1px solid var(--border); background: var(--input-bg);
-    color: var(--text); font-size: 0.9rem; font-family: monospace;
-    text-transform: uppercase; box-sizing: border-box;
+    width: 100%;
+    margin-top: 0.4rem;
+    padding: 0.45rem 0.75rem;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border);
+    background: var(--input-bg);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-family: monospace;
+    text-transform: uppercase;
+    box-sizing: border-box;
     transition: box-shadow 0.15s ease;
   }
-  .code-input:focus { box-shadow: 0 0 0 2px var(--accent-muted); outline: none; }
-  .err { font-size: 0.78rem; color: var(--error); display: block; margin-top: 0.25rem; }
-  .toast-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+
+  .code-input:focus {
+    box-shadow: 0 0 0 2px var(--accent-muted);
+    outline: none;
+  }
+
+  .err {
+    font-size: 0.75rem;
+    color: var(--error);
+    display: block;
+    margin-top: 0.2rem;
+  }
+
+  .actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+    align-self: flex-start;
+    padding-top: 2px;
+  }
+
+  .btn-decline {
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-decline:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .btn-decline:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .btn-accept {
-    padding: 0.45rem 1rem; border-radius: var(--radius-full);
-    border: none; background: var(--accent); color: var(--on-accent);
-    font-weight: 600; cursor: pointer; font-size: 0.85rem;
-    box-shadow: 0 2px 8px var(--shadow-color);
-    transition: transform 0.1s ease;
+    padding: 0.4rem 0.8rem;
+    border-radius: var(--radius-full);
+    border: none;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
   }
-  .btn-accept:hover { transform: scale(1.03); }
-  .btn-accept:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-  .btn-reject {
-    padding: 0.45rem 0.85rem; border-radius: var(--radius-full);
-    border: 1px solid var(--border); background: transparent;
-    color: var(--muted); cursor: pointer; font-size: 0.85rem;
-    transition: all 0.15s ease;
+
+  .btn-accept:hover {
+    opacity: 0.88;
   }
-  .btn-reject:hover { border-color: var(--accent); color: var(--accent); }
-  .btn-reject:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-accept:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 </style>

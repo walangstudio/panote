@@ -63,12 +63,32 @@ function normalizeUrl(raw: string): string {
 
 // ---- CSV / PSV shared logic ----
 
+function splitLines(input: string): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    if (ch === "\n" && !inQuotes) {
+      lines.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  lines.push(current);
+  return lines;
+}
+
 function parseSeparated(
   input: string,
   separator: string,
   options?: Record<string, unknown>,
 ): ParseResult {
-  const lines = input.split("\n").filter((l) => l.trim().length > 0);
+  const lines = (separator === "," ? splitLines(input) : input.split("\n")).filter(
+    (l) => l.trim().length > 0,
+  );
   if (lines.length === 0) return { columns: [], rows: [] };
 
   const splitLine = (line: string): string[] => {
@@ -275,6 +295,12 @@ export const urlDescParser: ImportParser = {
 
 // ---- Custom regex parser factory ----
 
+// ponytail: length/line caps limit ReDoS blast radius but don't bound catastrophic-backtracking
+// time on a single line; a real fix needs a worker/WASM regex engine with a timeout.
+const MAX_CUSTOM_PATTERN_LENGTH = 200;
+const MAX_CUSTOM_PARSER_LINE_LENGTH = 2000;
+const MAX_CUSTOM_PARSER_LINES = 5000;
+
 export function makeCustomParser(def: CustomParserDef): ImportParser {
   return {
     id: def.id,
@@ -282,12 +308,31 @@ export function makeCustomParser(def: CustomParserDef): ImportParser {
     description: `Custom regex: ${def.pattern}`,
     icon: "code",
     parse(input: string): ParseResult {
-      const re = new RegExp(def.pattern);
-      const lines = input.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      if (def.pattern.length > MAX_CUSTOM_PATTERN_LENGTH) {
+        return { columns: [...def.columns], rows: [] };
+      }
+      let re: RegExp;
+      try {
+        re = new RegExp(def.pattern);
+      } catch {
+        return { columns: [...def.columns], rows: [] };
+      }
+
+      const lines = input
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .slice(0, MAX_CUSTOM_PARSER_LINES);
 
       const rows = lines.map((line) => {
-        const m = re.exec(line);
         const row: Record<string, string> = {};
+        const safeLine = line.slice(0, MAX_CUSTOM_PARSER_LINE_LENGTH);
+        let m: RegExpExecArray | null = null;
+        try {
+          m = re.exec(safeLine);
+        } catch {
+          m = null;
+        }
         for (const col of def.columns) {
           row[col] = m?.groups?.[col] ?? "";
         }

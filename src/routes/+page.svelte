@@ -6,8 +6,8 @@
     noteDelete, notePin,
     noteProtect, noteUnprotect, noteChangePassword, notesProtect, notesUnprotect,
   } from "$lib/tauri";
+  import type { NoteMetadata } from "$lib/tauri";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import TransferModal from "$lib/components/TransferModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
 
@@ -50,21 +50,27 @@
     if (isBatch) { selecting = false; selected = new Set(); }
   }
 
+  // Bottom-up speed-dial: last item sits nearest the FAB (prototype order).
   const fabKinds = [
-    { id: "document", icon: "edit_note", label: "Document" },
-    { id: "checklist", icon: "checklist", label: "Checklist" },
-    { id: "kanban", icon: "view_kanban", label: "Kanban" },
     { id: "table", icon: "table_chart", label: "Table" },
+    { id: "kanban", icon: "view_kanban", label: "Kanban" },
+    { id: "checklist", icon: "checklist", label: "Checklist" },
+    { id: "document", icon: "edit_note", label: "Document" },
   ] as const;
 
   const sortOptions: { field: SortField; label: string }[] = [
-    { field: "updated", label: "Date modified" },
+    { field: "updated", label: "Date edited" },
     { field: "created", label: "Date created" },
     { field: "title", label: "Title" },
-    { field: "kind", label: "Type" },
+    { field: "kind", label: "Kind" },
   ];
 
   onMount(() => { refreshNotes(); });
+
+  // ponytail: defense in depth — backend already validates bg_image is a data:image/... URI.
+  function safeBgImageUrl(bgImage: string | null | undefined): string | undefined {
+    return bgImage && bgImage.startsWith("data:image/") ? `url(${bgImage})` : undefined;
+  }
 
   const filtered = $derived(
     sortNotes(
@@ -108,13 +114,6 @@
     transferNoteIds = Array.from(selected);
   }
 
-  function cycleSort(field: SortField) {
-    sortPref.update(cur => ({
-      field,
-      dir: cur.field === field && cur.dir === "desc" ? "asc" : "desc",
-    }));
-  }
-
   const kindIcon: Record<string, string> = {
     checklist: "checklist", kanban: "view_kanban", table: "table_chart",
   };
@@ -136,6 +135,64 @@
     if (note.kind === "document") return hintColor[note.content_hint ?? ""] ?? "accent";
     return kindColor[note.kind] ?? "accent";
   }
+
+  function formatRelative(unixSecs: number) {
+    const HOUR = 3_600_000, DAY = 24 * HOUR;
+    const diff = Date.now() - unixSecs * 1000;
+    if (diff < HOUR) return Math.max(1, Math.round(diff / 60_000)) + "m";
+    if (diff < DAY) return Math.round(diff / HOUR) + "h";
+    if (diff < 7 * DAY) return Math.round(diff / DAY) + "d";
+    return new Date(unixSecs * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+
+  const pinnedNotes = $derived(filtered.filter(n => n.pinned));
+  const otherNotes = $derived(filtered.filter(n => !n.pinned));
+
+  // Pick dark vs light ink for a note's custom background so text stays legible.
+  function isLightColor(c: string): boolean {
+    const hex = c.trim().match(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    let r: number, g: number, b: number;
+    if (hex) {
+      let h = hex[1];
+      if (h.length === 3) h = h.split("").map(x => x + x).join("");
+      r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+    } else {
+      const m = c.match(/(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+      if (!m) return true;
+      r = +m[1]; g = +m[2]; b = +m[3];
+    }
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6;
+  }
+
+  let imgInk = $state<Record<string, "dark" | "light">>({});
+  function analyzeImage(id: string, url: string) {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = 16; c.height = 16;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(img, 0, 0, 16, 16);
+        const d = ctx.getImageData(0, 0, 16, 16).data;
+        let sum = 0;
+        for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        imgInk = { ...imgInk, [id]: sum / (d.length / 4) / 255 > 0.6 ? "dark" : "light" };
+      } catch { imgInk = { ...imgInk, [id]: "dark" }; }
+    };
+    img.onerror = () => { imgInk = { ...imgInk, [id]: "dark" }; };
+    img.src = url;
+  }
+  $effect(() => {
+    for (const n of $notes) {
+      if (n.bg_image && !(n.id in imgInk)) analyzeImage(n.id, n.bg_image);
+    }
+  });
+  function cardInk(note: { id: string; bg_color?: string; bg_image?: string }): "dark" | "light" | null {
+    if (note.bg_color) return isLightColor(note.bg_color) ? "dark" : "light";
+    if (note.bg_image) return imgInk[note.id] ?? "dark";
+    return null;
+  }
 </script>
 
 <div class="page">
@@ -145,7 +202,12 @@
     </button>
     <div class="search-wrap">
       <span class="material-symbols-outlined search-icon">search</span>
-      <input class="search" placeholder="Search notes or tags…" bind:value={filter} />
+      <input class="search" placeholder="Search notes" bind:value={filter} />
+      {#if filter}
+        <button class="clear-btn" onclick={() => filter = ""} aria-label="Clear search">
+          <span class="material-symbols-outlined" style="font-size: 18px;">close</span>
+        </button>
+      {/if}
     </div>
     <div class="sort-wrap">
       <button class="sort-btn" onclick={() => sortOpen = !sortOpen} aria-label="Sort notes">
@@ -156,25 +218,26 @@
         <div class="sort-dropdown">
           {#each sortOptions as opt}
             <button class="sort-option" class:active={$sortPref.field === opt.field}
-              onclick={() => { cycleSort(opt.field); }}>
+              onclick={() => sortPref.update(c => ({ field: opt.field, dir: c.dir }))}>
+              <span class="material-symbols-outlined" style="font-size: 18px;">{$sortPref.field === opt.field ? "radio_button_checked" : "radio_button_unchecked"}</span>
               <span>{opt.label}</span>
-              {#if $sortPref.field === opt.field}
-                <span class="material-symbols-outlined" style="font-size: 16px;">
-                  {$sortPref.dir === "asc" ? "arrow_upward" : "arrow_downward"}
-                </span>
-              {/if}
             </button>
           {/each}
+          <div class="sort-divider"></div>
+          <button class="sort-option"
+            onclick={() => sortPref.update(c => ({ field: c.field, dir: c.dir === "asc" ? "desc" : "asc" }))}>
+            <span class="material-symbols-outlined" style="font-size: 18px;">{$sortPref.dir === "asc" ? "arrow_upward" : "arrow_downward"}</span>
+            <span>{$sortPref.dir === "asc" ? "Ascending" : "Descending"}</span>
+          </button>
         </div>
       {/if}
     </div>
-    <button class="select-btn" class:active={selecting} onclick={toggleSelect}>
-      {selecting ? "Cancel" : "Select"}
+    <button class="select-btn" class:active={selecting} onclick={toggleSelect} aria-label={selecting ? "Cancel selection" : "Select notes"}>
+      <span class="material-symbols-outlined">{selecting ? "check_box" : "checklist_rtl"}</span>
     </button>
   </div>
 
-  <ul class="note-list">
-    {#each filtered as note (note.id)}
+  {#snippet noteCard(note: NoteMetadata)}
       <li>
         {#if selecting}
           <button
@@ -182,28 +245,29 @@
             class:checked={selected.has(note.id)}
             onclick={() => toggleNote(note.id)}
           >
-            <span class="checkbox">
-              <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' {selected.has(note.id) ? 1 : 0};">
-                {selected.has(note.id) ? "check_box" : "check_box_outline_blank"}
-              </span>
-            </span>
-            <span class="kind-badge {noteColor(note)}">
-              <span class="material-symbols-outlined">{noteIcon(note)}</span>
+            <span class="select-box" class:on={selected.has(note.id)}>
+              {#if selected.has(note.id)}
+                <span class="material-symbols-outlined" style="font-size: 20px; font-variation-settings: 'wght' 700;">check</span>
+              {/if}
             </span>
             <div class="note-info">
-              <strong>{note.title}</strong>
+              <strong>{note.title || "Untitled"}</strong>
               <div class="tags">
-                {#each note.tags as tag}<span class="tag">{tag}</span>{/each}
+                {#each note.tags.slice(0, 3) as tag}<span class="tag">#{tag}</span>{/each}
               </div>
             </div>
-            <span class="date">{new Date(note.updated_at * 1000).toLocaleDateString()}</span>
+            <span class="date">{formatRelative(note.updated_at)}</span>
           </button>
         {:else}
-          <a href="/note/{note.id}" class="note-card"
-            class:light-bg={note.bg_color || note.bg_image}
+          <div class="note-card"
+            role="button" tabindex="0"
+            class:dark-ink={cardInk(note) === "dark"}
+            class:light-ink={cardInk(note) === "light"}
             class:has-bg-image={note.bg_image}
             style:background-color={note.bg_color ?? undefined}
-            style:background-image={note.bg_image ? `url(${note.bg_image})` : undefined}
+            style:background-image={safeBgImageUrl(note.bg_image)}
+            onclick={() => goto(`/note/${note.id}`)}
+            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goto(`/note/${note.id}`); } }}
           >
             <span class="badge-wrap">
               <span class="kind-badge {noteColor(note)}">
@@ -214,20 +278,30 @@
               {/if}
             </span>
             <div class="note-info">
-              <strong>{note.title}</strong>
-              {#if note.has_note_password}<span class="lock"><span class="material-symbols-outlined" style="font-size: 14px;">lock</span></span>{/if}
-              {#if note.show_preview && note.preview_text}
-                <p class="preview-text">{note.preview_text}</p>
-              {/if}
-              <div class="tags">
-                {#each note.tags as tag}<span class="tag">{tag}</span>{/each}
+              <div class="title-row">
+                <strong>{note.title || "Untitled"}</strong>
+                {#if note.has_note_password}<span class="lock"><span class="material-symbols-outlined" style="font-size: 14px;">lock</span></span>{/if}
               </div>
+              {#if note.show_preview}
+                {#if note.has_note_password}
+                  <p class="preview-text">Locked note</p>
+                {:else if note.preview_text}
+                  <p class="preview-text">{note.preview_text}</p>
+                {/if}
+              {/if}
+              {#if note.tags.length}
+                <div class="tags">
+                  {#each note.tags.slice(0, 3) as tag}<span class="tag">#{tag}</span>{/each}
+                </div>
+              {/if}
             </div>
-            <span class="date">{new Date(note.updated_at * 1000).toLocaleDateString()}</span>
-          </a>
-          <button class="card-menu" onclick={(e) => { e.preventDefault(); e.stopPropagation(); menuNoteId = menuNoteId === note.id ? null : note.id; }}>
-            <span class="material-symbols-outlined">more_vert</span>
-          </button>
+            <div class="trailing">
+              <span class="date">{formatRelative(note.updated_at)}</span>
+              <button class="card-menu" aria-label="More options" onclick={(e) => { e.stopPropagation(); menuNoteId = menuNoteId === note.id ? null : note.id; }}>
+                <span class="material-symbols-outlined">more_vert</span>
+              </button>
+            </div>
+          </div>
           {#if menuNoteId === note.id}
             <div class="card-menu-backdrop" role="presentation" onclick={(e) => { e.stopPropagation(); menuNoteId = null; }}></div>
             <div class="card-popover">
@@ -266,11 +340,24 @@
           {/if}
         {/if}
       </li>
-    {/each}
+  {/snippet}
+
+  <ul class="note-list">
+    {#if pinnedNotes.length}
+      <li class="section-label">
+        <span class="material-symbols-outlined sec-ico" style="font-size: 15px; font-variation-settings: 'FILL' 1;">push_pin</span>
+        <span>Pinned</span>
+      </li>
+      {#each pinnedNotes as note (note.id)}{@render noteCard(note)}{/each}
+    {/if}
+    {#if pinnedNotes.length && otherNotes.length}
+      <li class="section-label"><span>All notes</span></li>
+    {/if}
+    {#each otherNotes as note (note.id)}{@render noteCard(note)}{/each}
     {#if filtered.length === 0}
       <li class="empty">
-        <span class="material-symbols-outlined empty-icon">note_add</span>
-        <span>No notes yet. Tap + to create one.</span>
+        <span class="material-symbols-outlined empty-icon">{filter ? "search_off" : "note_add"}</span>
+        <span>{filter ? "No notes match your search." : "No notes yet. Tap + to create one."}</span>
       </li>
     {/if}
   </ul>
@@ -284,10 +371,10 @@
   {#if fabOpen}
     <div class="fab-options">
       {#each fabKinds as kind, i}
-        <button class="fab-option" style="animation-delay: {i * 40}ms"
+        <button class="fab-option" style="animation-delay: {(fabKinds.length - 1 - i) * 40}ms"
           onclick={() => { fabOpen = false; goto(`/note/new?kind=${kind.id}`); }}>
-          <span class="material-symbols-outlined">{kind.icon}</span>
-          <span>{kind.label}</span>
+          <span class="fab-label">{kind.label}</span>
+          <span class="fab-badge"><span class="material-symbols-outlined">{kind.icon}</span></span>
         </button>
       {/each}
     </div>
@@ -299,16 +386,18 @@
 
 {#if selecting && selected.size > 0}
   <div class="action-bar">
+    <button class="bar-cancel" onclick={toggleSelect} aria-label="Cancel selection">
+      <span class="material-symbols-outlined">close</span>
+    </button>
     <span class="sel-count">{selected.size} selected</span>
-    <div class="bar-actions">
-      <button class="btn-ghost" onclick={() => pwModal = { mode: "set", ids: Array.from(selected), isBatch: true }} aria-label="Protect selected">
-        <span class="material-symbols-outlined">lock</span>
-      </button>
-      <button class="btn-ghost" onclick={() => pwModal = { mode: "remove", ids: Array.from(selected), isBatch: true }} aria-label="Remove protection">
-        <span class="material-symbols-outlined">lock_open</span>
-      </button>
-      <button class="btn-send" onclick={sendSelected}>Send selected</button>
-    </div>
+    <div class="bar-spacer"></div>
+    <button class="btn-ghost" onclick={() => pwModal = { mode: "set", ids: Array.from(selected), isBatch: true }} aria-label="Protect selected">
+      <span class="material-symbols-outlined">lock</span>
+    </button>
+    <button class="btn-ghost" onclick={() => pwModal = { mode: "remove", ids: Array.from(selected), isBatch: true }} aria-label="Remove protection">
+      <span class="material-symbols-outlined">lock_open</span>
+    </button>
+    <button class="btn-send" onclick={sendSelected}>Send</button>
   </div>
 {/if}
 
@@ -322,10 +411,12 @@
 {/if}
 
 {#if transferNoteIds}
-  <TransferModal
-    noteIds={transferNoteIds}
-    onclose={() => { transferNoteIds = null; selecting = false; selected = new Set(); }}
-  />
+  {#await import("$lib/components/TransferModal.svelte") then { default: TransferModal }}
+    <TransferModal
+      noteIds={transferNoteIds}
+      onclose={() => { transferNoteIds = null; selecting = false; selected = new Set(); }}
+    />
+  {/await}
 {/if}
 
 {#if deleteTargetId}
@@ -342,49 +433,49 @@
 <style>
   .page {
     padding: 1.5rem 2rem 2rem;
-    max-width: 800px; margin: 0 auto;
+    max-width: 600px; margin: 0 auto;
   }
 
   /* Toolbar */
   .toolbar {
-    display: flex; gap: 0.5rem; margin-bottom: 1.25rem; align-items: center;
+    display: flex; gap: 6px; margin-bottom: 1.25rem; align-items: center;
     background: var(--surface-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-    padding: 0.75rem 1rem; border-radius: var(--radius);
+    padding: 0.4rem 0.5rem; border-radius: var(--radius);
     border: 1px solid var(--border);
     box-shadow: 0 2px 12px var(--shadow-color);
     position: relative; z-index: 10;
   }
-  .menu-btn {
+  .menu-btn, .sort-btn, .select-btn {
+    width: 40px; height: 40px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
     background: none; border: none; cursor: pointer; color: var(--text-secondary);
-    display: flex; align-items: center; padding: 0.25rem; border-radius: var(--radius-full);
-    flex-shrink: 0; transition: all 0.15s ease;
+    border-radius: var(--radius-full); transition: all 0.15s ease;
   }
-  .menu-btn:hover { color: var(--accent); background: var(--accent-muted); }
+  .menu-btn:hover, .sort-btn:hover, .select-btn:hover { color: var(--accent); background: var(--accent-muted); }
+  .toolbar button > .material-symbols-outlined { font-size: 22px; }
   .search-wrap {
-    flex: 1; min-width: 0; position: relative; display: flex; align-items: center;
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; height: 38px;
+    background: var(--surface-container); border-radius: var(--radius-full);
+    padding: 0 0.7rem; transition: box-shadow 0.15s ease;
   }
-  .search-icon {
-    position: absolute; left: 0.75rem; color: var(--muted); font-size: 20px;
-    pointer-events: none;
-  }
+  .search-wrap:focus-within { box-shadow: 0 0 0 2px var(--accent-muted); }
+  .search-icon { color: var(--muted); font-size: 18px; flex-shrink: 0; }
   .search {
-    width: 100%; padding: 0.55rem 0.75rem 0.55rem 2.5rem;
-    border: none; border-radius: var(--radius-full);
-    background: var(--surface-container); color: var(--text);
-    font-size: 0.9rem; outline: none;
-    transition: box-shadow 0.15s ease;
+    flex: 1; min-width: 0; height: 100%; padding: 0;
+    border: none; outline: none; background: transparent; color: var(--text);
+    font-size: 0.9rem;
   }
-  .search:focus { box-shadow: 0 0 0 2px var(--accent-muted); }
   .search::placeholder { color: var(--muted); }
+  .clear-btn {
+    display: flex; align-items: center; flex-shrink: 0;
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    padding: 2px; border-radius: var(--radius-full); transition: all 0.15s ease;
+  }
+  .clear-btn:hover { color: var(--accent); background: var(--accent-muted); }
 
   /* Sort */
   .sort-wrap { position: relative; flex-shrink: 0; z-index: 20; }
-  .sort-btn {
-    background: none; border: none; cursor: pointer; color: var(--text-secondary);
-    display: flex; align-items: center; padding: 0.35rem; border-radius: var(--radius-full);
-    transition: all 0.15s ease;
-  }
-  .sort-btn:hover { color: var(--accent); background: var(--accent-muted); }
+  .sort-btn.active { color: var(--accent); background: var(--accent-muted); }
   .sort-backdrop { position: fixed; inset: 0; z-index: 19; }
   .sort-dropdown {
     position: absolute; top: calc(100% + 0.5rem); right: 0; z-index: 20;
@@ -394,36 +485,28 @@
     box-shadow: 0 8px 24px var(--shadow-color-hover);
   }
   .sort-option {
-    width: 100%; display: flex; align-items: center; justify-content: space-between;
-    padding: 0.5rem 0.75rem; border: none; background: none;
-    border-radius: var(--radius-sm); cursor: pointer;
+    width: 100%; display: flex; align-items: center; justify-content: flex-start; gap: 10px;
+    padding: 0.5rem 0.6rem; border: none; background: none;
+    border-radius: var(--radius-sm); cursor: pointer; text-align: left;
     font-size: 0.85rem; color: var(--text-secondary);
     transition: all 0.1s ease;
   }
   .sort-option:hover { background: var(--hover); color: var(--text); }
-  .sort-option.active { color: var(--accent); font-weight: 600; }
+  .sort-option.active { color: var(--accent); font-weight: 700; }
+  .sort-divider { height: 1px; background: var(--border); margin: 4px 6px; }
 
-  .select-btn {
-    padding: 0.5rem 1rem; border-radius: var(--radius-full);
-    border: 1.5px solid var(--border); background: transparent;
-    color: var(--text-secondary); cursor: pointer; white-space: nowrap; flex-shrink: 0;
-    font-weight: 500; transition: all 0.15s ease;
-  }
-  .select-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .select-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
+  .select-btn.active { color: var(--accent); background: var(--accent-muted); }
   @media (max-width: 640px) {
     .page { padding: 1rem 0.75rem calc(1rem + env(safe-area-inset-bottom, 0px)); }
-    .toolbar { padding: 0.5rem 0.75rem; }
-    .search { font-size: 0.85rem; padding: 0.45rem 0.6rem 0.45rem 2.2rem; }
-    .select-btn { padding: 0.45rem 0.7rem; font-size: 0.85rem; }
+    .search { font-size: 0.85rem; }
   }
 
   /* Note list */
   .note-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   li { display: flex; align-items: center; min-width: 0; position: relative; }
   .note-card {
-    flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.85rem;
-    padding: 0.85rem 1.15rem; border-radius: var(--radius);
+    flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 0.8rem;
+    padding: 0.85rem 0.95rem; border-radius: var(--radius);
     border: 1px solid transparent; background: var(--surface);
     text-decoration: none; color: var(--text);
     cursor: pointer; width: 100%; text-align: left;
@@ -436,7 +519,17 @@
     transform: translateY(-2px);
     border-color: var(--accent-muted);
   }
+  .note-card:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--accent), 0 4px 16px var(--shadow-color);
+  }
   .note-card.checked { border-color: var(--accent); background: var(--accent-muted); }
+
+  .trailing {
+    display: flex; flex-direction: column; align-items: flex-end; justify-content: space-between;
+    align-self: stretch; flex-shrink: 0; gap: 0.4rem;
+  }
+  .title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
   .badge-wrap { position: relative; flex-shrink: 0; }
   .pin-indicator {
@@ -447,7 +540,13 @@
     box-shadow: 0 1px 4px var(--shadow-color);
     pointer-events: none;
   }
-  .checkbox { flex-shrink: 0; color: var(--accent); display: flex; align-items: center; }
+  .select-box {
+    width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--border); background: transparent; color: var(--on-accent);
+    transition: all 0.15s ease;
+  }
+  .select-box.on { border-color: var(--accent); background: var(--accent); }
 
   .kind-badge {
     width: 40px; height: 40px; border-radius: 12px;
@@ -460,39 +559,61 @@
 
   .note-info { flex: 1; min-width: 0; overflow: hidden; }
   .note-info strong {
-    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-weight: 700; font-size: 0.95rem;
   }
-  .lock { margin-left: 4px; color: var(--muted); }
+  .lock { color: var(--muted); display: flex; flex-shrink: 0; }
   .preview-text {
-    margin: 2px 0 0; font-size: 0.78rem; color: var(--muted); line-height: 1.4;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    margin: 3px 0 0; font-size: 0.78rem; color: var(--muted); line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .tags { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .tags { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .tag {
     font-size: 0.68rem; padding: 2px 10px; font-weight: 600;
     background: var(--accent-muted); border-radius: var(--radius-full); color: var(--accent);
   }
-  .date { font-size: 0.78rem; color: var(--muted); white-space: nowrap; font-weight: 500; }
-  .note-card.light-bg { color: #2e1a28; }
-  .note-card.light-bg .date,
-  .note-card.light-bg .preview-text { color: #604868; }
-  .note-card.light-bg .tag { background: rgba(0,0,0,0.08); color: #604868; }
+  .date { font-size: 0.72rem; color: var(--muted); white-space: nowrap; font-weight: 500; }
+
+  /* Auto-contrast ink for notes with a custom background */
+  .note-card.dark-ink { color: #2e1a28; }
+  .note-card.dark-ink .date,
+  .note-card.dark-ink .preview-text,
+  .note-card.dark-ink .lock,
+  .note-card.dark-ink .card-menu { color: #604868; }
+  .note-card.dark-ink .tag { background: rgba(0,0,0,0.08); color: #604868; }
+
+  .note-card.light-ink { color: #ffffff; }
+  .note-card.light-ink .date,
+  .note-card.light-ink .preview-text,
+  .note-card.light-ink .lock,
+  .note-card.light-ink .card-menu { color: rgba(255,255,255,0.88); }
+  .note-card.light-ink .tag { background: rgba(255,255,255,0.22); color: #ffffff; }
+
   .note-card.has-bg-image {
     background-size: cover; background-position: center;
     position: relative;
   }
+  .note-card > * { position: relative; z-index: 1; }
   .note-card.has-bg-image::before {
-    content: ""; position: absolute; inset: 0;
-    background: rgba(255,255,255,0.55);
+    content: ""; position: absolute; inset: 0; z-index: 0;
     border-radius: inherit; pointer-events: none;
   }
+  .note-card.has-bg-image.dark-ink::before { background: rgba(255,255,255,0.45); }
+  .note-card.has-bg-image.light-ink::before { background: rgba(0,0,0,0.4); }
+
+  .section-label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 0.6rem 0.5rem 0.1rem;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .section-label .sec-ico { color: var(--accent); }
 
   /* Card context menu */
   .card-menu {
-    background: none; border: none; cursor: pointer; margin-left: 0.15rem;
-    color: var(--muted); flex-shrink: 0; padding: 0.3rem;
+    background: none; border: none; cursor: pointer; margin: 0 -2px -2px 0;
+    color: var(--muted); flex-shrink: 0; padding: 0.2rem;
     border-radius: var(--radius-full); transition: all 0.15s ease;
     display: flex; align-items: center;
   }
@@ -527,12 +648,19 @@
     bottom: env(safe-area-inset-bottom, 0px);
     background: var(--surface-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     border-top: 1px solid var(--border);
-    padding: 0.85rem 1.5rem;
-    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.8rem 1rem;
+    display: flex; align-items: center; gap: 0.6rem;
     box-shadow: 0 -4px 16px var(--shadow-color);
   }
-  .sel-count { font-size: 0.9rem; color: var(--muted); font-weight: 500; }
-  .bar-actions { display: flex; align-items: center; gap: 0.6rem; }
+  .bar-cancel {
+    width: 40px; height: 40px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none; cursor: pointer; color: var(--text-secondary);
+    border-radius: var(--radius-full); transition: all 0.15s ease;
+  }
+  .bar-cancel:hover { color: var(--accent); background: var(--accent-muted); }
+  .sel-count { font-size: 0.9rem; color: var(--text); font-weight: 700; }
+  .bar-spacer { flex: 1; }
   .btn-ghost {
     width: 40px; height: 40px; border-radius: var(--radius-full);
     border: 1px solid var(--border); background: transparent;
@@ -569,17 +697,23 @@
   .fab:hover { transform: scale(1.08); }
   .fab-options { display: flex; flex-direction: column; align-items: flex-end; gap: 0.5rem; }
   .fab-option {
-    display: flex; align-items: center; gap: 0.6rem; padding: 0.55rem 1rem 0.55rem 0.75rem;
+    display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.55rem 0.5rem 1rem;
     border: 1px solid var(--border); border-radius: var(--radius-full);
     background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-    color: var(--text); cursor: pointer; font-size: 0.85rem; font-weight: 500;
+    color: var(--text); cursor: pointer; font-size: 0.85rem; font-weight: 600;
     box-shadow: 0 4px 16px var(--shadow-color);
     animation: fab-pop 0.2s ease both;
     transition: background 0.1s ease, transform 0.1s ease;
     white-space: nowrap;
   }
   .fab-option:hover { background: var(--hover); transform: translateX(-4px); }
-  .fab-option .material-symbols-outlined { font-size: 20px; color: var(--accent); }
+  .fab-label { line-height: 1; }
+  .fab-badge {
+    width: 34px; height: 34px; border-radius: var(--radius-full);
+    background: var(--accent-muted); color: var(--accent);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .fab-badge .material-symbols-outlined { font-size: 18px; }
   @keyframes fab-pop {
     from { opacity: 0; transform: translateY(8px) scale(0.9); }
     to { opacity: 1; transform: translateY(0) scale(1); }

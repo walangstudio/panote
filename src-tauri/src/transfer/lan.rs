@@ -32,6 +32,14 @@ use uuid::Uuid;
 pub const SERVICE_TYPE: &str = "_panote._tcp.local.";
 pub const TRANSFER_PORT: u16 = 47291;
 pub const BEACON_PORT: u16 = 47292;
+/// Max notes accepted per transfer offer — bounds the receive read-loop (K1).
+pub const MAX_NOTES_PER_TRANSFER: u32 = 1000;
+/// Max transfer offers awaiting recipient response at once (N2).
+const MAX_PENDING_OFFERS: usize = 64;
+/// Max concurrent inbound TLS connections being handled (K10).
+const MAX_INBOUND_CONNECTIONS: usize = 16;
+/// Fixed AAD context binding transfer-blob ciphertext to this protocol (N3).
+pub(crate) const TRANSFER_AAD: &[u8] = b"panote-transfer-v1";
 
 // ---- mDNS ----
 
@@ -116,9 +124,14 @@ pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
                     let from_ip = from.ip().to_string();
                     if let Ok(s) = std::str::from_utf8(&buf[..n]) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                            let name = v["name"].as_str().unwrap_or("unknown").to_string();
+                            // K9: validate untrusted beacon fields before use.
+                            let name: String =
+                                v["name"].as_str().unwrap_or("unknown").chars().take(128).collect();
                             if name == own_name_l { continue; }
-                            let port = v["port"].as_u64().unwrap_or(TRANSFER_PORT as u64) as u16;
+                            let port = match v["port"].as_u64() {
+                                Some(p) if (1..=65535).contains(&p) => p as u16,
+                                _ => continue,
+                            };
                             let peer = Peer {
                                 id: format!("{from_ip}:{port}"),
                                 name,
@@ -174,21 +187,28 @@ pub async fn start_listener(
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
 ) -> anyhow::Result<()> {
-    let (cert_der, key_der) = device_identity(&state.db).await?;
+    let (cert_der, key_der) = device_identity(&state.db, &state.device_key).await?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     let server_cfg = tls::server_config(cert_der, key_der, provider)?;
     let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
 
     let listener = TcpListener::bind(format!("0.0.0.0:{TRANSFER_PORT}")).await?;
+    // K10: cap concurrent inbound TLS connections so a flood can't spawn unbounded tasks.
+    let inbound_limit = Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_CONNECTIONS));
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        let Ok(permit) = inbound_limit.clone().try_acquire_owned() else {
+            eprintln!("[lan] inbound connection limit reached, dropping {peer_addr}");
+            continue;
+        };
         let acceptor = acceptor.clone();
         let state = state.clone();
         let handle = app_handle.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_incoming(stream, peer_addr.to_string(), acceptor, state, handle).await {
+            let _permit = permit;
+            if let Err(e) = handle_incoming(stream, peer_addr, acceptor, state, handle).await {
                 eprintln!("[lan] incoming connection error from {peer_addr}: {e}");
             }
         });
@@ -197,7 +217,7 @@ pub async fn start_listener(
 
 async fn handle_incoming(
     stream: TcpStream,
-    _peer_addr: String,
+    peer_addr: std::net::SocketAddr,
     acceptor: TlsAcceptor,
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
@@ -206,11 +226,17 @@ async fn handle_incoming(
     let payload = read_frame(&mut tls).await?;
     let msg: Message = serde_json::from_slice(&payload)?;
 
+    // N2: rate-limit by IP, not the full ip:ephemeral_port socket address —
+    // the port changes every connection so keying by the full address would
+    // never actually throttle a repeat offender. `.ip()` also handles IPv6
+    // correctly, unlike splitting the string on ':'.
+    let peer_ip = peer_addr.ip().to_string();
+
     match msg {
         Message::TransferOffer { from_peer, offer_id, note_count } => {
             handle_transfer_offer(
                 &mut tls, &state, &app_handle,
-                from_peer, offer_id, note_count,
+                &peer_ip, from_peer, offer_id, note_count,
             ).await?;
         }
         // Keep backward-compat: old senders may still blast SendNote directly.
@@ -252,10 +278,37 @@ async fn handle_transfer_offer(
     tls: &mut tokio_rustls::server::TlsStream<TcpStream>,
     state: &Arc<AppState>,
     app_handle: &tauri::AppHandle,
+    peer_addr: &str,
     from_peer: String,
     offer_id: String,
     note_count: u32,
 ) -> anyhow::Result<()> {
+    // K1: cap notes per offer — bounds the receive read-loop below.
+    if note_count > MAX_NOTES_PER_TRANSFER {
+        let reject = serde_json::to_vec(&Message::Reject {
+            reason: format!("too many notes in one transfer (max {MAX_NOTES_PER_TRANSFER})"),
+        })?;
+        write_frame(tls, &reject).await?;
+        anyhow::bail!("rejected offer from {peer_addr}: note_count {note_count} exceeds cap");
+    }
+
+    // N2: per-peer rate limit on offer creation.
+    if !state.allow_offer_attempt(peer_addr) {
+        let reject = serde_json::to_vec(&Message::Reject {
+            reason: "too many transfer offers, try again later".into(),
+        })?;
+        write_frame(tls, &reject).await?;
+        anyhow::bail!("rejected offer from {peer_addr}: rate limit exceeded");
+    }
+
+    // N2: cap total pending offers awaiting a response.
+    if state.pending_offers.lock().unwrap().len() >= MAX_PENDING_OFFERS {
+        let reject = serde_json::to_vec(&Message::Reject {
+            reason: "too many pending transfer offers, try again later".into(),
+        })?;
+        write_frame(tls, &reject).await?;
+        anyhow::bail!("rejected offer from {peer_addr}: pending offer cap reached");
+    }
 
     let offer = crate::state::PendingOffer {
         offer_id: offer_id.clone(),
@@ -353,6 +406,30 @@ async fn handle_transfer_offer(
     Ok(())
 }
 
+// ---- TOFU fingerprint pinning (K3) ----
+
+/// Defense-in-depth alongside `TofuVerifier`: hard-reject if `peer_id` has a
+/// previously-persisted fingerprint that differs from the one just presented
+/// (e.g. covers the case where the in-memory TOFU store's DB preload at
+/// startup silently failed). Persists first-seen fingerprints.
+// ponytail: still trust-on-FIRST-sight — an attacker present for the very
+// first connection to a peer_id is accepted as that peer. Out-of-band
+// fingerprint confirmation during pairing is the upgrade path.
+async fn verify_and_persist_fingerprint(
+    db: &sqlx::SqlitePool,
+    peer_id: &str,
+    cert_der: &[u8],
+) -> anyhow::Result<()> {
+    let fp = tls::cert_fingerprint(cert_der);
+    if let Some(existing) = queries::known_peer_get(db, peer_id).await? {
+        if existing.fingerprint.len() == 32 && existing.fingerprint != fp {
+            anyhow::bail!("TOFU fingerprint mismatch for {peer_id} — possible MITM, rejecting");
+        }
+    }
+    queries::known_peer_upsert(db, peer_id, &fp, now_secs()).await?;
+    Ok(())
+}
+
 // ---- TLS TCP probe (Hello handshake) ----
 
 /// Send a Hello message to a peer by IP and return a Peer struct if it responds.
@@ -379,6 +456,13 @@ pub async fn hello_probe(
         connector.connect(domain, stream).await?
     };
 
+    // K3: hard-reject and persist before sending anything sensitive.
+    if let Some(certs) = tls.get_ref().1.peer_certificates() {
+        if let Some(cert) = certs.first() {
+            verify_and_persist_fingerprint(&state.db, address, cert.as_ref()).await?;
+        }
+    }
+
     let msg = Message::Hello {
         device_name: device_name.to_string(),
     };
@@ -387,14 +471,6 @@ pub async fn hello_probe(
 
     let reply_bytes = read_frame(&mut tls).await?;
     let _reply: Message = serde_json::from_slice(&reply_bytes)?;
-
-    // Persist TOFU fingerprint.
-    if let Some(certs) = tls.get_ref().1.peer_certificates() {
-        if let Some(cert) = certs.first() {
-            let fp = tls::cert_fingerprint(cert.as_ref());
-            let _ = queries::known_peer_upsert(&state.db, address, &fp, now_secs()).await;
-        }
-    }
 
     Ok(Peer {
         id: format!("{address}:{port}"),
@@ -426,7 +502,7 @@ pub async fn send_note(
     let transfer_salt = random_salt();
     let transfer_key = derive_key(passphrase, &transfer_salt).map_err(|e| e.to_string())?;
     let (transfer_nonce, transfer_ct) =
-        encrypt(&transfer_key, &blob_bytes).map_err(|e| e.to_string())?;
+        encrypt(&transfer_key, &blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let client_cfg = tls::client_config(state.tofu.clone(), provider)
@@ -447,6 +523,15 @@ pub async fn send_note(
         connector.connect(domain, stream).await.map_err(|e| e.to_string())?
     };
 
+    // K3: hard-reject and persist before sending anything sensitive.
+    if let Some(certs) = tls.get_ref().1.peer_certificates() {
+        if let Some(cert) = certs.first() {
+            verify_and_persist_fingerprint(&state.db, tofu_key, cert.as_ref())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     let msg = Message::SendNote {
         from_peer: device_name.to_string(),
         transfer_salt: transfer_salt.to_vec(),
@@ -460,14 +545,6 @@ pub async fn send_note(
 
     let reply_bytes = read_frame(&mut tls).await.map_err(|e| e.to_string())?;
     let reply: Message = serde_json::from_slice(&reply_bytes).map_err(|e| e.to_string())?;
-
-    // Persist peer cert fingerprint so TOFU survives restarts.
-    if let Some(certs) = tls.get_ref().1.peer_certificates() {
-        if let Some(cert) = certs.first() {
-            let fp = tls::cert_fingerprint(cert.as_ref());
-            let _ = queries::known_peer_upsert(&state.db, &tofu_key, &fp, now_secs()).await;
-        }
-    }
 
     match reply {
         Message::Ack { .. } => Ok(()),
@@ -520,6 +597,15 @@ pub async fn send_notes(
         connector.connect(domain, stream).await.map_err(|e| e.to_string())?
     };
 
+    // K3: hard-reject and persist before sending anything sensitive.
+    if let Some(certs) = tls.get_ref().1.peer_certificates() {
+        if let Some(cert) = certs.first() {
+            verify_and_persist_fingerprint(&state.db, address, cert.as_ref())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     // 1. Send TransferOffer
     let offer_id = Uuid::new_v4().to_string();
     let offer = Message::TransferOffer {
@@ -540,21 +626,33 @@ pub async fn send_notes(
         _ => return Err("unexpected reply from recipient".into()),
     };
 
-    // 3. Verify passphrase matches (case-insensitive, strip dashes)
+    // K5: lock out further pairing attempts against this address after
+    // repeated wrong-code responses.
+    if state.passphrase_locked_out(address) {
+        return Err("too many failed pairing attempts for this device — try again later".into());
+    }
+
+    // 3. Verify passphrase matches (case-insensitive, strip dashes) in constant time.
     let normalize = |s: &str| s.replace('-', "").to_uppercase();
-    if normalize(&recipient_code) != normalize(passphrase) {
+    let matches = constant_time_eq::constant_time_eq(
+        normalize(&recipient_code).as_bytes(),
+        normalize(passphrase).as_bytes(),
+    );
+    if !matches {
+        state.record_passphrase_failure(address);
         let reject = Message::Reject { reason: "wrong code".into() };
         let reject_bytes = serde_json::to_vec(&reject).map_err(|e| e.to_string())?;
         write_frame(&mut tls, &reject_bytes).await.map_err(|e| e.to_string())?;
         return Err("recipient entered the wrong code".into());
     }
+    state.reset_passphrase_failures(address);
 
     // 4. Send all notes (blobs were built up front, so no note can fail here).
     for blob_bytes in &blobs {
         let transfer_salt = random_salt();
         let transfer_key = derive_key(passphrase, &transfer_salt).map_err(|e| e.to_string())?;
         let (transfer_nonce, transfer_ct) =
-            encrypt(&transfer_key, blob_bytes).map_err(|e| e.to_string())?;
+            encrypt(&transfer_key, blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
 
         let msg = Message::SendNote {
             from_peer: device_name.to_string(),
@@ -569,14 +667,6 @@ pub async fn send_notes(
     // 5. Read final Ack
     let ack_bytes = read_frame(&mut tls).await.map_err(|e| e.to_string())?;
     let ack: Message = serde_json::from_slice(&ack_bytes).map_err(|e| e.to_string())?;
-
-    // Persist TOFU fingerprint
-    if let Some(certs) = tls.get_ref().1.peer_certificates() {
-        if let Some(cert) = certs.first() {
-            let fp = tls::cert_fingerprint(cert.as_ref());
-            let _ = queries::known_peer_upsert(&state.db, address, &fp, now_secs()).await;
-        }
-    }
 
     match ack {
         Message::Ack { .. } => Ok(()),
@@ -600,7 +690,8 @@ async fn build_blob(
         .await?
         .ok_or_else(|| anyhow::anyhow!("note not found"))?;
 
-    let title_bytes = decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct)?;
+    let title_bytes =
+        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())?;
     let title = String::from_utf8(title_bytes)?;
 
     // A protected note must be unlocked this session to be sent.
@@ -620,10 +711,11 @@ async fn build_blob(
         password.as_deref(),
     )?;
 
-    let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct)?;
+    let content_bytes =
+        decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())?;
     let content: serde_json::Value = serde_json::from_slice(&content_bytes)?;
 
-    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
+    let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags)?;
 
     let blob = TransferBlob {
         id: row.id.clone(),
@@ -648,17 +740,127 @@ pub fn decrypt_transfer(
     passphrase: &str,
 ) -> anyhow::Result<TransferBlob> {
     let transfer_key = derive_key(passphrase, transfer_salt)?;
-    let blob_bytes = decrypt(&transfer_key, transfer_nonce, transfer_ct)?;
+    let blob_bytes = decrypt(&transfer_key, transfer_nonce, transfer_ct, TRANSFER_AAD)?;
     TransferBlob::decode(&blob_bytes)
 }
 
 // ---- Device TLS identity ----
 
-pub async fn device_identity(db: &sqlx::SqlitePool) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+/// Binds the encrypted TLS private key to this specific use (K7).
+const DEVICE_KEY_AAD: &[u8] = b"panote-device-identity-key";
+
+/// Load (or generate) this device's TLS identity. The private key is stored
+/// encrypted under the device key — never in plaintext (K7).
+pub async fn device_identity(
+    db: &sqlx::SqlitePool,
+    device_key: &[u8; 32],
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     if let Some(row) = queries::device_identity_get(db).await? {
-        return Ok((row.cert_der, row.key_der));
+        let key_der = decrypt_device_identity_key(db, device_key, &row.key_der).await?;
+        return Ok((row.cert_der, key_der));
     }
     let (cert_der, key_der) = tls::generate_self_signed()?;
-    queries::device_identity_insert(db, &cert_der, &key_der).await?;
+    let stored_key = encrypt_device_identity_key(device_key, &key_der)?;
+    queries::device_identity_insert(db, &cert_der, &stored_key).await?;
     Ok((cert_der, key_der))
+}
+
+/// Encrypt the TLS private key before persisting. Stored layout:
+/// `nonce (12 bytes) || ciphertext`.
+fn encrypt_device_identity_key(device_key: &[u8; 32], key_der: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use crate::crypto::note::encrypt_with_vault;
+    let (nonce, ct) = encrypt_with_vault(device_key, key_der, DEVICE_KEY_AAD)?;
+    let mut out = Vec::with_capacity(nonce.len() + ct.len());
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Decrypt a stored TLS private key.
+///
+/// Rows written before this fix hold a raw (unencrypted) PKCS8 DER key.
+/// `decrypt_with_vault` already retries with an empty AAD for rows encrypted
+/// before AAD binding; if that also fails, this is only treated as a legacy
+/// plaintext key when it plausibly IS one, and is re-encrypted in place so
+/// it's read as plaintext at most once. Anything else is a hard error rather
+/// than being handed to the TLS layer as a "key".
+// ponytail: `stored.first() == Some(&0x30)` (DER SEQUENCE tag) is a
+// heuristic, not a real ASN.1 parse — good enough to distinguish a genuine
+// legacy key from corrupted/garbage ciphertext without pulling in a DER
+// parser for a one-time migration path.
+async fn decrypt_device_identity_key(
+    db: &sqlx::SqlitePool,
+    device_key: &[u8; 32],
+    stored: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    use crate::crypto::note::decrypt_with_vault;
+    if stored.len() > 12 {
+        let (nonce, ct) = stored.split_at(12);
+        if let Ok(key) = decrypt_with_vault(device_key, nonce, ct, DEVICE_KEY_AAD) {
+            return Ok(key);
+        }
+    }
+    if stored.first() == Some(&0x30) {
+        let reencrypted = encrypt_device_identity_key(device_key, stored)?;
+        queries::device_identity_update_key(db, &reencrypted).await?;
+        return Ok(stored.to_vec());
+    }
+    anyhow::bail!("device identity key is neither valid ciphertext nor a legacy DER key")
+}
+
+#[cfg(test)]
+mod device_identity_key_tests {
+    use super::*;
+    use crate::db::init_pool;
+
+    async fn pool() -> sqlx::SqlitePool {
+        init_pool(":memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn roundtrip() {
+        let pool = pool().await;
+        let device_key = [7u8; 32];
+        let key_der = b"fake pkcs8 der bytes".to_vec();
+        let stored = encrypt_device_identity_key(&device_key, &key_der).unwrap();
+        assert_ne!(stored, key_der, "must not store the key in plaintext");
+        let decrypted = decrypt_device_identity_key(&pool, &device_key, &stored)
+            .await
+            .unwrap();
+        assert_eq!(decrypted, key_der);
+    }
+
+    #[tokio::test]
+    async fn legacy_der_row_falls_back_and_is_reencrypted() {
+        // A row written before this fix: raw DER bytes (starts with the
+        // ASN.1 SEQUENCE tag 0x30), no nonce/ct framing.
+        let pool = pool().await;
+        let device_key = [7u8; 32];
+        let mut legacy_key_der = vec![0x30u8];
+        legacy_key_der.extend_from_slice(b"legacy raw pkcs8 der bytes, longer than 12");
+        queries::device_identity_insert(&pool, b"dummy cert", &legacy_key_der)
+            .await
+            .unwrap();
+
+        let decrypted = decrypt_device_identity_key(&pool, &device_key, &legacy_key_der)
+            .await
+            .unwrap();
+        assert_eq!(decrypted, legacy_key_der);
+
+        // Must be re-encrypted in the DB so it's read as plaintext at most once.
+        let row = queries::device_identity_get(&pool).await.unwrap().unwrap();
+        assert_ne!(row.key_der, legacy_key_der, "must be re-encrypted after first read");
+    }
+
+    #[tokio::test]
+    async fn non_der_garbage_is_rejected() {
+        // #3: garbage that fails decryption AND doesn't look like a DER key
+        // must error, not be handed to the TLS layer as if it were a key.
+        let pool = pool().await;
+        let device_key = [7u8; 32];
+        let garbage = b"not ciphertext and not a DER key at all, long enough".to_vec();
+        assert!(decrypt_device_identity_key(&pool, &device_key, &garbage)
+            .await
+            .is_err());
+    }
 }

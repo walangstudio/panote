@@ -27,6 +27,7 @@ export interface NoteDetail {
   created_at: number;
   updated_at: number;
   has_note_password: boolean;
+  has_recovery: boolean;
   pinned: boolean;
   bg_color?: string;
   bg_image?: string;
@@ -99,6 +100,11 @@ export const noteChangePassword = (id: string, oldPassword: string, newPassword:
 export const noteUnlock = (id: string, password: string) =>
   invoke<void>("note_unlock", { id, password });
 export const noteLock = (id: string) => invoke<void>("note_lock", { id });
+// Recovery code: add returns the one-time code to show; recover sets a new password.
+export const noteAddRecovery = (id: string, password: string) =>
+  invoke<string>("note_add_recovery", { id, password });
+export const noteRecover = (id: string, recoveryCode: string, newPassword: string) =>
+  invoke<void>("note_recover", { id, recoveryCode, newPassword });
 export const notesProtect = (ids: string[], password: string) =>
   invoke<void>("notes_protect", { ids, password });
 export const notesUnprotect = (ids: string[], password: string) =>
@@ -136,6 +142,8 @@ export const knownPeersList = () => invoke<KnownPeer[]>("known_peers_list");
 export const getDeviceName = () => invoke<string>("get_device_name");
 export const setDeviceName = (name: string) =>
   invoke<void>("set_device_name", { name });
+export const getTheme = () => invoke<string | null>("get_theme");
+export const setTheme = (theme: string) => invoke<void>("set_theme", { theme });
 export const startReceiving = () => invoke<void>("start_receiving");
 export const stopReceiving = () => invoke<void>("stop_receiving");
 export const isReceiving = () => invoke<boolean>("is_receiving");
