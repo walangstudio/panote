@@ -74,10 +74,16 @@
 
   const filtered = $derived(
     sortNotes(
-      $notes.filter(n =>
-        n.title.toLowerCase().includes(filter.toLowerCase()) ||
-        n.tags.some(t => t.toLowerCase().includes(filter.toLowerCase()))
-      ),
+      $notes.filter(n => {
+        const q = filter.trim().toLowerCase();
+        if (!q) return true; // no query → show everything, including secret notes
+        // Secret notes are never searchable — not by title, tags, or anything.
+        if (n.has_note_password) return false;
+        return (
+          n.title.toLowerCase().includes(q) ||
+          n.tags.some(t => t.toLowerCase().includes(q))
+        );
+      }),
       $sortPref
     )
   );

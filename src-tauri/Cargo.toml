@@ -33,6 +33,10 @@ rand = "0.8"
 sha2 = "0.10"
 constant_time_eq = "0.3"
 base64 = "0.22"
+# PAKE for E2E transfer: the pairing code becomes the SPAKE2 password.
+spake2 = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
 
 # LAN transfer
 mdns-sd = "0.11"

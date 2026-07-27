@@ -115,18 +115,10 @@ export const peersScan = () => invoke<Peer[]>("peers_scan");
 export const peerAddManual = (address: string) =>
   invoke<Peer>("peer_add_manual", { address });
 export const deviceIps = () => invoke<string[]>("device_ips");
-export const noteSend = (
-  noteId: string,
-  peerId: string,
-  passphrase: string,
-  notePassword?: string,
-) => invoke<void>("note_send", { noteId, peerId, passphrase, notePassword });
-export const notesSend = (
-  noteIds: string[],
-  peerId: string,
-  passphrase: string,
-  notePassword?: string,
-) => invoke<void>("notes_send", { noteIds, peerId, passphrase, notePassword });
+export const noteSend = (noteId: string, peerId: string, passphrase: string) =>
+  invoke<void>("note_send", { noteId, peerId, passphrase });
+export const notesSend = (noteIds: string[], peerId: string, passphrase: string) =>
+  invoke<void>("notes_send", { noteIds, peerId, passphrase });
 export const pendingTransfersList = () =>
   invoke<PendingTransfer[]>("pending_transfers_list");
 export const pendingOffersList = () =>

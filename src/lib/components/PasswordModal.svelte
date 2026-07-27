@@ -2,13 +2,13 @@
   import { onMount, onDestroy } from "svelte";
   import { WRONG_PASSWORD } from "$lib/tauri";
 
-  type Mode = "set" | "change" | "unlock" | "remove";
+  type Mode = "set" | "change" | "unlock" | "remove" | "recover";
 
   interface Props {
     mode: Mode;
     title?: string;
     /// Perform the action. Throw to surface an error inline; resolve to close.
-    onsubmit: (v: { password: string; oldPassword?: string }) => Promise<void>;
+    onsubmit: (v: { password: string; oldPassword?: string; recoveryCode?: string }) => Promise<void>;
     onclose: () => void;
   }
   let { mode, title, onsubmit, onclose }: Props = $props();
@@ -16,6 +16,7 @@
   let current = $state("");
   let next = $state("");
   let confirm = $state("");
+  let code = $state("");
   let reveal = $state(false);
   let busy = $state(false);
   let error = $state("");
@@ -27,16 +28,19 @@
         change: "Change password",
         unlock: "Unlock note",
         remove: "Remove password",
+        recover: "Recover note",
       } as const)[mode],
   );
   const submitLabel = $derived(
-    ({ set: "Encrypt", change: "Change", unlock: "Unlock", remove: "Remove" } as const)[mode],
+    ({ set: "Encrypt", change: "Change", unlock: "Unlock", remove: "Remove", recover: "Recover" } as const)[mode],
   );
   const needsCurrent = $derived(mode === "change" || mode === "unlock" || mode === "remove");
-  const needsNew = $derived(mode === "set" || mode === "change");
+  const needsNew = $derived(mode === "set" || mode === "change" || mode === "recover");
+  const needsCode = $derived(mode === "recover");
   const fieldType = $derived(reveal ? "text" : "password");
 
   function validate(): string | null {
+    if (needsCode && !code.trim()) return "Enter your recovery code.";
     if (needsCurrent && !current) return "Enter the current password.";
     if (needsNew) {
       if (!next) return "Enter a password.";
@@ -55,6 +59,7 @@
       await onsubmit({
         password: needsNew ? next : current,
         oldPassword: needsCurrent ? current : undefined,
+        recoveryCode: needsCode ? code.trim() : undefined,
       });
       onclose();
     } catch (e) {
@@ -89,6 +94,8 @@
         Enter the current password to remove encryption from this note.
       {:else if mode === "change"}
         Enter your current password, then choose a new one.
+      {:else if mode === "recover"}
+        Enter your recovery code, then set a new password for this note.
       {:else}
         Enter the password to unlock this note.
       {/if}
@@ -97,11 +104,24 @@
     {#if mode === "set"}
       <div class="warn">
         <span class="material-symbols-outlined">warning</span>
-        There's no recovery. If you forget this password, the note can't be opened — ever.
+        There's no automatic recovery. Forget the password and the note can't be opened —
+        unless you add a recovery code.
       </div>
     {/if}
 
     <div class="fields">
+      {#if needsCode}
+        <div class="pill-input">
+          <span class="material-symbols-outlined icon">key</span>
+          <input
+            type="text"
+            placeholder="Recovery code"
+            bind:value={code}
+            autocomplete="off"
+            autofocus
+          />
+        </div>
+      {/if}
       {#if needsCurrent}
         <div class="pill-input">
           <span class="material-symbols-outlined icon">password</span>
@@ -122,7 +142,7 @@
             placeholder={mode === "change" ? "New password" : "Password"}
             bind:value={next}
             autocomplete="new-password"
-            autofocus={!needsCurrent}
+            autofocus={!needsCurrent && !needsCode}
           />
         </div>
         <div class="pill-input">

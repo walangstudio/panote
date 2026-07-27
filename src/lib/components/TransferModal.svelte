@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     peersScan, notesSend, generatePairingCode, knownPeersList, peerAddManual, deviceIps,
+    noteList, noteUnlock,
     type Peer, type KnownPeer,
   } from "$lib/tauri";
   import QrShowModal from "./QrShowModal.svelte";
@@ -13,7 +14,7 @@
   }
   let { noteIds, onclose }: Props = $props();
 
-  type Step = "peers" | "code" | "sending" | "done" | "error";
+  type Step = "peers" | "code" | "unlock" | "sending" | "done" | "error";
 
   let step = $state<Step>("peers");
   let livePeers = $state<Peer[]>([]);
@@ -28,12 +29,23 @@
   let myIps = $state<string[]>([]);
   let showQr = $state(false);
   let scanQr = $state(false);
-  let notePassword = $state("");
-  let pwReveal = $state(false);
+
+  // Protected notes in this selection must be unlocked before we can send them
+  // (Model B: the note is decrypted on this device, sent inside the E2E envelope).
+  let protectedQueue = $state<{ id: string; title: string }[]>([]);
+  let unlockIdx = $state(0);
+  let unlockPw = $state("");
+  let unlockError = $state("");
+  let unlockBusy = $state(false);
 
   onMount(async () => {
     recentPeers = await knownPeersList().catch(() => []);
     myIps = await deviceIps().catch(() => []);
+    const metas = await noteList().catch(() => []);
+    const chosen = new Set(noteIds);
+    protectedQueue = metas
+      .filter((m) => chosen.has(m.id) && m.has_note_password)
+      .map((m) => ({ id: m.id, title: m.title }));
     await scan();
   });
 
@@ -62,9 +74,41 @@
 
   async function confirmSend() {
     if (!selectedPeer) return;
+    // Unlock any protected notes first, one at a time (labeled by title).
+    if (protectedQueue.length > 0) {
+      unlockIdx = 0;
+      unlockPw = "";
+      unlockError = "";
+      step = "unlock";
+      return;
+    }
+    await doSend();
+  }
+
+  async function submitUnlock() {
+    const cur = protectedQueue[unlockIdx];
+    if (!cur || unlockBusy) return;
+    unlockBusy = true;
+    unlockError = "";
+    try {
+      await noteUnlock(cur.id, unlockPw);
+      unlockPw = "";
+      unlockIdx += 1;
+      if (unlockIdx >= protectedQueue.length) {
+        await doSend();
+      }
+    } catch {
+      unlockError = "Wrong password for this note.";
+    } finally {
+      unlockBusy = false;
+    }
+  }
+
+  async function doSend() {
+    if (!selectedPeer) return;
     step = "sending";
     try {
-      await notesSend(noteIds, selectedPeer.id, pairingCode, notePassword.trim() || undefined);
+      await notesSend(noteIds, selectedPeer.id, pairingCode);
       step = "done";
     } catch (e) {
       errorMsg = String(e);
@@ -198,28 +242,40 @@
         </div>
       </div>
 
-      <div class="section-label" style="margin-top: 1rem;">Protect on recipient device (optional)</div>
-      <p class="muted" style="font-size: 0.78rem; margin-top: 0;">
-        Set a password and the {noteIds.length === 1 ? "note arrives" : "notes arrive"} locked on the other device.
-        Leave blank to send unprotected.
+      <p class="muted" style="font-size: 0.78rem;">
+        Notes are end-to-end encrypted with this code. They arrive as normal notes —
+        the recipient can choose to protect them.
       </p>
-      <div class="manual-row">
-        <input
-          class="manual-input"
-          style="font-family: inherit;"
-          type={pwReveal ? "text" : "password"}
-          placeholder="New password (optional)"
-          bind:value={notePassword}
-        />
-        <button class="btn-connect" type="button" onclick={() => pwReveal = !pwReveal} aria-label="Toggle password visibility">
-          <span class="material-symbols-outlined" style="font-size: 18px;">{pwReveal ? "visibility_off" : "visibility"}</span>
-        </button>
-      </div>
 
       <div class="actions">
         <button class="btn-cancel" onclick={() => step = "peers"}>Back</button>
         <button class="btn-primary" onclick={confirmSend}>Send to peer</button>
       </div>
+
+    {:else if step === "unlock"}
+      <h2>Unlock to send</h2>
+      <p class="muted">
+        Enter the password for this protected note ({unlockIdx + 1} of {protectedQueue.length}):
+      </p>
+      <div class="sending-card">
+        <div class="sending-label">NOTE</div>
+        <div class="sending-value"><strong>{protectedQueue[unlockIdx]?.title || "Untitled"}</strong></div>
+      </div>
+      <form onsubmit={(e) => { e.preventDefault(); submitUnlock(); }}>
+        <input
+          class="manual-input"
+          style="font-family: inherit; width: 100%; margin-top: 0.75rem;"
+          type="password"
+          placeholder="Note password"
+          bind:value={unlockPw}
+          autofocus
+        />
+        {#if unlockError}<p class="muted" style="color: var(--danger, #e5484d);">{unlockError}</p>{/if}
+        <div class="actions">
+          <button type="button" class="btn-cancel" onclick={() => step = "code"}>Cancel</button>
+          <button type="submit" class="btn-primary" disabled={unlockBusy || !unlockPw}>Unlock</button>
+        </div>
+      </form>
 
     {:else if step === "sending"}
       <h2>Waiting for recipient…</h2>

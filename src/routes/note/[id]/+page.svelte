@@ -5,6 +5,7 @@
   import {
     noteGet, noteCreate, noteUpdate,
     noteUnlock, noteLock, noteProtect, noteUnprotect, noteChangePassword,
+    noteRecover, noteAddRecovery,
     LOCKED, type NoteKind,
   } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
@@ -32,6 +33,12 @@
   type PwMode = "set" | "change" | "remove";
   let pwModal = $state<{ mode: PwMode } | null>(null);
   let needUnlockForSave = $state(false);
+  let recoverOpen = $state(false);
+  // Password just used to protect, so we can offer a recovery code without re-asking.
+  let postProtectPw = $state<string | null>(null);
+  // One-time recovery code to display (never stored anywhere but the user's copy).
+  let recoveryCode = $state<string | null>(null);
+  let recoveryBusy = $state(false);
 
   let kind = $state<NoteKind>("document");
   let title = $state("");
@@ -185,7 +192,26 @@
     else if (m === "change") await noteChangePassword(id, v.oldPassword ?? "", v.password);
     else await noteUnprotect(id, v.password);
     hasPassword = m !== "remove";
+    // After protecting, offer a recovery code (reusing the password we just set).
+    if (m === "set") postProtectPw = v.password;
     await refreshNotes();
+  }
+
+  async function handleRecover(v: { password: string; recoveryCode?: string }) {
+    await noteRecover(id, v.recoveryCode ?? "", v.password);
+    recoverOpen = false;
+    await loadNote();
+  }
+
+  async function generateRecovery() {
+    if (!postProtectPw || recoveryBusy) return;
+    recoveryBusy = true;
+    try {
+      recoveryCode = await noteAddRecovery(id, postProtectPw);
+    } finally {
+      postProtectPw = null;
+      recoveryBusy = false;
+    }
   }
 
   async function lockButtonClick() {
@@ -369,6 +395,7 @@
       <span class="material-symbols-outlined" style="font-size: 20px; font-variation-settings: 'wght' 600;">lock_open</span>
       Unlock
     </button>
+    <button class="recover-link" onclick={() => recoverOpen = true}>Forgot password? Recover with code</button>
   </div>
 {:else}
   <div
@@ -589,6 +616,48 @@
   />
 {/if}
 
+{#if recoverOpen}
+  <PasswordModal
+    mode="recover"
+    onsubmit={handleRecover}
+    onclose={() => recoverOpen = false}
+  />
+{/if}
+
+{#if postProtectPw}
+  <div class="rc-overlay">
+    <div class="rc-backdrop" role="presentation" onclick={() => postProtectPw = null}></div>
+    <div class="rc-modal" role="dialog" aria-modal="true">
+      <h2>Add a recovery code?</h2>
+      <p class="rc-desc">
+        A one-time code lets you recover this note if you forget the password.
+        Store it in a password manager — anyone with it can open the note.
+      </p>
+      <div class="rc-actions">
+        <button class="btn-cancel" onclick={() => postProtectPw = null}>Skip</button>
+        <button class="btn-confirm" disabled={recoveryBusy} onclick={generateRecovery}>Generate code</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if recoveryCode}
+  <div class="rc-overlay">
+    <div class="rc-backdrop" role="presentation"></div>
+    <div class="rc-modal" role="dialog" aria-modal="true">
+      <h2>Your recovery code</h2>
+      <p class="rc-desc">
+        Save this now — it's shown once and never stored. Anyone with it can open this note.
+      </p>
+      <div class="rc-code">{recoveryCode}</div>
+      <div class="rc-actions">
+        <button class="btn-confirm" onclick={() => { navigator.clipboard?.writeText(recoveryCode ?? ""); }}>Copy</button>
+        <button class="btn-confirm" onclick={() => recoveryCode = null}>Done</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* ── Loading ── */
   .loading {
@@ -608,6 +677,44 @@
   }
   .lock-gate-title { font-weight: 700; font-size: 1.05rem; margin-bottom: 4px; }
   .lock-gate-sub { color: var(--muted); font-size: 0.85rem; }
+  .recover-link {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-family: inherit; font-size: 0.82rem; text-decoration: underline; padding: 4px;
+  }
+  .recover-link:hover { color: var(--accent); }
+  .rc-overlay {
+    position: fixed; inset: 0; z-index: 120;
+    display: flex; align-items: center; justify-content: center; padding: 1.1rem;
+  }
+  .rc-backdrop {
+    position: absolute; inset: 0; background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  }
+  .rc-modal {
+    position: relative; z-index: 121; background: var(--surface-glass);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 1.5rem 1.6rem; width: min(400px, 92%);
+    box-shadow: 0 16px 48px var(--shadow-color-hover);
+  }
+  .rc-modal h2 { margin: 0 0 0.6rem; font-size: 1.1rem; font-weight: 700; color: var(--text); }
+  .rc-desc { margin: 0 0 1rem; color: var(--text-secondary); font-size: 0.86rem; line-height: 1.5; }
+  .rc-code {
+    font-family: ui-monospace, monospace; font-size: 1.1rem; font-weight: 700;
+    letter-spacing: 0.06em; text-align: center; padding: 0.8rem;
+    background: var(--input-bg); border: 1px solid var(--border);
+    border-radius: var(--radius); color: var(--text); margin-bottom: 1rem; user-select: all;
+  }
+  .rc-actions { display: flex; gap: 0.6rem; justify-content: flex-end; }
+  .rc-actions .btn-cancel {
+    padding: 0.55rem 1rem; border-radius: var(--radius-full); border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-weight: 600; font-family: inherit;
+  }
+  .rc-actions .btn-confirm {
+    padding: 0.55rem 1.25rem; border-radius: var(--radius-full); border: none;
+    background: var(--accent); color: var(--on-accent); font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .rc-actions .btn-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
   .lock-gate-input {
     width: 100%; max-width: 260px; padding: 0.7rem 1rem; text-align: center;
     border-radius: var(--radius-full);

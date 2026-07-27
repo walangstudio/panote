@@ -20,6 +20,7 @@ use crate::{
         blob::TransferBlob,
         frame::{read_frame, write_frame},
         message::Message,
+        pake,
     },
 };
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -233,10 +234,10 @@ async fn handle_incoming(
     let peer_ip = peer_addr.ip().to_string();
 
     match msg {
-        Message::TransferOffer { from_peer, offer_id, note_count } => {
+        Message::TransferOffer { from_peer, offer_id, note_count, pake_msg } => {
             handle_transfer_offer(
                 &mut tls, &state, &app_handle,
-                &peer_ip, from_peer, offer_id, note_count,
+                &peer_ip, from_peer, offer_id, note_count, pake_msg,
             ).await?;
         }
         // Keep backward-compat: old senders may still blast SendNote directly.
@@ -282,6 +283,7 @@ async fn handle_transfer_offer(
     from_peer: String,
     offer_id: String,
     note_count: u32,
+    pake_msg: Vec<u8>,
 ) -> anyhow::Result<()> {
     // K1: cap notes per offer — bounds the receive read-loop below.
     if note_count > MAX_NOTES_PER_TRANSFER {
@@ -341,68 +343,73 @@ async fn handle_transfer_offer(
     // Clean up the offer from pending.
     state.pending_offers.lock().unwrap().remove(&offer_id);
 
-    // Send the passphrase back to the sender for verification.
-    let accept_msg = Message::TransferAccept {
+    // Run the SPAKE2 handshake with the entered code — the code itself never
+    // goes on the wire. Both sides derive the same session key iff the codes match.
+    let (pake_state, pake_msg_r) = pake::start(&passphrase);
+    let spake_key = pake::finish(pake_state, &pake_msg)
+        .map_err(|e| anyhow::anyhow!("pairing handshake failed: {e}"))?;
+    let keys = pake::derive_keys(&spake_key, &pake_msg, &pake_msg_r);
+
+    // Reply with our SPAKE2 message + our key-confirmation MAC.
+    let accept = Message::TransferAccept {
         offer_id: offer_id.clone(),
-        passphrase: passphrase.clone(),
+        pake_msg: pake_msg_r,
+        confirm: pake::confirm_mac(&keys.confirm_responder),
     };
-    let accept_bytes = serde_json::to_vec(&accept_msg)?;
-    write_frame(tls, &accept_bytes).await?;
+    write_frame(tls, &serde_json::to_vec(&accept)?).await?;
 
-    // Now read the sender's response — either Reject (wrong code) or SendNote messages.
-    let first_frame = read_frame(tls).await?;
-    let first_msg: Message = serde_json::from_slice(&first_frame)?;
-
-    match first_msg {
+    // Require the sender's key-confirmation MAC before accepting any note. A
+    // wrong pairing code makes this mismatch, and we abort (mutual auth).
+    match serde_json::from_slice::<Message>(&read_frame(tls).await?)? {
+        Message::PakeConfirm { confirm } => {
+            if !pake::verify_mac(&keys.confirm_initiator, &confirm) {
+                let reject = serde_json::to_vec(&Message::Reject {
+                    reason: "wrong pairing code".into(),
+                })?;
+                write_frame(tls, &reject).await?;
+                app_handle.emit("transfer-rejected", "wrong pairing code").ok();
+                anyhow::bail!("sender failed key confirmation (wrong code)");
+            }
+        }
         Message::Reject { reason } => {
             app_handle.emit("transfer-rejected", &reason).ok();
             return Err(anyhow::anyhow!("sender rejected: {reason}"));
         }
-        Message::SendNote { from_peer, transfer_salt, transfer_nonce, transfer_ct } => {
-            use crate::transfer::commands::{import_blob_detailed, ImportOutcome};
+        _ => anyhow::bail!("expected key confirmation from sender"),
+    }
 
-            let mut inserted = 0u32;
-            let mut updated = 0u32;
-
-            // Decrypt and import the first note.
-            let blob = decrypt_transfer(&transfer_salt, &transfer_nonce, &transfer_ct, &passphrase)?;
-            match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
-                ImportOutcome::Inserted => inserted += 1,
-                ImportOutcome::Updated => updated += 1,
-            }
-            let _ = queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
-
-            // Read remaining notes (note_count - 1).
-            for _ in 1..note_count {
-                let frame = read_frame(tls).await?;
-                let msg: Message = serde_json::from_slice(&frame)?;
-                if let Message::SendNote { transfer_salt, transfer_nonce, transfer_ct, .. } = msg {
-                    let blob = decrypt_transfer(&transfer_salt, &transfer_nonce, &transfer_ct, &passphrase)?;
-                    match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
-                        ImportOutcome::Inserted => inserted += 1,
-                        ImportOutcome::Updated => updated += 1,
-                    }
-                }
-            }
-
-            // Send final Ack.
-            let ack = serde_json::to_vec(&Message::Ack { transfer_id: offer_id })?;
-            write_frame(tls, &ack).await?;
-
-            // Notify frontend with import summary so it can show a toast.
-            #[derive(serde::Serialize, Clone)]
-            struct ReceiveSummary<'a> { from_peer: &'a str, inserted: u32, updated: u32 }
-            app_handle
-                .emit(
-                    "notes-received",
-                    ReceiveSummary { from_peer: &from_peer, inserted, updated },
-                )
-                .ok();
-        }
-        _ => {
-            return Err(anyhow::anyhow!("unexpected message after TransferAccept"));
+    // Receive each note, decrypting under the PAKE session key.
+    use crate::transfer::commands::{import_blob_detailed, ImportOutcome};
+    let (mut inserted, mut updated) = (0u32, 0u32);
+    for _ in 0..note_count {
+        let (nonce, ct) = match serde_json::from_slice::<Message>(&read_frame(tls).await?)? {
+            Message::SessionNote { nonce, ct } => (nonce, ct),
+            _ => anyhow::bail!("expected an encrypted note"),
+        };
+        let blob_bytes = decrypt(&keys.session, &nonce, &ct, TRANSFER_AAD)?;
+        let blob = TransferBlob::decode(&blob_bytes)?;
+        match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
+            ImportOutcome::Inserted => inserted += 1,
+            ImportOutcome::Updated => updated += 1,
         }
     }
+    let _ = queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
+
+    let ack = serde_json::to_vec(&Message::Ack { transfer_id: offer_id })?;
+    write_frame(tls, &ack).await?;
+
+    #[derive(serde::Serialize, Clone)]
+    struct ReceiveSummary<'a> {
+        from_peer: &'a str,
+        inserted: u32,
+        updated: u32,
+    }
+    app_handle
+        .emit(
+            "notes-received",
+            ReceiveSummary { from_peer: &from_peer, inserted, updated },
+        )
+        .ok();
     Ok(())
 }
 
@@ -492,9 +499,8 @@ pub async fn send_note(
     port: u16,
     passphrase: &str,
     device_name: &str,
-    note_password: Option<&str>,
 ) -> Result<(), String> {
-    let blob_bytes = build_blob(state, note_id, note_password)
+    let blob_bytes = build_blob(state, note_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -565,7 +571,6 @@ pub async fn send_notes(
     port: u16,
     passphrase: &str,
     device_name: &str,
-    note_password: Option<&str>,
 ) -> Result<(), String> {
     // Build every blob up front so a locked or missing note fails before we
     // connect or transmit anything — otherwise earlier notes would already be
@@ -573,7 +578,7 @@ pub async fn send_notes(
     let mut blobs = Vec::with_capacity(note_ids.len());
     for note_id in note_ids {
         blobs.push(
-            build_blob(state, note_id, note_password)
+            build_blob(state, note_id)
                 .await
                 .map_err(|e| e.to_string())?,
         );
@@ -606,62 +611,59 @@ pub async fn send_notes(
         }
     }
 
-    // 1. Send TransferOffer
+    // 1. Start SPAKE2 with the pairing code and open the transfer with our msg.
+    let (pake_state, pake_msg_i) = pake::start(passphrase);
     let offer_id = Uuid::new_v4().to_string();
     let offer = Message::TransferOffer {
         from_peer: device_name.to_string(),
         offer_id: offer_id.clone(),
         note_count: note_ids.len() as u32,
+        pake_msg: pake_msg_i.clone(),
     };
-    let offer_bytes = serde_json::to_vec(&offer).map_err(|e| e.to_string())?;
-    write_frame(&mut tls, &offer_bytes).await.map_err(|e| e.to_string())?;
+    write_frame(&mut tls, &serde_json::to_vec(&offer).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    // 2. Read TransferAccept (recipient sends back the code they entered)
-    let reply_bytes = read_frame(&mut tls).await.map_err(|e| e.to_string())?;
-    let reply: Message = serde_json::from_slice(&reply_bytes).map_err(|e| e.to_string())?;
-
-    let recipient_code = match reply {
-        Message::TransferAccept { passphrase: code, .. } => code,
+    // 2. Read the recipient's SPAKE2 message + key-confirmation MAC.
+    let reply: Message =
+        serde_json::from_slice(&read_frame(&mut tls).await.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let (pake_msg_r, confirm_r) = match reply {
+        Message::TransferAccept { pake_msg, confirm, .. } => (pake_msg, confirm),
         Message::Reject { reason } => return Err(format!("recipient rejected: {reason}")),
         _ => return Err("unexpected reply from recipient".into()),
     };
 
-    // K5: lock out further pairing attempts against this address after
-    // repeated wrong-code responses.
+    // K5: lock out repeated wrong-code attempts against this address.
     if state.passphrase_locked_out(address) {
         return Err("too many failed pairing attempts for this device — try again later".into());
     }
 
-    // 3. Verify passphrase matches (case-insensitive, strip dashes) in constant time.
-    let normalize = |s: &str| s.replace('-', "").to_uppercase();
-    let matches = constant_time_eq::constant_time_eq(
-        normalize(&recipient_code).as_bytes(),
-        normalize(passphrase).as_bytes(),
-    );
-    if !matches {
+    // 3. Finish SPAKE2 and verify the recipient proved knowledge of the code.
+    let spake_key = pake::finish(pake_state, &pake_msg_r).map_err(|e| e.to_string())?;
+    let keys = pake::derive_keys(&spake_key, &pake_msg_i, &pake_msg_r);
+    if !pake::verify_mac(&keys.confirm_responder, &confirm_r) {
         state.record_passphrase_failure(address);
-        let reject = Message::Reject { reason: "wrong code".into() };
-        let reject_bytes = serde_json::to_vec(&reject).map_err(|e| e.to_string())?;
-        write_frame(&mut tls, &reject_bytes).await.map_err(|e| e.to_string())?;
-        return Err("recipient entered the wrong code".into());
+        let reject = serde_json::to_vec(&Message::Reject { reason: "wrong code".into() })
+            .map_err(|e| e.to_string())?;
+        write_frame(&mut tls, &reject).await.map_err(|e| e.to_string())?;
+        return Err("wrong pairing code".into());
     }
     state.reset_passphrase_failures(address);
 
-    // 4. Send all notes (blobs were built up front, so no note can fail here).
-    for blob_bytes in &blobs {
-        let transfer_salt = random_salt();
-        let transfer_key = derive_key(passphrase, &transfer_salt).map_err(|e| e.to_string())?;
-        let (transfer_nonce, transfer_ct) =
-            encrypt(&transfer_key, blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
+    // 4. Prove we also know the code (mutual auth), then send the notes.
+    let confirm = Message::PakeConfirm { confirm: pake::confirm_mac(&keys.confirm_initiator) };
+    write_frame(&mut tls, &serde_json::to_vec(&confirm).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
 
-        let msg = Message::SendNote {
-            from_peer: device_name.to_string(),
-            transfer_salt: transfer_salt.to_vec(),
-            transfer_nonce: transfer_nonce.to_vec(),
-            transfer_ct,
-        };
-        let payload = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
-        write_frame(&mut tls, &payload).await.map_err(|e| e.to_string())?;
+    for blob_bytes in &blobs {
+        let (nonce, ct) =
+            encrypt(&keys.session, blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
+        let msg = Message::SessionNote { nonce: nonce.to_vec(), ct };
+        write_frame(&mut tls, &serde_json::to_vec(&msg).map_err(|e| e.to_string())?)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // 5. Read final Ack
@@ -677,13 +679,9 @@ pub async fn send_notes(
 
 /// Decrypt the note with the device key and return its plaintext bytes.
 /// For a protected note the session-cached password is used to peel the
-/// password layer; sending a locked note errors until it's unlocked.
-/// `note_password` is an optional new password to lock the note on the recipient.
-async fn build_blob(
-    state: &AppState,
-    note_id: &str,
-    note_password: Option<&str>,
-) -> anyhow::Result<Vec<u8>> {
+/// password layer; sending a locked note errors until it's unlocked. The blob
+/// carries plaintext (Model B) — the receiver chooses whether to protect it.
+async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> {
     use crate::crypto::note::{decrypt_with_vault, peel_vault_ct};
 
     let row = queries::note_get(&state.db, note_id)
@@ -727,7 +725,6 @@ async fn build_blob(
         updated_at: row.updated_at,
         origin_device_id: row.origin_device_id,
         origin_note_id: row.origin_note_id,
-        note_password: note_password.map(|s| s.to_string()),
     };
     blob.encode()
 }

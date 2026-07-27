@@ -305,7 +305,6 @@ async fn insert_as_blob(
         updated_at: entry.updated_at,
         origin_device_id: entry.origin_device_id.clone(),
         origin_note_id: entry.origin_note_id.clone(),
-        note_password: None,
     };
 
     let (local_id, outcome) = import_blob_detailed(state, &state.device_key, blob).await?;
