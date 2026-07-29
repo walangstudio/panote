@@ -12,6 +12,7 @@
   }
   function removeColumn(id: string) {
     content.columns = content.columns.filter(c => c.id !== id);
+    content = { ...content };
   }
   function addCard(col: KanbanColumn) {
     col.cards.push({ id: crypto.randomUUID(), title: "" });
@@ -60,10 +61,11 @@
 
     const target = findTarget(e.clientX, e.clientY);
 
-    if (drag.kind === "card" && target?.colId) {
-      const beforeCardId = target.cardId && target.cardId !== drag.card.id
-        ? target.cardId
-        : null;
+    // Released over the dragged card itself: that is a click, not a move. A null
+    // beforeCardId means "append", so treating it as a drop would silently send
+    // the card to the bottom of its own column.
+    if (drag.kind === "card" && target?.colId && target.cardId !== drag.card.id) {
+      const beforeCardId = target.cardId ?? null;
       content.columns = moveCard(content.columns, drag.card.id, drag.fromColId, target.colId, beforeCardId);
       content = { ...content };
     } else if (drag.kind === "col" && target?.colId && target.colId !== drag.colId) {

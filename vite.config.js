@@ -56,5 +56,13 @@ export default defineConfig(async () => ({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      // Without an explicit include, v8 reports on whatever it happened to load:
+      // the `build/` bundle, `.svelte-kit` chunks and the Playwright mock, which
+      // drown the real numbers.
+      include: ["src/**/*.{ts,svelte}"],
+      exclude: ["src/**/*.test.ts", "src/lib/test-stubs/**", "src/app.d.ts"],
+    },
   },
 }));
