@@ -150,6 +150,37 @@ async fn opened_all(state: &AppState) -> Vec<(String, String, Vec<String>)> {
     out
 }
 
+/// Manual harness for a real second device - not run by CI.
+///
+/// Point it at a listening peer and it performs a genuine cross-device send:
+///
+/// ```text
+/// adb forward tcp:47391 tcp:47291
+/// PANOTE_PEER=127.0.0.1:47391 cargo test --lib send_to_a_real_device -- --ignored --nocapture
+/// ```
+///
+/// Used to verify Windows -> Android against the emulator, whose NAT means the
+/// host can only reach it through a forwarded port.
+#[tokio::test]
+#[ignore = "needs a real device listening; set PANOTE_PEER"]
+async fn send_to_a_real_device() {
+    let peer = std::env::var("PANOTE_PEER").expect("set PANOTE_PEER=host:port");
+    let (host, port) = crate::transfer::commands::split_host_port(&peer).unwrap();
+
+    let alice = device("harness").await;
+    let note_id = seed(&alice, "From Windows", "sent over a real network", &["cross-device"]).await;
+
+    let probed = super::lan::hello_probe(&alice, &host, port, "WindowsHarness")
+        .await
+        .expect("TLS handshake with the real device should succeed");
+    println!("handshake ok: {} at {}:{}", probed.name, probed.address, probed.port);
+
+    send_note(&alice, &note_id, &host, port, CODE, "WindowsHarness")
+        .await
+        .expect("the real device should accept the transfer");
+    println!("note sent; enter {CODE} on the device to open it");
+}
+
 // ---- Single-note send: passphrase-wrapped, parked until the recipient opens it ----
 
 #[tokio::test]

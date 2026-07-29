@@ -100,15 +100,61 @@ pub fn generate_pairing_code() -> String {
 
 // ---- Manual peer add ----
 
-/// Connect to a device by IP, send Hello, and add it to the peer list.
+/// Split a manually typed peer into host and port, defaulting to the standard
+/// transfer port. Discovery finds peers on the default port, but a device
+/// reached through port translation - an SSH tunnel, `adb forward`, a NAT rule -
+/// answers somewhere else, and typing an address was the only way in.
+///
+/// Bare IPv6 is ambiguous with the `host:port` split, so it must be bracketed:
+/// `[::1]:47291`. A bare `::1` is treated as a host on the default port.
+pub(crate) fn split_host_port(input: &str) -> Result<(String, u16), String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("enter an address".into());
+    }
+    if let Some(rest) = s.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').ok_or("unclosed [ in address")?;
+        if host.is_empty() {
+            return Err("empty address".into());
+        }
+        return match tail.strip_prefix(':') {
+            Some(p) => Ok((host.to_string(), parse_port(p)?)),
+            None if tail.is_empty() => Ok((host.to_string(), super::lan::TRANSFER_PORT)),
+            None => Err("unexpected text after ] in address".into()),
+        };
+    }
+    // More than one colon and no brackets: a bare IPv6 literal, not host:port.
+    if s.matches(':').count() > 1 {
+        return Ok((s.to_string(), super::lan::TRANSFER_PORT));
+    }
+    match s.split_once(':') {
+        Some((host, p)) => {
+            if host.is_empty() {
+                return Err("empty address".into());
+            }
+            Ok((host.to_string(), parse_port(p)?))
+        }
+        None => Ok((s.to_string(), super::lan::TRANSFER_PORT)),
+    }
+}
+
+fn parse_port(p: &str) -> Result<u16, String> {
+    match p.parse::<u16>() {
+        Ok(0) | Err(_) => Err(format!("'{p}' is not a valid port")),
+        Ok(n) => Ok(n),
+    }
+}
+
+/// Connect to a device by address, send Hello, and add it to the peer list.
+/// Accepts `host`, `host:port`, or `[v6]:port`.
 #[tauri::command]
 pub async fn peer_add_manual(
     address: String,
     state: State<'_, AppState>,
 ) -> Result<PeerJson, String> {
-    let port = super::lan::TRANSFER_PORT;
+    let (host, port) = split_host_port(&address)?;
     let name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
-    let peer = super::lan::hello_probe(&state, &address, port, &name)
+    let peer = super::lan::hello_probe(&state, &host, port, &name)
         .await
         .map_err(|e| e.to_string())?;
     let json = PeerJson {
@@ -119,7 +165,7 @@ pub async fn peer_add_manual(
         via: "lan".into(),
     };
     let mut peers = state.peers.lock().unwrap();
-    peers.retain(|p| p.address != address);
+    peers.retain(|p| !(p.address == peer.address && p.port == peer.port));
     peers.push(peer);
     Ok(json)
 }
@@ -584,6 +630,52 @@ pub async fn import_blob_detailed(
 
     queries::note_insert(&state.db, &row).await?;
     Ok((id, ImportOutcome::Inserted))
+}
+
+#[cfg(test)]
+mod manual_peer_address_tests {
+    use super::split_host_port;
+    use crate::transfer::lan::TRANSFER_PORT;
+
+    #[test]
+    fn a_bare_host_uses_the_default_port() {
+        assert_eq!(split_host_port("192.168.1.10").unwrap(), ("192.168.1.10".into(), TRANSFER_PORT));
+    }
+
+    #[test]
+    fn an_explicit_port_is_honoured() {
+        assert_eq!(split_host_port("192.168.1.10:9000").unwrap(), ("192.168.1.10".into(), 9000));
+    }
+
+    #[test]
+    fn a_hostname_works_too() {
+        assert_eq!(split_host_port("laptop.local:47391").unwrap(), ("laptop.local".into(), 47391));
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_forgiven() {
+        assert_eq!(split_host_port("  10.0.2.2:47291  ").unwrap(), ("10.0.2.2".into(), 47291));
+    }
+
+    // Bare IPv6 is full of colons, so it must not be split as host:port.
+    #[test]
+    fn a_bare_ipv6_literal_is_not_split() {
+        assert_eq!(split_host_port("fe80::1").unwrap(), ("fe80::1".into(), TRANSFER_PORT));
+        assert_eq!(split_host_port("::1").unwrap(), ("::1".into(), TRANSFER_PORT));
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_can_carry_a_port() {
+        assert_eq!(split_host_port("[::1]:47291").unwrap(), ("::1".into(), 47291));
+        assert_eq!(split_host_port("[fe80::1]").unwrap(), ("fe80::1".into(), TRANSFER_PORT));
+    }
+
+    #[test]
+    fn rubbish_is_rejected_rather_than_silently_defaulted() {
+        for bad in ["", "   ", "host:", "host:0", "host:99999", "host:abc", ":47291", "[::1", "[]:1"] {
+            assert!(split_host_port(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
 }
 
 #[cfg(test)]

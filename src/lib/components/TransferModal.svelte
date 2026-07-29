@@ -140,7 +140,12 @@
     manualError = "";
     try {
       const peer = await peerAddManual(ip);
-      livePeers = [...livePeers.filter(p => p.address !== ip), peer];
+      // Dedupe on what came back, not on what was typed - the input may carry a
+      // port, and the same host on two ports is two different peers.
+      livePeers = [
+        ...livePeers.filter(p => !(p.address === peer.address && p.port === peer.port)),
+        peer,
+      ];
       selectedPeer = peer;
       manualIp = "";
     } catch (e) {
@@ -221,7 +226,7 @@
       <div class="manual-row">
         <input
           class="manual-input"
-          placeholder="e.g. 192.168.1.42"
+          placeholder="e.g. 192.168.1.42 or 192.168.1.42:47291"
           bind:value={manualIp}
           onkeydown={(e) => { if (e.key === "Enter") connectManual(); }}
         />
