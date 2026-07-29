@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import {
     builtinImportParsers,
     makeCustomParser,
@@ -7,11 +8,12 @@
     type ImportParser,
     type ParseResult,
   } from "$lib/tableParsers";
+  import { trapFocus } from "$lib/trapFocus";
 
   interface Props {
     columns: TableColumn[];
     customParsers?: CustomParserDef[];
-    onimport: (rows: Record<string, string>[]) => void;
+    onimport: (rows: Record<string, string>[], maskedColumnIds: string[]) => void;
     onclose: () => void;
   }
   let { columns, customParsers, onimport, onclose }: Props = $props();
@@ -30,6 +32,23 @@
   let customColumns = $state("");
   let showRegexInput = $state(false);
   let regexError = $state("");
+
+  let closeBtn: HTMLButtonElement | undefined = $state();
+  let previouslyFocused: HTMLElement | null = null;
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") { e.preventDefault(); onclose(); }
+  }
+
+  onMount(() => {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    closeBtn?.focus();
+    window.addEventListener("keydown", onKey);
+  });
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
+  });
 
   const allParsers = $derived([
     ...builtinImportParsers,
@@ -95,7 +114,12 @@
       }
       return out;
     });
-    onimport(mapped);
+    // Carry the parser's "this column is a secret" hint through to the table,
+    // so an imported password column arrives already masked.
+    const maskedIds = (parsed.masked ?? [])
+      .map((c) => columnMap[c])
+      .filter((id): id is string => !!id);
+    onimport(mapped, maskedIds);
   }
 
   const previewRows = $derived(parsed.rows.slice(0, 15));
@@ -105,8 +129,8 @@
 </script>
 
 <div class="backdrop" role="presentation" onclick={onclose}></div>
-<div class="modal" role="dialog" aria-modal="true">
-  <button class="close" onclick={onclose} aria-label="Close">
+<div class="modal" role="dialog" aria-modal="true" use:trapFocus>
+  <button class="close" bind:this={closeBtn} onclick={onclose} aria-label="Close">
     <span class="material-symbols-outlined">close</span>
   </button>
 

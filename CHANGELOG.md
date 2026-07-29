@@ -1,5 +1,62 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- **Document notes are now edited in a WYSIWYG editor (TipTap/ProseMirror), replacing the
+  markdown textarea and its Edit/Preview tabs.** The editor rewrites a note's markdown when
+  it saves, so formatting that the old editor stored in its own syntax will not survive
+  untouched. **Export your notes before updating, then import the backup afterwards** —
+  import upgrades old backups automatically (see below).
+- **Coloured text changed representation.** It used to be stored as KaTeX inline maths
+  (`$\textcolor{#hex}{\text{...}}$`); it is now an inline span (`<span style="color:#hex">`).
+- Export format is now **v2**. `notes_import` reads v1 and v2; v1 files are upgraded on
+  import, converting the old colour syntax and unescaping text that was escaped to survive
+  inside `\text{}`. v1 backups therefore keep working — but a v2 backup cannot be read by
+  an older build, which refuses it with a "newer version of panote" error.
+
+### Security
+
+- **Backups no longer contain password-protected notes in the clear.** Export used to peel
+  the password layer and write plaintext JSON. Protected notes are now re-encrypted under
+  their own password (Argon2id over a fresh salt, ChaCha20-Poly1305, bound to the note id so
+  a blob can't be moved between entries) and import asks for that password. Notes that can't
+  be decrypted are reported, never silently dropped.
+- **Unlocked notes now re-lock after 15 minutes of inactivity.** Cached passwords used to be
+  held until the app exited. They are now timestamped, zeroized on drop, and swept from
+  memory on any access — not merely ignored.
+
+### Added
+
+- Table columns have a type. `masked` renders the value as fixed-width dots (the mask does
+  not reveal length) with per-cell reveal and copy. Copying clears the clipboard after 30
+  seconds, and only if the secret is still on it.
+- Importers for `.env`, INI, browser password CSV, and JSON key/value objects. `.env` values
+  and a recognised password column arrive masked automatically.
+- Desktop split view: a persistent note list beside the note, macOS Notes style, above a
+  900px window width. Narrower windows keep the existing touch layout unchanged.
+- Rich editor: headings, bold/italic/strikethrough, bullet/numbered/task lists, inline code,
+  syntax-highlighted code blocks, links, quotes, horizontal rules, emoji, text colour and
+  highlight. Tables are deliberately excluded — use the dedicated Table note type, which
+  round-trips reliably.
+
+### Fixed
+
+- Coloured text rendered as raw `\textcolor{...}` LaTeX in the preview. DOMPurify strips
+  MathML `<semantics>`/`<annotation>` by default and, with `KEEP_CONTENT` on, spilled the
+  annotation's TeX source into the output as text.
+- Fonts are now self-hosted; the app made a Google Fonts request on every cold start and
+  showed no icons at all when offline. Nothing in the app touches the network now.
+- Dark theme rendered native controls with light-mode colours — `<option>` text came out
+  black on a dark background in the import dialog. The themes now declare `color-scheme`.
+
+### Performance
+
+- The notes list query no longer reads note body ciphertext it immediately discards.
+- Sorting no longer re-runs on every search keystroke, and uses a shared `Intl.Collator`.
+- Dropped the unused `idx_notes_kind` index.
+
 ## [0.1.0] - 2026-03-25
 
 Initial release.

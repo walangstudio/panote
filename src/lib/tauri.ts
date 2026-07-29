@@ -85,10 +85,34 @@ export const noteUpdate = (id: string, input: NoteInput) =>
   invoke<NoteMetadata>("note_update", { id, input });
 export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
 export const noteList = () => invoke<NoteMetadata[]>("note_list");
+/// Total notes in the database. The list is capped (K14), so this is how the UI
+/// knows when it is showing a partial view instead of silently omitting notes.
+export const noteCount = () => invoke<number>("note_count");
+/// Background images keyed by note id. Kept out of the list payload because a
+/// background is a base64 data URI far larger than the rest of the row, and the
+/// list refreshes on every save, pin and delete.
+export const noteBgImages = () => invoke<Record<string, string>>("note_bg_images");
 export const noteGet = (id: string) =>
   invoke<NoteDetail>("note_get", { id });
 export const notePin = (id: string, pinned: boolean) =>
   invoke<void>("note_pin", { id, pinned });
+
+// Drafts — unsaved edits, held apart from the committed note so autosaving can
+// never overwrite it. Saving the note is what commits and clears the draft.
+export interface DraftPayload {
+  title: string;
+  content: unknown;
+  tags: string[];
+}
+export interface DraftDetail extends DraftPayload {
+  updated_at: number;
+}
+export const noteDraftSave = (id: string, draft: DraftPayload) =>
+  invoke<void>("note_draft_save", { id, draft });
+export const noteDraftGet = (id: string) =>
+  invoke<DraftDetail | null>("note_draft_get", { id });
+export const noteDraftDiscard = (id: string) =>
+  invoke<void>("note_draft_discard", { id });
 
 // Per-note password
 export const noteProtect = (id: string, password: string) =>
@@ -152,5 +176,15 @@ export interface ImportSummary {
 
 export const notesExport = (appVersion: string) =>
   invoke<string>("notes_export", { appVersion });
-export const notesImport = (contents: string, resolution: ImportResolution) =>
-  invoke<ImportSummary>("notes_import", { contents, resolution });
+/// `secretPassword` unseals password-protected notes in the backup. Notes that
+/// can't be opened are reported in `errors`, never silently dropped.
+export const notesImport = (
+  contents: string,
+  resolution: ImportResolution,
+  secretPassword?: string,
+) =>
+  invoke<ImportSummary>("notes_import", {
+    contents,
+    resolution,
+    secretPassword: secretPassword ?? null,
+  });

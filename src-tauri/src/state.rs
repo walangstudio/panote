@@ -9,12 +9,26 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// How long a note stays unlocked without being used. Short enough that walking
+/// away from an unlocked credential note re-locks it; long enough not to
+/// interrupt an editing session.
+pub const UNLOCK_TIMEOUT_SECS: i64 = 15 * 60;
+
+/// A cached note password. The `Zeroizing` wrapper scrubs the string when the
+/// entry is dropped, so expiring an entry actually clears it from memory.
+#[derive(Debug)]
+pub struct UnlockEntry {
+    pub password: Zeroizing<String>,
+    pub touched_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -78,9 +92,11 @@ pub struct AppState {
     pub receiving: Arc<AtomicBool>,
     /// Handle to the listener task so it can be aborted on toggle-off.
     pub listener_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Passwords for notes unlocked this session (note_id -> password).
-    /// In-memory only — cleared on app exit, so protected notes re-prompt on restart.
-    pub unlocked: Arc<Mutex<HashMap<String, String>>>,
+    /// Passwords for notes unlocked this session (note_id -> entry).
+    /// In-memory only — cleared on app exit, so protected notes re-prompt on
+    /// restart — and additionally expired after `UNLOCK_TIMEOUT_SECS` of
+    /// inactivity, so an unlocked credential note doesn't stay open all day.
+    pub unlocked: Arc<Mutex<HashMap<String, UnlockEntry>>>,
     /// Recent transfer-offer timestamps per peer address, for rate-limiting (N2).
     pub offer_attempts: Arc<Mutex<HashMap<String, Vec<i64>>>>,
     /// Consecutive failed pairing-passphrase attempts per peer address, for lockout (K5).
@@ -96,6 +112,72 @@ mod tests {
         let pool = init_pool(":memory:").await.unwrap();
         let key = derive_key("key", &[0u8; 16]).unwrap();
         AppState::new(pool, key, "test-device-uuid".into())
+    }
+
+    /// Backdate a cached unlock so the timeout can be exercised without waiting.
+    fn age_unlock(state: &AppState, note_id: &str, secs: i64) {
+        state
+            .unlocked
+            .lock()
+            .unwrap()
+            .get_mut(note_id)
+            .expect("note should be unlocked")
+            .touched_at -= secs;
+    }
+
+    #[tokio::test]
+    async fn unlocked_note_password_is_readable() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2");
+        assert_eq!(state.note_password("n1").as_deref(), Some("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn unlock_expires_after_the_timeout() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS + 1);
+        assert!(
+            state.note_password("n1").is_none(),
+            "a stale unlock must not hand back the password"
+        );
+    }
+
+    /// Inactivity timeout: using a note keeps it open, so a long editing
+    /// session doesn't get locked out mid-edit.
+    #[tokio::test]
+    async fn using_a_note_extends_its_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+        // The read above should have reset the clock.
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+    }
+
+    /// Entries nobody asks for again must still be dropped, or an unlocked
+    /// credential note would sit in memory for the life of the process.
+    #[tokio::test]
+    async fn any_access_sweeps_other_expired_entries() {
+        let state = test_state().await;
+        state.unlock_note("stale", "old-secret");
+        state.unlock_note("fresh", "new-secret");
+        age_unlock(&state, "stale", UNLOCK_TIMEOUT_SECS + 1);
+
+        assert!(state.note_password("fresh").is_some());
+        assert!(
+            !state.unlocked.lock().unwrap().contains_key("stale"),
+            "expired entry should have been swept from memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn locking_forgets_the_password() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2");
+        state.lock_note("n1");
+        assert!(state.note_password("n1").is_none());
     }
 
     fn sample_transfer(id: &str) -> PendingTransfer {
@@ -241,23 +323,37 @@ impl AppState {
         self.passphrase_failures.lock().unwrap().remove(peer_addr);
     }
 
-    /// Record the password that unlocked a note for the rest of the session.
+    /// Record the password that unlocked a note. Expires after
+    /// [`UNLOCK_TIMEOUT_SECS`] of inactivity.
     pub fn unlock_note(&self, note_id: &str, password: &str) {
-        self.unlocked
-            .lock()
-            .unwrap()
-            .insert(note_id.to_string(), password.to_string());
+        self.unlocked.lock().unwrap().insert(
+            note_id.to_string(),
+            UnlockEntry {
+                password: Zeroizing::new(password.to_string()),
+                touched_at: now_secs(),
+            },
+        );
     }
 
-    /// Return the cached unlock password for a note, if any.
+    /// Return the cached unlock password for a note, if it hasn't expired.
+    /// Every call also sweeps the whole map, so entries that are never asked
+    /// for again don't linger in memory past the timeout.
     pub fn note_password(&self, note_id: &str) -> Option<String> {
-        self.unlocked.lock().unwrap().get(note_id).cloned()
+        let mut map = self.unlocked.lock().unwrap();
+        let cutoff = now_secs() - UNLOCK_TIMEOUT_SECS;
+        // Dropping the entry zeroizes its password.
+        map.retain(|_, e| e.touched_at > cutoff);
+        let entry = map.get_mut(note_id)?;
+        // Inactivity timeout, so using a note keeps it open.
+        entry.touched_at = now_secs();
+        Some(entry.password.to_string())
     }
 
     /// Forget a note's cached password (re-locks it for this session).
     pub fn lock_note(&self, note_id: &str) {
         self.unlocked.lock().unwrap().remove(note_id);
     }
+
 
     pub fn add_pending(&self, transfer: PendingTransfer) {
         self.pending_transfers

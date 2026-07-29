@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import {
     peersScan, notesSend, generatePairingCode, knownPeersList, peerAddManual, deviceIps,
     noteList, noteUnlock,
     type Peer, type KnownPeer,
   } from "$lib/tauri";
+  import { trapFocus } from "$lib/trapFocus";
   import QrShowModal from "./QrShowModal.svelte";
   import QrScanModal from "./QrScanModal.svelte";
 
@@ -29,6 +30,15 @@
   let myIps = $state<string[]>([]);
   let showQr = $state(false);
   let scanQr = $state(false);
+  let closeBtn: HTMLButtonElement | undefined = $state();
+  let unlockInput: HTMLInputElement | undefined = $state();
+  let previouslyFocused: HTMLElement | null = null;
+
+  $effect(() => { if (step === "unlock") unlockInput?.focus(); });
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") { e.preventDefault(); onclose(); }
+  }
 
   // Protected notes in this selection must be unlocked before we can send them
   // (Model B: the note is decrypted on this device, sent inside the E2E envelope).
@@ -39,6 +49,9 @@
   let unlockBusy = $state(false);
 
   onMount(async () => {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    closeBtn?.focus();
+    window.addEventListener("keydown", onKey);
     recentPeers = await knownPeersList().catch(() => []);
     myIps = await deviceIps().catch(() => []);
     const metas = await noteList().catch(() => []);
@@ -47,6 +60,10 @@
       .filter((m) => chosen.has(m.id) && m.has_note_password)
       .map((m) => ({ id: m.id, title: m.title }));
     await scan();
+  });
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
   });
 
   async function scan() {
@@ -136,14 +153,26 @@
     if (!ts) return "";
     return new Date(ts * 1000).toLocaleDateString();
   }
+
+  const stepAnnouncement = $derived(
+    ({
+      peers: "Choose a device to send to.",
+      code: "Pairing code ready. Share it with the recipient.",
+      unlock: `Unlock note ${unlockIdx + 1} of ${protectedQueue.length} to continue.`,
+      sending: "Waiting for the recipient to enter the code.",
+      done: "Transfer delivered.",
+      error: "Transfer failed.",
+    } as const)[step],
+  );
 </script>
 
 <div class="overlay">
   <div class="backdrop" role="presentation" onclick={onclose}></div>
-  <div class="modal" role="dialog" aria-modal="true">
-    <button class="close" onclick={onclose} aria-label="Close">
+  <div class="modal" role="dialog" aria-modal="true" use:trapFocus>
+    <button class="close" bind:this={closeBtn} onclick={onclose} aria-label="Close">
       <span class="material-symbols-outlined">close</span>
     </button>
+    <div class="sr-only" role="status" aria-live="polite">{stepAnnouncement}</div>
 
     {#if step === "peers"}
       <h2>Transfer over LAN</h2>
@@ -268,7 +297,7 @@
           type="password"
           placeholder="Note password"
           bind:value={unlockPw}
-          autofocus
+          bind:this={unlockInput}
         />
         {#if unlockError}<p class="muted" style="color: var(--danger, #e5484d);">{unlockError}</p>{/if}
         <div class="actions">
@@ -438,4 +467,10 @@
   }
   .qr-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-muted); }
   .qr-btn .material-symbols-outlined { font-size: 20px; }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
 </style>

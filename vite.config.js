@@ -1,13 +1,17 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { fileURLToPath, URL } from "url";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+const isVitest = !!process.env.VITEST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [sveltekit()],
+  // Under Vitest use the bare Svelte plugin: SvelteKit's vitePreprocess needs a
+  // full Vite environment and throws while preprocessing <style> blocks here.
+  // Component styles are plain CSS, so there is nothing to preprocess anyway.
+  plugins: [isVitest ? svelte({ preprocess: [] }) : sveltekit()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -33,7 +37,21 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       $lib: fileURLToPath(new URL("./src/lib", import.meta.url)),
+      // SvelteKit's virtual modules don't exist under the bare Svelte plugin.
+      ...(isVitest
+        ? {
+            "$app/navigation": fileURLToPath(
+              new URL("./src/lib/test-stubs/app-navigation.ts", import.meta.url),
+            ),
+            "$app/state": fileURLToPath(
+              new URL("./src/lib/test-stubs/app-state.ts", import.meta.url),
+            ),
+          }
+        : {}),
     },
+    // Under Vitest, resolve Svelte's client build so components can be mounted
+    // into a DOM and actually clicked.
+    ...(isVitest ? { conditions: ["browser"] } : {}),
   },
   test: {
     environment: "node",

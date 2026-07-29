@@ -177,6 +177,48 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
 const SELECT_COLS: &str =
     "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct";
 
+/// The list view decrypts only the title and tags, so the body ciphertext and
+/// the recovery wrap are pure read amplification — they scale with note size
+/// and get dropped on the floor. Fetch neither.
+const LIST_COLS: &str =
+    "id, kind, title_nonce, title_ct, note_salt, created_at, updated_at, tags, content_hint, pinned, bg_color, show_preview, preview_text, origin_device_id, origin_note_id";
+
+/// Maps a `LIST_COLS` row. The columns the list never reads are left empty;
+/// only `note_list_page` may use this.
+fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
+    let origin_device_id: Option<String> = r.get("origin_device_id");
+    let origin_note_id: Option<String> = r.get("origin_note_id");
+    let id: String = r.get("id");
+    NoteRow {
+        kind: r.get("kind"),
+        title_nonce: r.get("title_nonce"),
+        title_ct: r.get("title_ct"),
+        nonce: Vec::new(),
+        content_ct: Vec::new(),
+        note_salt: r.get("note_salt"),
+        note_nonce: None,
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+        tags: r.get("tags"),
+        content_hint: r.get("content_hint"),
+        pinned: { let v: i32 = r.get("pinned"); v != 0 },
+        bg_color: r.get("bg_color"),
+        // Not selected. A background is a base64 data URI that dwarfs everything
+        // else in the row — measured at 143x the size of ALL note bodies put
+        // together — and the list re-runs on every save, pin and delete. Fetched
+        // once via `note_bg_images` and cached instead. See [`row_to_list_note`].
+        bg_image: None,
+        show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
+        preview_text: r.get("preview_text"),
+        origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
+        origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
+        rc_salt: None,
+        rc_nonce: None,
+        rc_ct: None,
+        id,
+    }
+}
+
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct) \
@@ -279,6 +321,56 @@ pub async fn note_get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Note
         .fetch_optional(pool)
         .await?;
     Ok(row.map(row_to_note))
+}
+
+// ----- Drafts -----
+
+/// A note's unsaved edits. Encrypted like note content; see 0013_note_drafts.sql.
+pub struct DraftRow {
+    pub nonce: Vec<u8>,
+    pub ct: Vec<u8>,
+    pub updated_at: i64,
+}
+
+pub async fn draft_upsert(
+    pool: &SqlitePool,
+    note_id: &str,
+    nonce: &[u8],
+    ct: &[u8],
+    updated_at: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO note_drafts (note_id, nonce, ct, updated_at) VALUES (?, ?, ?, ?) \
+         ON CONFLICT(note_id) DO UPDATE SET nonce = excluded.nonce, ct = excluded.ct, \
+         updated_at = excluded.updated_at",
+    )
+    .bind(note_id)
+    .bind(nonce)
+    .bind(ct)
+    .bind(updated_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn draft_get(pool: &SqlitePool, note_id: &str) -> anyhow::Result<Option<DraftRow>> {
+    let row = sqlx::query("SELECT nonce, ct, updated_at FROM note_drafts WHERE note_id = ?")
+        .bind(note_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| DraftRow {
+        nonce: r.get("nonce"),
+        ct: r.get("ct"),
+        updated_at: r.get("updated_at"),
+    }))
+}
+
+pub async fn draft_delete(pool: &SqlitePool, note_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM note_drafts WHERE note_id = ?")
+        .bind(note_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ----- Device identity -----
@@ -562,16 +654,46 @@ pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
     Ok(rows.into_iter().map(row_to_note).collect())
 }
 
-/// Lists notes newest-first, bounded by `limit`/`offset` (K14) so the
-/// frontend list view can't force decrypting every note in the database at
-/// once.
+/// Lists notes, bounded by `limit`/`offset` (K14) so the frontend list view
+/// can't force decrypting every note in the database at once.
+///
+/// Ordered `pinned DESC` first, then newest: pinning is the user saying "this
+/// one matters", so a pinned note must never be the one that falls outside the
+/// window. Before this, pinning a note older than the newest 500 made it vanish
+/// from the Pinned section entirely.
+///
+/// Returned rows carry no body ciphertext — see [`row_to_list_note`].
 pub async fn note_list_page(pool: &SqlitePool, limit: i64, offset: i64) -> anyhow::Result<Vec<NoteRow>> {
     let rows = sqlx::query(&format!(
-        "SELECT {SELECT_COLS} FROM notes ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        "SELECT {LIST_COLS} FROM notes ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
     ))
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(row_to_note).collect())
+    Ok(rows.into_iter().map(row_to_list_note).collect())
+}
+
+/// Every note that has a background image, as `(id, data_uri)`.
+///
+/// Deliberately separate from the list query: backgrounds are large and change
+/// rarely, so they are fetched once and cached rather than re-serialised through
+/// IPC every time a note is saved, pinned or deleted.
+pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, String)>> {
+    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> ''")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("id"), r.get("bg_image")))
+        .collect())
+}
+
+/// Total notes, so the list can say how many it is NOT showing. Counting is
+/// cheap — no decryption, no row payload.
+pub async fn note_count(pool: &SqlitePool) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get("n"))
 }

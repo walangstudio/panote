@@ -87,7 +87,13 @@ pub fn run() {
             note_delete,
             note_list,
             note_get,
+            note_count,
+            note_bg_images,
             note_pin,
+            // Drafts — unsaved edits, kept apart from the committed note
+            note_draft_save,
+            note_draft_get,
+            note_draft_discard,
             // Per-note password
             note_protect,
             note_unprotect,

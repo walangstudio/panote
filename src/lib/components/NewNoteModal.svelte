@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
+  import { trapFocus } from "$lib/trapFocus";
 
   interface Props { onclose: () => void; }
   let { onclose }: Props = $props();
+
+  let previouslyFocused: HTMLElement | null = null;
+  let kindButtons: (HTMLButtonElement | undefined)[] = $state([]);
 
   const kinds = [
     { id: "document", icon: "edit_note", label: "Document", color: "accent", desc: "Markdown, plain or code" },
@@ -20,17 +24,24 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") { e.preventDefault(); onclose(); }
   }
-  onMount(() => window.addEventListener("keydown", onKey));
-  onDestroy(() => window.removeEventListener("keydown", onKey));
+  onMount(() => {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    window.addEventListener("keydown", onKey);
+    kindButtons[0]?.focus();
+  });
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
+  });
 </script>
 
 <div class="overlay">
   <div class="backdrop" role="presentation" onclick={onclose}></div>
-  <div class="modal" role="dialog" aria-modal="true" aria-label="New note">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="New note" use:trapFocus>
     <h2>New note</h2>
     <div class="list">
-      {#each kinds as k}
-        <button class="kind-row" onclick={() => pick(k.id)}>
+      {#each kinds as k, i}
+        <button class="kind-row" bind:this={kindButtons[i]} onclick={() => pick(k.id)}>
           <span class="kind-icon {k.color}">
             <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">{k.icon}</span>
           </span>

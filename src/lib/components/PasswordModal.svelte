@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { WRONG_PASSWORD } from "$lib/tauri";
+  import { trapFocus } from "$lib/trapFocus";
 
   type Mode = "set" | "change" | "unlock" | "remove" | "recover";
 
@@ -20,6 +21,11 @@
   let reveal = $state(false);
   let busy = $state(false);
   let error = $state("");
+
+  let codeInput: HTMLInputElement | undefined = $state();
+  let currentInput: HTMLInputElement | undefined = $state();
+  let nextInput: HTMLInputElement | undefined = $state();
+  let previouslyFocused: HTMLElement | null = null;
 
   const heading = $derived(
     title ??
@@ -70,16 +76,25 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") { e.preventDefault(); onclose(); }
-    else if (e.key === "Enter") { e.preventDefault(); submit(); }
+    // Enter is deliberately NOT handled here — see ConfirmModal.svelte. The
+    // fields live in a <form> below, so Enter while typing submits it
+    // natively; Enter on the focused Cancel button just clicks Cancel.
   }
 
-  onMount(() => window.addEventListener("keydown", onKey));
-  onDestroy(() => window.removeEventListener("keydown", onKey));
+  onMount(() => {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    window.addEventListener("keydown", onKey);
+    (codeInput ?? currentInput ?? nextInput)?.focus();
+  });
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
+  });
 </script>
 
 <div class="overlay">
   <div class="backdrop" role="presentation" onclick={onclose}></div>
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pw-title" use:trapFocus>
     <h2 id="pw-title">
       <span class="material-symbols-outlined">
         {mode === "remove" ? "lock_open" : mode === "unlock" ? "lock" : "password"}
@@ -109,66 +124,68 @@
       </div>
     {/if}
 
-    <div class="fields">
-      {#if needsCode}
-        <div class="pill-input">
-          <span class="material-symbols-outlined icon">key</span>
-          <input
-            type="text"
-            placeholder="Recovery code"
-            bind:value={code}
-            autocomplete="off"
-            autofocus
-          />
-        </div>
-      {/if}
-      {#if needsCurrent}
-        <div class="pill-input">
-          <span class="material-symbols-outlined icon">password</span>
-          <input
-            type={fieldType}
-            placeholder={mode === "change" ? "Current password" : "Password"}
-            bind:value={current}
-            autocomplete="current-password"
-            autofocus
-          />
-        </div>
-      {/if}
-      {#if needsNew}
-        <div class="pill-input">
-          <span class="material-symbols-outlined icon">password</span>
-          <input
-            type={fieldType}
-            placeholder={mode === "change" ? "New password" : "Password"}
-            bind:value={next}
-            autocomplete="new-password"
-            autofocus={!needsCurrent && !needsCode}
-          />
-        </div>
-        <div class="pill-input">
-          <span class="material-symbols-outlined icon">password</span>
-          <input
-            type={fieldType}
-            placeholder="Confirm password"
-            bind:value={confirm}
-            autocomplete="new-password"
-          />
-        </div>
-      {/if}
-      <label class="reveal">
-        <input type="checkbox" bind:checked={reveal} />
-        Show password
-      </label>
-    </div>
+    <form onsubmit={(e) => { e.preventDefault(); submit(); }}>
+      <div class="fields">
+        {#if needsCode}
+          <div class="pill-input">
+            <span class="material-symbols-outlined icon">key</span>
+            <input
+              type="text"
+              placeholder="Recovery code"
+              bind:value={code}
+              bind:this={codeInput}
+              autocomplete="off"
+            />
+          </div>
+        {/if}
+        {#if needsCurrent}
+          <div class="pill-input">
+            <span class="material-symbols-outlined icon">password</span>
+            <input
+              type={fieldType}
+              placeholder={mode === "change" ? "Current password" : "Password"}
+              bind:value={current}
+              bind:this={currentInput}
+              autocomplete="current-password"
+            />
+          </div>
+        {/if}
+        {#if needsNew}
+          <div class="pill-input">
+            <span class="material-symbols-outlined icon">password</span>
+            <input
+              type={fieldType}
+              placeholder={mode === "change" ? "New password" : "Password"}
+              bind:value={next}
+              bind:this={nextInput}
+              autocomplete="new-password"
+            />
+          </div>
+          <div class="pill-input">
+            <span class="material-symbols-outlined icon">password</span>
+            <input
+              type={fieldType}
+              placeholder="Confirm password"
+              bind:value={confirm}
+              autocomplete="new-password"
+            />
+          </div>
+        {/if}
+        <label class="reveal">
+          <input type="checkbox" bind:checked={reveal} />
+          Show password
+        </label>
+      </div>
 
-    {#if error}<p class="error">{error}</p>{/if}
+      {#if error}<p class="error" role="alert">{error}</p>{/if}
 
-    <div class="actions">
-      <button class="btn-cancel" onclick={onclose}>Cancel</button>
-      <button class="btn-confirm" class:destructive={mode === "remove"} disabled={busy} onclick={submit}>
-        {busy ? "…" : submitLabel}
-      </button>
-    </div>
+      <div class="actions">
+        <button type="button" class="btn-cancel" onclick={onclose}>Cancel</button>
+        <button type="submit" class="btn-confirm" class:destructive={mode === "remove"} disabled={busy}>
+          {busy ? "…" : submitLabel}
+        </button>
+      </div>
+    </form>
   </div>
 </div>
 

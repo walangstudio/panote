@@ -10,6 +10,8 @@
   import IncomingTransferToast from "$lib/components/IncomingTransferToast.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
+  import NoteListPane from "$lib/components/NoteListPane.svelte";
+  import { isDesktop } from "$lib/stores/layout";
 
   let { children } = $props();
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -56,7 +58,7 @@
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
     unlistenReceived = await listen("notes-received", () => {
       pollOffers();
-      refreshNotes();
+      refreshNotes({ withBackgrounds: true });
     });
     try {
       receiving = await checkReceiving();
@@ -74,9 +76,16 @@
 
 {#if isTauri}
   <Sidebar {receiving} ontogglereceive={toggleReceive} onnewnote={() => showNewNote = true} />
-  <div class="app-content">
-    {@render children()}
-  </div>
+  {#if $isDesktop}
+    <div class="split">
+      <aside class="list-pane"><NoteListPane desktop /></aside>
+      <main class="detail-pane">{@render children()}</main>
+    </div>
+  {:else}
+    <div class="app-content">
+      {@render children()}
+    </div>
+  {/if}
   <IncomingTransferToast {offers} onupdate={pollOffers} />
   {#if showNewNote}
     <NewNoteModal onclose={() => showNewNote = false} />
@@ -89,6 +98,20 @@
   .app-content {
     height: 100%; overflow-y: auto;
   }
+  /* Two independent scrollers — the list keeps its place while the note scrolls. */
+  .split {
+    height: 100%;
+    /* Grows with the window instead of staying a thin strip on a 4K display. */
+    display: grid; grid-template-columns: clamp(300px, 22%, 400px) minmax(0, 1fr);
+  }
+  .list-pane {
+    min-height: 0; overflow-y: auto;
+    border-right: 1px solid var(--border);
+    background: var(--surface-glass);
+    /* No backdrop-filter here: it would establish a containing block and trap
+       every position:fixed modal, popover and backdrop inside this column. */
+  }
+  .detail-pane { min-width: 0; min-height: 0; overflow-y: auto; }
   .not-tauri {
     display: flex;
     align-items: center;

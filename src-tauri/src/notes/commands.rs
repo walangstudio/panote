@@ -8,8 +8,13 @@ use crate::{
     notes::types::{NoteDetail, NoteInput, NoteMetadata},
     state::{now_secs, AppState},
 };
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
+// Passwords arrive as owned Strings from the IPC layer. Wrapping them at the
+// command boundary means the copy we hold is scrubbed on drop rather than left
+// sitting in the heap for a core dump or memory scrape to find.
+use zeroize::Zeroizing;
 
 /// Max decoded `bg_image` size (K6).
 const MAX_BG_IMAGE_BYTES: usize = 3 * 1024 * 1024;
@@ -23,7 +28,7 @@ const BG_IMAGE_PREFIXES: &[&str] = &[
 /// Validate `bg_image` at the command boundary (K6): must be empty/absent,
 /// or a `data:image/(png|jpeg|webp|gif);base64,...` URI decoding to at most
 /// `MAX_BG_IMAGE_BYTES`.
-fn validate_bg_image(bg_image: &Option<String>) -> Result<(), String> {
+pub(crate) fn validate_bg_image(bg_image: &Option<String>) -> Result<(), String> {
     let Some(s) = bg_image else { return Ok(()) };
     if s.is_empty() {
         return Ok(());
@@ -80,6 +85,41 @@ pub(crate) fn decrypt_tags(key: &[u8; 32], note_id: &str, stored: &str) -> anyho
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+/// Encrypt a note's list preview, same shape as tags: `base64(nonce ‖ ct)` in
+/// the existing TEXT column, AAD-bound to the note id.
+///
+/// This column used to hold up to 150 characters of the note body in the CLEAR,
+/// so anyone with read access to panote.db (or its -wal) could read real note
+/// content with one SQL query — bypassing the whole at-rest encryption design.
+pub(crate) fn encrypt_preview(
+    key: &[u8; 32],
+    note_id: &str,
+    preview: &str,
+) -> Result<String, String> {
+    let (nonce, ct) =
+        encrypt_with_vault(key, preview.as_bytes(), note_id.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::with_capacity(nonce.len() + ct.len());
+    raw.extend_from_slice(&nonce);
+    raw.extend_from_slice(&ct);
+    Ok(STANDARD.encode(raw))
+}
+
+/// Reverse of [`encrypt_preview`]. Rows written before previews were encrypted
+/// hold plaintext; those decode-fail and are returned as-is so existing notes
+/// keep rendering. They are re-encrypted the next time the note is saved.
+pub(crate) fn decrypt_preview(key: &[u8; 32], note_id: &str, stored: &str) -> Option<String> {
+    let raw = match STANDARD.decode(stored) {
+        Ok(raw) if raw.len() > 12 => raw,
+        _ => return Some(stored.to_string()), // legacy plaintext
+    };
+    let (nonce, ct) = raw.split_at(12);
+    match decrypt_with_vault(key, nonce, ct, note_id.as_bytes()) {
+        Ok(bytes) => String::from_utf8(bytes).ok(),
+        // Not our ciphertext — treat as legacy plaintext rather than losing it.
+        Err(_) => Some(stored.to_string()),
+    }
+}
+
 // Stable error sentinels shared with the frontend (mirror in src/lib/tauri.ts).
 // Control flow (unlock gate, batch skip-vs-fail) matches on these, so they must
 // not be reworded casually.
@@ -114,7 +154,9 @@ pub async fn note_create(
         encrypt_with_vault(key, &content_json, id.as_bytes()).map_err(|e| e.to_string())?;
 
     let tags_stored = encrypt_tags(key, &id, &input.tags)?;
-    let preview_text = extract_preview(&input.kind, &input.content);
+    let preview_text = extract_preview(&input.kind, &input.content)
+        .map(|p| encrypt_preview(key, &id, &p))
+        .transpose()?;
 
     let row = NoteRow {
         id: id.clone(),
@@ -201,6 +243,8 @@ pub async fn note_update(
         None
     } else {
         extract_preview(&input.kind, &input.content)
+            .map(|p| encrypt_preview(key, &id, &p))
+            .transpose()?
     };
 
     let row = NoteRow {
@@ -233,6 +277,12 @@ pub async fn note_update(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Saving IS the commit: the draft has served its purpose and must go, or the
+    // editor would keep offering to restore edits the user already saved.
+    queries::draft_delete(&state.db, &id)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(NoteMetadata {
         id,
         kind: input.kind,
@@ -257,6 +307,100 @@ pub async fn note_delete(id: String, state: State<'_, AppState>) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
+// ----- Drafts -----
+//
+// Editing must never overwrite a committed note. In-progress work is autosaved
+// here instead, and `note_update` is what promotes it. Because the draft is
+// durable, closing the window mid-edit stops being destructive.
+
+/// What a draft carries. `content` is whatever shape the note's kind uses, so a
+/// draft round-trips the same JSON `note_update` would have taken.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DraftPayload {
+    pub title: String,
+    pub content: serde_json::Value,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DraftDetail {
+    pub title: String,
+    pub content: serde_json::Value,
+    pub tags: Vec<String>,
+    pub updated_at: i64,
+}
+
+pub(crate) async fn draft_save_impl(
+    state: &AppState,
+    id: &str,
+    draft: &DraftPayload,
+) -> Result<(), String> {
+    // A draft of a protected note would sit outside that note's password layer,
+    // so it is refused rather than quietly weakening the protection.
+    let row = queries::note_get(&state.db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "note not found".to_string())?;
+    if row.note_salt.is_some() {
+        return Err("password-protected notes do not keep drafts".into());
+    }
+
+    let json = serde_json::to_vec(draft).map_err(|e| e.to_string())?;
+    let (nonce, ct) =
+        encrypt_with_vault(&state.device_key, &json, id.as_bytes()).map_err(|e| e.to_string())?;
+    queries::draft_upsert(&state.db, id, &nonce, &ct, now_secs())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn draft_get_impl(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<DraftDetail>, String> {
+    let Some(row) = queries::draft_get(&state.db, id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let plain = decrypt_with_vault(&state.device_key, &row.nonce, &row.ct, id.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let payload: DraftPayload = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+    Ok(Some(DraftDetail {
+        title: payload.title,
+        content: payload.content,
+        tags: payload.tags,
+        updated_at: row.updated_at,
+    }))
+}
+
+/// Autosave in-progress edits. Does not touch the committed note.
+#[tauri::command]
+pub async fn note_draft_save(
+    id: String,
+    draft: DraftPayload,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    draft_save_impl(&state, &id, &draft).await
+}
+
+/// The draft for a note, if one is outstanding.
+#[tauri::command]
+pub async fn note_draft_get(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<DraftDetail>, String> {
+    draft_get_impl(&state, &id).await
+}
+
+/// Throw away in-progress edits and keep the committed note.
+#[tauri::command]
+pub async fn note_draft_discard(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    queries::draft_delete(&state.db, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn migrate_kind(kind: &str) -> &str {
     match kind {
         "text" | "markdown" | "code" => "document",
@@ -275,6 +419,31 @@ fn migrate_hint(kind: &str, hint: Option<String>) -> Option<String> {
 
 /// Default page size for `note_list` (K14) — bounds the decrypt-all cost.
 const DEFAULT_NOTE_LIST_LIMIT: i64 = 500;
+
+/// How many notes exist, regardless of the list page size.
+///
+/// The list is capped, and without this the UI had no way to know it was showing
+/// a partial view — notes past the cap simply ceased to exist, with nothing said.
+#[tauri::command]
+pub async fn note_count(state: State<'_, AppState>) -> Result<i64, String> {
+    queries::note_count(&state.db).await.map_err(|e| e.to_string())
+}
+
+/// Background images for every note that has one, keyed by note id.
+///
+/// Kept out of `note_list` because a background is a base64 data URI that dwarfs
+/// the rest of the row, and the list refreshes on every save, pin and delete.
+/// Backgrounds change rarely, so the frontend fetches this once and caches it.
+#[tauri::command]
+pub async fn note_bg_images(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(queries::note_bg_images(&state.db)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect())
+}
 
 #[tauri::command]
 pub async fn note_list(
@@ -298,6 +467,10 @@ pub async fn note_list(
         let title = String::from_utf8(title_bytes).map_err(|e| e.to_string())?;
         let tags = decrypt_tags(key, &row.id, &row.tags).map_err(|e| e.to_string())?;
         let content_hint = migrate_hint(&row.kind, row.content_hint);
+        let preview_text = row
+            .preview_text
+            .as_deref()
+            .and_then(|p| decrypt_preview(key, &row.id, p));
         result.push(NoteMetadata {
             id: row.id,
             kind: migrate_kind(&row.kind).to_string(),
@@ -311,7 +484,7 @@ pub async fn note_list(
             bg_color: row.bg_color,
             bg_image: row.bg_image,
             show_preview: row.show_preview,
-            preview_text: row.preview_text,
+            preview_text,
         });
     }
     Ok(result)
@@ -365,6 +538,26 @@ pub async fn note_get(
     })
 }
 
+/// Drop HTML tags from a preview line.
+///
+/// Note bodies can legitimately contain inline HTML — colour and highlight have
+/// no markdown syntax, so the editor serialises them as spans. Without this a
+/// highlighted first line showed up in the note list as raw tag soup:
+/// `mark data color="#ffe58f" style="background color: ..." Hello mark`.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn extract_preview(kind: &str, content: &serde_json::Value) -> Option<String> {
     let text = match kind {
         "document" => {
@@ -372,8 +565,11 @@ fn extract_preview(kind: &str, content: &serde_json::Value) -> Option<String> {
             if body.is_empty() {
                 return None;
             }
+            // HTML first: the markdown pass below turns '>' into a space, which
+            // would break tag boundaries and leave attribute soup behind.
+            let no_html = strip_html(body);
             // Strip markdown markers, collapse whitespace into a single line.
-            let stripped: String = body
+            let stripped: String = no_html
                 .chars()
                 .map(|c| if matches!(c, '#' | '*' | '`' | '>' | '-') { ' ' } else { c })
                 .collect();
@@ -498,7 +694,41 @@ async fn protect_impl(state: &AppState, id: &str, password: &str) -> Result<(), 
     Ok(())
 }
 
+/// Guard every password comparison on a note with the same lockout the LAN
+/// pairing and recovery-code paths already use, keyed by note id.
+///
+/// Argon2id makes each guess expensive, but nothing capped the number of
+/// attempts — so a foothold in the webview could have driven `note_unlock` in a
+/// loop against other notes with no throttle at all.
+fn check_note_lockout(state: &AppState, id: &str) -> Result<(), String> {
+    if state.passphrase_locked_out(id) {
+        return Err("too many wrong passwords — try again later".into());
+    }
+    Ok(())
+}
+
+/// Map a wrong-password result onto the failure counter. Success clears it, so
+/// ordinary mistyping never accumulates toward a lockout.
+fn record_password_attempt<T>(
+    state: &AppState,
+    id: &str,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    match result {
+        Ok(v) => {
+            state.reset_passphrase_failures(id);
+            Ok(v)
+        }
+        Err(e) if e == WRONG_PASSWORD => {
+            state.record_passphrase_failure(id);
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn unprotect_impl(state: &AppState, id: &str, password: &str) -> Result<(), String> {
+    check_note_lockout(state, id)?;
     let mut row = queries::note_get(&state.db, id)
         .await
         .map_err(|e| e.to_string())?
@@ -511,14 +741,21 @@ async fn unprotect_impl(state: &AppState, id: &str, password: &str) -> Result<()
         (Some(s), Some(n)) => (s.clone(), n.clone()),
         _ => return Err(NOT_PROTECTED.into()),
     };
-    let vault_ct = remove_note_password(password, &salt, &nonce, &row.content_ct)
-        .map_err(|_| WRONG_PASSWORD.to_string())?;
+    let vault_ct = record_password_attempt(
+        state,
+        id,
+        remove_note_password(password, &salt, &nonce, &row.content_ct)
+            .map_err(|_| WRONG_PASSWORD.to_string()),
+    )?;
 
-    // Regenerate the list preview now that the content is no longer gated.
+    // Regenerate the list preview now that the content is no longer gated —
+    // encrypted, like every other write of this column.
     let preview_text = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|content| extract_preview(migrate_kind(&row.kind), &content));
+        .and_then(|content| extract_preview(migrate_kind(&row.kind), &content))
+        .map(|p| encrypt_preview(&state.device_key, id, &p))
+        .transpose()?;
 
     persist_protection(state, row, vault_ct, None, None, preview_text).await?;
     state.lock_note(id);
@@ -534,6 +771,7 @@ async fn change_password_impl(
     if new_password.is_empty() {
         return Err(EMPTY_PASSWORD.into());
     }
+    check_note_lockout(state, id)?;
     let mut row = queries::note_get(&state.db, id)
         .await
         .map_err(|e| e.to_string())?
@@ -542,8 +780,12 @@ async fn change_password_impl(
         (Some(s), Some(n)) => (s.clone(), n.clone()),
         _ => return Err(NOT_PROTECTED.into()),
     };
-    let vault_ct = remove_note_password(old_password, &salt, &nonce, &row.content_ct)
-        .map_err(|_| WRONG_PASSWORD.to_string())?;
+    let vault_ct = record_password_attempt(
+        state,
+        id,
+        remove_note_password(old_password, &salt, &nonce, &row.content_ct)
+            .map_err(|_| WRONG_PASSWORD.to_string()),
+    )?;
     // Recovery wraps the old password, so a password change resets it. The user
     // can re-add a recovery code afterward.
     row.rc_salt = None;
@@ -565,15 +807,19 @@ async fn change_password_impl(
 }
 
 async fn unlock_impl(state: &AppState, id: &str, password: &str) -> Result<(), String> {
+    check_note_lockout(state, id)?;
     let row = queries::note_get(&state.db, id)
         .await
         .map_err(|e| e.to_string())?
         .ok_or("note not found")?;
     match (row.note_salt.clone(), row.note_nonce.clone()) {
         (Some(salt), Some(nonce)) => {
-            let (vault_ct, was_legacy) =
+            let (vault_ct, was_legacy) = record_password_attempt(
+                state,
+                id,
                 remove_note_password_detect(password, &salt, &nonce, &row.content_ct)
-                    .map_err(|_| WRONG_PASSWORD.to_string())?;
+                    .map_err(|_| WRONG_PASSWORD.to_string()),
+            )?;
             state.unlock_note(id, password);
             // K2: transparently re-wrap a pre-bump (p=1) note at the current
             // Argon2 params on unlock, so it's hardened after first open.
@@ -605,6 +851,7 @@ pub async fn note_protect(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let password = Zeroizing::new(password);
     protect_impl(&state, &id, &password).await
 }
 
@@ -616,6 +863,7 @@ pub async fn note_unprotect(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let password = Zeroizing::new(password);
     unprotect_impl(&state, &id, &password).await
 }
 
@@ -627,6 +875,7 @@ pub async fn note_change_password(
     new_password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let (old_password, new_password) = (Zeroizing::new(old_password), Zeroizing::new(new_password));
     change_password_impl(&state, &id, &old_password, &new_password).await
 }
 
@@ -637,6 +886,7 @@ pub async fn note_unlock(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let password = Zeroizing::new(password);
     unlock_impl(&state, &id, &password).await
 }
 
@@ -866,6 +1116,388 @@ mod tests {
 
     async fn fetch(state: &AppState, id: &str) -> NoteRow {
         queries::note_get(&state.db, id).await.unwrap().unwrap()
+    }
+
+    async fn seed_tagged(state: &AppState, title: &str, tags: &[&str]) -> String {
+        let blob = TransferBlob {
+            id: title.into(),
+            kind: "document".into(),
+            title: title.into(),
+            content: json!({ "body": "x".repeat(4096) }),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            created_at: 1,
+            updated_at: 1,
+            origin_device_id: String::new(),
+            origin_note_id: String::new(),
+        };
+        crate::transfer::commands::import_blob(state, &state.device_key, blob)
+            .await
+            .unwrap()
+    }
+
+    // ---- List cap (B2) ----
+
+    /// Pinning is the user saying "keep this one". Before the ordering change, a
+    /// pinned note whose `updated_at` fell outside the newest page vanished from
+    /// the list — including from the Pinned section — with nothing said.
+    #[tokio::test]
+    async fn a_pinned_note_survives_the_page_cap() {
+        let state = test_state().await;
+        let old = seed_tagged(&state, "old-but-pinned", &[]).await;
+        queries::note_pin(&state.db, &old, true).await.unwrap();
+        // seed_tagged stamps every note with the same updated_at, so the ages
+        // have to be set explicitly or this test proves nothing.
+        sqlx::query("UPDATE notes SET updated_at = 1 WHERE id = ?")
+            .bind(&old)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        for n in 0..3 {
+            let id = seed_tagged(&state, &format!("newer-{n}"), &[]).await;
+            sqlx::query("UPDATE notes SET updated_at = ? WHERE id = ?")
+                .bind(100 + n as i64)
+                .bind(&id)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+
+        // A one-row page: only the top-ordered note survives it.
+        let page = queries::note_list_page(&state.db, 1, 0).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            page[0].id, old,
+            "the pinned note must lead the page even though it is the oldest"
+        );
+    }
+
+    #[tokio::test]
+    async fn note_count_reports_everything_not_just_the_page() {
+        let state = test_state().await;
+        for n in 0..5 {
+            seed_tagged(&state, &format!("note-{n}"), &[]).await;
+        }
+        assert_eq!(queries::note_list_page(&state.db, 2, 0).await.unwrap().len(), 2);
+        assert_eq!(queries::note_count(&state.db).await.unwrap(), 5);
+    }
+
+    // ---- Password guess rate limiting (S5) ----
+
+    /// Argon2id makes each guess expensive, but nothing capped the number of
+    /// attempts, so a foothold in the webview could drive `note_unlock` in a
+    /// loop against every note with no throttle.
+    #[tokio::test]
+    async fn repeated_wrong_passwords_lock_the_note_out() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        protect_impl(&state, &id, "correct").await.unwrap();
+
+        for _ in 0..5 {
+            assert!(unlock_impl(&state, &id, "wrong").await.is_err());
+        }
+
+        // Even the CORRECT password is refused once locked out — otherwise the
+        // limit would not bound an attacker who happens to guess on attempt 6.
+        let err = unlock_impl(&state, &id, "correct").await.unwrap_err();
+        assert!(err.contains("too many"), "got: {err}");
+    }
+
+    /// Ordinary mistyping must not accumulate toward a lockout.
+    #[tokio::test]
+    async fn a_correct_password_clears_the_failure_count() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        protect_impl(&state, &id, "correct").await.unwrap();
+
+        for _ in 0..4 {
+            assert!(unlock_impl(&state, &id, "wrong").await.is_err());
+        }
+        unlock_impl(&state, &id, "correct").await.unwrap();
+
+        // Counter reset, so a fresh run of wrong guesses is needed to lock out.
+        for _ in 0..4 {
+            assert!(unlock_impl(&state, &id, "wrong").await.is_err());
+        }
+        assert!(unlock_impl(&state, &id, "correct").await.is_ok());
+    }
+
+    /// The lockout is per note, so one note under attack cannot deny access to
+    /// the rest.
+    #[tokio::test]
+    async fn a_lockout_does_not_spread_to_other_notes() {
+        let state = test_state().await;
+        let a = seed_note(&state, "a").await;
+        let b = seed_note(&state, "b").await;
+        protect_impl(&state, &a, "pw-a").await.unwrap();
+        protect_impl(&state, &b, "pw-b").await.unwrap();
+
+        for _ in 0..5 {
+            assert!(unlock_impl(&state, &a, "wrong").await.is_err());
+        }
+        assert!(unlock_impl(&state, &b, "pw-b").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unprotect_and_change_password_are_also_rate_limited() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        protect_impl(&state, &id, "correct").await.unwrap();
+
+        for _ in 0..5 {
+            assert!(unprotect_impl(&state, &id, "wrong").await.is_err());
+        }
+        assert!(unprotect_impl(&state, &id, "correct")
+            .await
+            .unwrap_err()
+            .contains("too many"));
+        assert!(change_password_impl(&state, &id, "correct", "new")
+            .await
+            .unwrap_err()
+            .contains("too many"));
+    }
+
+    // ---- Preview encryption ----
+
+    /// The finding this fixes: `preview_text` held up to 150 chars of the note
+    /// body as PLAIN TEXT in the database, so `sqlite3 panote.db "select
+    /// preview_text from notes"` read real content and the at-rest encryption
+    /// counted for nothing.
+    #[tokio::test]
+    async fn the_stored_preview_is_not_readable_from_the_database() {
+        let state = test_state().await;
+        // unprotect regenerates the preview, which is the reachable write path
+        // from a test (note_create/note_update need a Tauri State).
+        // No markdown markers in the body: '-' and friends are stripped when the
+        // preview is generated, which would confuse the comparison below.
+        let id = seed_note(&state, "SENSITIVE BODY TEXT").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        unprotect_impl(&state, &id, "pw").await.unwrap();
+
+        let row = fetch(&state, &id).await;
+        let stored = row.preview_text.clone().expect("a preview should exist");
+        assert!(
+            !stored.contains("SENSITIVE BODY TEXT"),
+            "preview stored in the clear: {stored}"
+        );
+        // …and it must still be readable through the proper path.
+        assert_eq!(
+            decrypt_preview(&state.device_key, &id, &stored).as_deref(),
+            Some("SENSITIVE BODY TEXT")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_round_trips_through_encryption() {
+        let state = test_state().await;
+        let enc = encrypt_preview(&state.device_key, "n1", "hello preview").unwrap();
+        assert_ne!(enc, "hello preview");
+        assert_eq!(
+            decrypt_preview(&state.device_key, "n1", &enc).as_deref(),
+            Some("hello preview")
+        );
+    }
+
+    /// Rows written before previews were encrypted hold plaintext. They must
+    /// keep rendering rather than turning into blanks or errors.
+    #[tokio::test]
+    async fn legacy_plaintext_previews_still_render() {
+        let state = test_state().await;
+        assert_eq!(
+            decrypt_preview(&state.device_key, "n1", "an old plaintext preview").as_deref(),
+            Some("an old plaintext preview")
+        );
+    }
+
+    /// AAD binds the preview to its note, so a blob cannot be moved between rows.
+    #[tokio::test]
+    async fn a_preview_does_not_decrypt_under_another_note_id() {
+        let state = test_state().await;
+        let enc = encrypt_preview(&state.device_key, "n1", "secret preview").unwrap();
+        // Wrong id: falls back to returning the stored blob rather than the text.
+        assert_ne!(
+            decrypt_preview(&state.device_key, "other", &enc).as_deref(),
+            Some("secret preview")
+        );
+    }
+
+    #[test]
+    fn previews_drop_html_so_the_list_shows_text_not_tag_soup() {
+        let content = json!({
+            "body": "<mark data-color=\"#ffe58f\" style=\"background-color:#ffe58f\">Hello</mark> world"
+        });
+        let preview = extract_preview("document", &content).expect("preview");
+        assert!(!preview.contains("mark"), "got: {preview}");
+        assert!(!preview.contains("background-color"), "got: {preview}");
+        assert!(preview.contains("Hello"));
+        assert!(preview.contains("world"));
+    }
+
+    // ---- Drafts ----
+
+    fn draft(title: &str, body: &str) -> DraftPayload {
+        DraftPayload {
+            title: title.into(),
+            content: json!({ "body": body }),
+            tags: vec!["wip".into()],
+        }
+    }
+
+    /// The whole point: autosaving must not touch the committed note. Compared
+    /// at the ciphertext level — byte-identical means genuinely untouched.
+    #[tokio::test]
+    async fn saving_a_draft_leaves_the_note_untouched() {
+        let state = test_state().await;
+        let id = seed_note(&state, "committed body").await;
+        let before = fetch(&state, &id).await;
+
+        draft_save_impl(&state, &id, &draft("new title", "half-written")).await.unwrap();
+
+        let after = fetch(&state, &id).await;
+        assert_eq!(before.content_ct, after.content_ct, "note body must not change");
+        assert_eq!(before.title_ct, after.title_ct, "note title must not change");
+        assert_eq!(before.updated_at, after.updated_at, "note must not look edited");
+    }
+
+    #[tokio::test]
+    async fn a_draft_round_trips() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        draft_save_impl(&state, &id, &draft("T", "in progress")).await.unwrap();
+
+        let got = draft_get_impl(&state, &id).await.unwrap().expect("draft");
+        assert_eq!(got.title, "T");
+        assert_eq!(got.content["body"], "in progress");
+        assert_eq!(got.tags, vec!["wip".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn no_draft_means_none() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        assert!(draft_get_impl(&state, &id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn saving_a_draft_twice_overwrites_rather_than_duplicating() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        draft_save_impl(&state, &id, &draft("A", "first")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("B", "second")).await.unwrap();
+
+        let got = draft_get_impl(&state, &id).await.unwrap().expect("draft");
+        assert_eq!(got.content["body"], "second");
+    }
+
+    #[tokio::test]
+    async fn discarding_a_draft_keeps_the_committed_note() {
+        let state = test_state().await;
+        let id = seed_note(&state, "committed body").await;
+        draft_save_impl(&state, &id, &draft("x", "scratch")).await.unwrap();
+
+        let before = fetch(&state, &id).await;
+        queries::draft_delete(&state.db, &id).await.unwrap();
+
+        assert!(draft_get_impl(&state, &id).await.unwrap().is_none());
+        assert_eq!(before.content_ct, fetch(&state, &id).await.content_ct);
+    }
+
+    /// Drafts are encrypted like note content — a draft in the clear would defeat
+    /// at-rest encryption exactly the way the plaintext preview column does.
+    #[tokio::test]
+    async fn a_draft_is_not_stored_in_the_clear() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        draft_save_impl(&state, &id, &draft("t", "SENSITIVE-DRAFT-TEXT")).await.unwrap();
+
+        let row = queries::draft_get(&state.db, &id).await.unwrap().expect("row");
+        let raw = String::from_utf8_lossy(&row.ct);
+        assert!(!raw.contains("SENSITIVE-DRAFT-TEXT"));
+    }
+
+    /// The draft is bound to its note id, so a stored blob cannot be replayed
+    /// onto a different note.
+    #[tokio::test]
+    async fn a_draft_will_not_decrypt_under_another_note_id() {
+        let state = test_state().await;
+        let a = seed_note(&state, "a").await;
+        let b = seed_note(&state, "b").await;
+        draft_save_impl(&state, &a, &draft("t", "secret")).await.unwrap();
+
+        let row = queries::draft_get(&state.db, &a).await.unwrap().unwrap();
+        queries::draft_upsert(&state.db, &b, &row.nonce, &row.ct, row.updated_at).await.unwrap();
+
+        assert!(draft_get_impl(&state, &b).await.is_err());
+    }
+
+    /// A protected note's draft would sit outside its password layer.
+    #[tokio::test]
+    async fn protected_notes_refuse_drafts() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+
+        assert!(draft_save_impl(&state, &id, &draft("t", "x")).await.is_err());
+    }
+
+    /// The list query selects a reduced column set; everything the list view
+    /// renders must still decrypt, and note bodies must not be fetched at all.
+    #[tokio::test]
+    async fn list_page_returns_renderable_metadata_without_bodies() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Groceries", &["home", "urgent"]).await;
+
+        let rows = queries::note_list_page(&state.db, 500, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.id, id);
+        assert_eq!(row.kind, "document");
+
+        let title = decrypt_with_vault(
+            &state.device_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(title).unwrap(), "Groceries");
+        assert_eq!(
+            decrypt_tags(&state.device_key, &row.id, &row.tags).unwrap(),
+            vec!["home".to_string(), "urgent".to_string()]
+        );
+        assert!(row.note_salt.is_none(), "unprotected note reports no password");
+
+        // The whole point of the lean SELECT: no body ciphertext on this path.
+        assert!(row.content_ct.is_empty());
+    }
+
+    /// A protected note must still be listable — the list shows its title and a
+    /// lock, and derives that lock from note_salt.
+    #[tokio::test]
+    async fn list_page_reports_protected_notes() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Diary", &[]).await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+
+        let rows = queries::note_list_page(&state.db, 500, 0).await.unwrap();
+        assert!(rows[0].note_salt.is_some());
+        let title = decrypt_with_vault(
+            &state.device_key,
+            &rows[0].title_nonce,
+            &rows[0].title_ct,
+            rows[0].id.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(title).unwrap(), "Diary");
+    }
+
+    #[tokio::test]
+    async fn list_page_honours_limit_and_offset() {
+        let state = test_state().await;
+        for n in 0..3 {
+            seed_tagged(&state, &format!("note-{n}"), &[]).await;
+        }
+        assert_eq!(queries::note_list_page(&state.db, 2, 0).await.unwrap().len(), 2);
+        assert_eq!(queries::note_list_page(&state.db, 2, 2).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

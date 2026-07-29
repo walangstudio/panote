@@ -4,6 +4,9 @@ import {
   psvParser,
   jsonParser,
   kvParser,
+  envParser,
+  iniParser,
+  passwordCsvParser,
   urlDescParser,
   makeCustomParser,
   slugifyColumn,
@@ -105,9 +108,12 @@ describe("jsonParser", () => {
     expect(result.rows).toEqual([]);
   });
 
-  it("returns empty for non-array JSON", () => {
-    const result = jsonParser.parse('{"a":1}');
-    expect(result.rows).toEqual([]);
+  // A bare object used to be rejected; it now imports as key/value rows so that
+  // .json config and secret files are usable. Non-objects are still rejected.
+  it("returns empty for JSON that is neither an array nor an object", () => {
+    expect(jsonParser.parse('"just a string"').rows).toEqual([]);
+    expect(jsonParser.parse("42").rows).toEqual([]);
+    expect(jsonParser.parse("not json at all").rows).toEqual([]);
   });
 });
 
@@ -278,5 +284,115 @@ describe("slugifyColumn", () => {
   it("falls back to 'col' for empty input", () => {
     expect(slugifyColumn("", [])).toBe("col");
     expect(slugifyColumn("@#$", [])).toBe("col");
+  });
+});
+
+describe("envParser", () => {
+  it("parses KEY=VALUE into key/value rows", () => {
+    const r = envParser.parse("API_KEY=abc123\nDB_HOST=localhost");
+    expect(r.columns).toEqual(["Key", "Value"]);
+    expect(r.rows).toEqual([
+      { Key: "API_KEY", Value: "abc123" },
+      { Key: "DB_HOST", Value: "localhost" },
+    ]);
+  });
+
+  it("masks values by default", () => {
+    expect(envParser.parse("A=1").masked).toEqual(["Value"]);
+  });
+
+  it("skips comments and blank lines, and strips the export prefix", () => {
+    const r = envParser.parse("# a comment\n\nexport TOKEN=xyz\n");
+    expect(r.rows).toEqual([{ Key: "TOKEN", Value: "xyz" }]);
+  });
+
+  it("keeps '=' and ':' inside the value", () => {
+    const r = envParser.parse("URL=postgres://u:p@host:5432/db?x=1");
+    expect(r.rows[0].Value).toBe("postgres://u:p@host:5432/db?x=1");
+  });
+
+  it("handles quoting and escapes", () => {
+    const r = envParser.parse(
+      // String.raw so the file really contains a backslash-n for the parser to
+      // expand, rather than an actual newline that would split the line in two.
+      [String.raw`A="line1\nline2"`, "B='raw $notexpanded'", "C=bare # trailing"].join("\n"),
+    );
+    expect(r.rows[0].Value).toBe("line1\nline2");
+    expect(r.rows[1].Value).toBe("raw $notexpanded");
+    expect(r.rows[2].Value).toBe("bare");
+  });
+
+  it("ignores lines that are not assignments", () => {
+    expect(envParser.parse("not an assignment\n=novalue\n1BAD=x").rows).toEqual([]);
+  });
+});
+
+describe("iniParser", () => {
+  it("tracks the current section", () => {
+    const r = iniParser.parse("[db]\nhost=localhost\n[api]\nkey=abc");
+    expect(r.columns).toEqual(["Section", "Key", "Value"]);
+    expect(r.rows).toEqual([
+      { Section: "db", Key: "host", Value: "localhost" },
+      { Section: "api", Key: "key", Value: "abc" },
+    ]);
+  });
+
+  it("supports both comment markers and keys before any section", () => {
+    const r = iniParser.parse("; c1\n# c2\nloose=1\n[s]\nk=2");
+    expect(r.rows).toEqual([
+      { Section: "", Key: "loose", Value: "1" },
+      { Section: "s", Key: "k", Value: "2" },
+    ]);
+  });
+});
+
+describe("passwordCsvParser", () => {
+  const csv = "name,url,username,password\nGitHub,https://github.com,me,hunter2";
+
+  it("maps a browser export and masks the password column", () => {
+    const r = passwordCsvParser.parse(csv);
+    expect(r.columns).toEqual(["name", "url", "username", "password"]);
+    expect(r.rows[0].password).toBe("hunter2");
+    expect(r.masked).toEqual(["password"]);
+  });
+
+  it("treats the first row as a header even when every value is text", () => {
+    // Auto-detection would not see a header here; a browser export always has one.
+    const r = passwordCsvParser.parse("name,password\nsite,secret");
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].name).toBe("site");
+  });
+
+  it("masks nothing when there is no secret column", () => {
+    expect(passwordCsvParser.parse("a,b\n1,2").masked).toEqual([]);
+  });
+});
+
+describe("jsonParser key/value objects", () => {
+  it("turns a flat object into key/value rows", () => {
+    const r = jsonParser.parse('{"a":"1","b":2}');
+    expect(r.columns).toEqual(["Key", "Value"]);
+    expect(r.rows).toEqual([
+      { Key: "a", Value: "1" },
+      { Key: "b", Value: "2" },
+    ]);
+  });
+
+  it("flattens nested objects to dotted paths", () => {
+    const r = jsonParser.parse('{"db":{"host":"h","port":5432}}');
+    expect(r.rows).toEqual([
+      { Key: "db.host", Value: "h" },
+      { Key: "db.port", Value: "5432" },
+    ]);
+  });
+
+  it("joins arrays rather than dropping them", () => {
+    expect(jsonParser.parse('{"tags":["a","b"]}').rows[0].Value).toBe("a, b");
+  });
+
+  it("still handles arrays of objects as tables", () => {
+    const r = jsonParser.parse('[{"x":1},{"x":2}]');
+    expect(r.columns).toEqual(["x"]);
+    expect(r.rows).toHaveLength(2);
   });
 });

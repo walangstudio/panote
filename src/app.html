@@ -1,14 +1,18 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en" data-theme="candy-light">
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&display=swap" rel="stylesheet" />
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+    <!-- Self-hosted: this app never touches the network. Regenerate with scripts/fetch-fonts.ps1. -->
+    <link href="%sveltekit.assets%/fonts/fonts.css" rel="stylesheet" />
     <title>Panote</title>
     <style>
       [data-theme="candy-light"] {
+        /* Native controls (select popups, file inputs, scrollbars, date pickers)
+           are painted by the UA and ignore our variables â€” without this the dark
+           theme rendered <option> text black on a dark background. */
+        color-scheme: light;
         --bg: #fef7ff;
         --bg-gradient: linear-gradient(135deg, #fef7ff 0%, #ffd6ee 50%, #eedcff 100%);
         --surface: #ffffff;
@@ -18,7 +22,9 @@
         --hover: #fdf0f8;
         --text: #2e1a28;
         --text-secondary: #604868;
-        --muted: #907898;
+        /* Darkened from #907898 (3.4-3.9:1) to clear WCAG AA's 4.5:1 for
+           normal text against both --surface and --surface-container. */
+        --muted: #67546e;
         --border: #e8d8ec;
         --input-bg: #ffffff;
         --accent: #e040a0;
@@ -41,6 +47,7 @@
         --radius-full: 9999px;
       }
       [data-theme="candy-dark"] {
+        color-scheme: dark;
         --bg: #1a1625;
         --bg-gradient: linear-gradient(135deg, #1a1625 0%, #2a1530 50%, #1e1a30 100%);
         --surface: #2b2538;
@@ -50,7 +57,9 @@
         --hover: #3a3350;
         --text: #e6e0ec;
         --text-secondary: #b8a8c8;
-        --muted: #8a7a98;
+        /* Lightened from #8a7a98 (3.4-3.7:1) to clear WCAG AA's 4.5:1 for
+           normal text against both --surface and --surface-container. */
+        --muted: #a99db3;
         --border: #4a4260;
         --input-bg: #241e32;
         --accent: #f06cb8;

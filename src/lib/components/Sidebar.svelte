@@ -25,7 +25,7 @@
 {#if $sidebarOpen}
   <div class="backdrop" role="presentation" onclick={() => sidebarOpen.set(false)}></div>
 {/if}
-<aside class="drawer" class:open={$sidebarOpen}>
+<aside class="drawer" class:open={$sidebarOpen} inert={!$sidebarOpen}>
   <div class="drawer-header">
     <span class="logo-text">panote</span>
     <button class="close-btn" onclick={() => sidebarOpen.set(false)} aria-label="Close menu">

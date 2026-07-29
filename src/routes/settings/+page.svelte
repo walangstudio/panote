@@ -6,6 +6,7 @@
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
+  import PasswordModal from "$lib/components/PasswordModal.svelte";
   import { gameStats, initGamekit } from "$lib/gamekit/store";
 
   let appVersion = $state("");
@@ -19,6 +20,8 @@
   let exporting = $state(false);
   let importing = $state(false);
   let pendingImportContents = $state<string | null>(null);
+  /// Set while waiting for the password that unseals protected notes in a backup.
+  let sealedImportContents = $state<string | null>(null);
   let importResolution = $state<ImportResolution>("overwrite");
   let statusMessage = $state("");
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -64,14 +67,36 @@
     }
   }
 
-  async function confirmImport() {
+  /// A backup seals password-protected notes, so importing one needs that
+  /// password before anything can be read.
+  function fileHasSealedNotes(contents: string): boolean {
+    try {
+      const parsed = JSON.parse(contents);
+      return Array.isArray(parsed?.notes) && parsed.notes.some((n: unknown) =>
+        !!(n as { secret?: unknown })?.secret,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function confirmImport() {
     const contents = pendingImportContents;
-    pendingImportContents = null;
     if (!contents) return;
+    pendingImportContents = null;
+    if (fileHasSealedNotes(contents)) {
+      // Collect the password first; the import runs from the modal's submit.
+      sealedImportContents = contents;
+      return;
+    }
+    void runImport(contents);
+  }
+
+  async function runImport(contents: string, secretPassword?: string) {
     importing = true;
     statusMessage = "";
     try {
-      const summary: ImportSummary = await notesImport(contents, importResolution);
+      const summary: ImportSummary = await notesImport(contents, importResolution, secretPassword);
       const parts: string[] = [];
       if (summary.imported) parts.push(`${summary.imported} new`);
       if (summary.updated) parts.push(`${summary.updated} updated`);
@@ -334,6 +359,19 @@
     cancelLabel="Cancel"
     onconfirm={confirmImport}
     oncancel={cancelImport}
+  />
+{/if}
+
+{#if sealedImportContents !== null}
+  <PasswordModal
+    mode="unlock"
+    title="Password-protected notes"
+    onsubmit={async (v) => {
+      const contents = sealedImportContents!;
+      sealedImportContents = null;
+      await runImport(contents, v.password);
+    }}
+    onclose={() => (sealedImportContents = null)}
   />
 {/if}
 

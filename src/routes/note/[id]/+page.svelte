@@ -1,18 +1,22 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { onMount } from "svelte";
+  import { untrack, onMount, onDestroy } from "svelte";
   import { goto, beforeNavigate } from "$app/navigation";
+  import { isDesktop } from "$lib/stores/layout";
   import {
     noteGet, noteCreate, noteUpdate,
     noteUnlock, noteLock, noteProtect, noteUnprotect, noteChangePassword,
     noteRecover, noteAddRecovery,
-    LOCKED, type NoteKind,
+    noteDelete,
+    noteDraftSave, noteDraftGet, noteDraftDiscard, type DraftDetail,
+    LOCKED, type NoteKind, type NoteMetadata,
   } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
+  import { detectLossyConstructs, type LossyConstruct } from "$lib/markdownCompat";
   import { recordNoteSaved } from "$lib/gamekit/store";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
-  import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
+  import RichEditor from "$lib/components/RichEditor.svelte";
   import ChecklistEditor from "$lib/components/ChecklistEditor.svelte";
   import KanbanEditor from "$lib/components/KanbanEditor.svelte";
   import TableEditor from "$lib/components/TableEditor.svelte";
@@ -57,6 +61,11 @@
   let justSaved = $state(false);
   let pendingNavUrl = $state<string | null>(null);
   let updatedAt = $state<number | undefined>();
+  /// Bumped once a note's state is fully populated. The editor is keyed on this
+  /// rather than on `id`: for a brand-new note `openNote` runs synchronously, so
+  /// keying on `id` recreated the editor during the render *before* the reset
+  /// ran, leaving the previous note's body on screen.
+  let loadToken = $state(0);
 
   // Auto-contrast ink for custom backgrounds
   let imgInkResolved = $state<"dark" | "light" | null>(null);
@@ -128,6 +137,97 @@
     pendingNavUrl = to?.url?.toString() ?? "";
   });
 
+  // ---- Drafts ----
+  //
+  // Unsaved edits are autosaved to a draft, never over the note itself. The note
+  // changes only when the user saves. Because the draft is durable, losing the
+  // window mid-edit is no longer destructive.
+
+  /// The overflow menu's Delete used to only close the menu — a destructive
+  /// action that silently did nothing.
+  let confirmDelete = $state(false);
+
+  async function doDelete() {
+    confirmDelete = false;
+    try {
+      await noteDelete(id);
+      await refreshNotes();
+      justSaved = true; // deleted, so the dirty guard must not fight the exit
+      goto("/");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  const DRAFT_DEBOUNCE_MS = 800;
+  let draftTimer: ReturnType<typeof setTimeout> | null = null;
+  let draftStatus = $state<"" | "saving" | "saved">("");
+  /// An outstanding draft found on open, offered rather than applied.
+  let pendingDraft = $state<DraftDetail | null>(null);
+
+  // ---- Round-trip safety ----
+  //
+  // markdown-it parses more than the editor's schema can hold, so a construct in
+  // that gap is dropped to its text and written back on the FIRST edit. Rather
+  // than rewrite silently, hold the note read-only and say what would change.
+  let lossy = $state<LossyConstruct[]>([]);
+  let lossyAccepted = $state(false);
+  const lossyLocked = $derived(lossy.length > 0 && !lossyAccepted);
+
+  function queueDraft() {
+    // New notes have no id to key a draft on, and protected notes refuse them.
+    if (isNew || hasPassword || locked || loading) return;
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(async () => {
+      try {
+        draftStatus = "saving";
+        await noteDraftSave(id, { title, content, tags });
+        draftStatus = "saved";
+      } catch {
+        draftStatus = "";
+      }
+    }, DRAFT_DEBOUNCE_MS);
+  }
+
+  // Autosave tracks the same values the dirty check does.
+  $effect(() => {
+    if (!dirty) return;
+    // Read the edited state so this re-runs as it changes.
+    void title; void JSON.stringify(content); void JSON.stringify(tags);
+    untrack(() => queueDraft());
+  });
+
+  function applyDraft() {
+    if (!pendingDraft) return;
+    title = pendingDraft.title;
+    content = pendingDraft.content as typeof content;
+    tags = pendingDraft.tags;
+    pendingDraft = null;
+    loadToken++; // rebuild the editor around the restored content
+  }
+
+  async function discardDraft() {
+    pendingDraft = null;
+    draftStatus = "";
+    try { await noteDraftDiscard(id); } catch { /* nothing to discard */ }
+  }
+
+  /// Ctrl/Cmd+S commits. Writers hit it reflexively; before this it did nothing
+  /// at all, which is worse than not existing because it feels like it worked.
+  function onKey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (!saving && !locked) void save();
+    }
+  }
+
+  onMount(() => window.addEventListener("keydown", onKey));
+
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    if (draftTimer) clearTimeout(draftTimer);
+  });
+
   function discardAndNavigate() {
     const target = pendingNavUrl;
     pendingNavUrl = null;
@@ -139,22 +239,53 @@
     }
   }
 
-  onMount(async () => {
-    if (isNew) {
-      kind = kindParam;
-      content = defaultContent(kind);
+  // SvelteKit reuses this component across /note/a → /note/b, so loading on mount
+  // is not enough: in the split view the id changes without a remount.
+  $effect(() => {
+    const target = id;
+    const targetKind = kindParam;
+    untrack(() => { void openNote(target, targetKind); });
+  });
+
+  async function openNote(noteId: string, newKind: NoteKind) {
+    loading = true;
+    error = "";
+    locked = false;
+    hasPassword = false;
+    needUnlockForSave = false;
+    pwModal = null;
+    menuOpen = false;
+    bgMenuOpen = false;
+    recoverOpen = false;
+    postProtectPw = null;
+    recoveryCode = null;
+    justSaved = false;
+    tagInput = "";
+    bgColor = undefined;
+    bgImage = undefined;
+    updatedAt = undefined;
+    if (noteId === "new") {
+      kind = newKind;
+      title = "";
+      tags = [];
+      showPreview = true;
+      content = defaultContent(newKind);
       savedTitle = title;
       savedContent = JSON.stringify(content);
       savedTags = JSON.stringify(tags);
+      loadToken++;
       loading = false;
       return;
     }
     await loadNote();
-  });
+  }
 
   async function loadNote() {
+    // Clicking through the list fires overlapping loads; only the newest may win.
+    const requested = id;
     try {
-      const note = await noteGet(id);
+      const note = await noteGet(requested);
+      if (requested !== id) return;
       kind = note.kind;
       title = note.title;
       content = note.content;
@@ -169,7 +300,24 @@
       savedTags = JSON.stringify(tags);
       locked = false;
       error = "";
+      // Check before the editor can rewrite anything. Only document notes carry
+      // markdown; the other kinds are structured JSON.
+      lossy = kind === "document"
+        ? detectLossyConstructs((content as { body?: string }).body ?? "")
+        : [];
+      lossyAccepted = false;
+      loadToken++;
+
+      // Offer any unsaved work from a previous session rather than applying it —
+      // the user decides whether the draft or the saved note is the real one.
+      try {
+        const d = await noteDraftGet(requested);
+        if (requested === id && d && (d.title !== title || JSON.stringify(d.content) !== savedContent)) {
+          pendingDraft = d;
+        }
+      } catch { /* a missing or unreadable draft must not block opening the note */ }
     } catch (e) {
+      if (requested !== id) return;
       if (String(e) === LOCKED) {
         locked = true;
         hasPassword = true;
@@ -177,6 +325,7 @@
         error = String(e);
       }
     }
+    if (requested !== id) return;
     loading = false;
   }
 
@@ -219,28 +368,37 @@
       pwModal = { mode: "set" };
     } else {
       await noteLock(id);
-      justSaved = true;
-      goto("/");
+      if ($isDesktop) {
+        // The list stays beside us; re-read so the lock gate renders in place.
+        // loadNote resets the saved snapshots, so this clears dirty on its own.
+        await loadNote();
+      } else {
+        justSaved = true;
+        goto("/");
+      }
     }
   }
 
-  async function save() {
+  /// Writes the note. Returns the created row when it was new, and whether the
+  /// write succeeded — navigation is the caller's business, because leaving is
+  /// only safe once the bytes are actually down.
+  async function persist(): Promise<{ ok: boolean; created: NoteMetadata | null }> {
     addTag();
     saving = true;
     error = "";
+    let created: NoteMetadata | null = null;
+    let ok = false;
     try {
       const content_hint = kind === "document" ? detectFormat((content as { body: string }).body ?? "") : undefined;
       const input = { kind, title, content, tags, content_hint, show_preview: showPreview, bg_color: bgColor, bg_image: bgImage };
-      if (isNew) {
-        await noteCreate(input);
-      } else {
-        await noteUpdate(id, input);
-      }
+      if (isNew) created = await noteCreate(input);
+      else await noteUpdate(id, input);
       // Gamification — never let a tracking error block the save.
       try { await recordNoteSaved({ isNew, kind, content }); } catch (e) { console.error("gamekit", e); }
-      await refreshNotes();
-      justSaved = true;
-      goto("/");
+      // Saving is the one place the editor can change a background, so it is the
+      // one place that needs the cached image map refreshed.
+      await refreshNotes({ withBackgrounds: true });
+      ok = true;
     } catch (e) {
       if (String(e) === LOCKED) {
         needUnlockForSave = true;
@@ -249,6 +407,42 @@
       }
     }
     saving = false;
+    return { ok, created };
+  }
+
+  function rebaseline() {
+    savedTitle = title;
+    savedContent = JSON.stringify(content);
+    savedTags = JSON.stringify(tags);
+  }
+
+  async function save() {
+    const { ok, created } = await persist();
+    if (!ok) return;
+    justSaved = true;
+    if (!$isDesktop) {
+      goto("/");
+    } else if (created) {
+      // Bind the editor to the real note, or the next save creates a duplicate.
+      goto(`/note/${created.id}`, { replaceState: true });
+    } else {
+      // Staying put: clear dirty by re-baselining instead of navigating away.
+      rebaseline();
+      justSaved = false;
+    }
+  }
+
+  /// "Save" from the unsaved-changes prompt: persist, then continue to wherever
+  /// the user was heading. A failed write keeps the prompt up so nothing is lost.
+  async function saveAndNavigate() {
+    const target = pendingNavUrl;
+    const { ok } = await persist();
+    if (!ok) return;
+    rebaseline();
+    pendingNavUrl = null;
+    justSaved = true;
+    if (target) goto(target);
+    else history.back();
   }
 
   async function unlockForSave(v: { password: string }) {
@@ -400,6 +594,7 @@
 {:else}
   <div
     class="editor-layout"
+    class:desktop={$isDesktop}
     class:dark-ink={editorInk() === "dark"}
     class:light-ink={editorInk() === "light"}
     class:has-bg-image={!!bgImage}
@@ -410,9 +605,11 @@
   >
     <!-- Glass sticky header -->
     <header class="editor-header">
-      <a href="/" class="round-icon" aria-label="Back">
-        <span class="material-symbols-outlined" style="font-size: 20px;">arrow_back</span>
-      </a>
+      {#if !$isDesktop}
+        <a href="/" class="round-icon" aria-label="Back">
+          <span class="material-symbols-outlined" style="font-size: 20px;">arrow_back</span>
+        </a>
+      {/if}
       <div class="header-spacer"></div>
       <!-- Kind chip -->
       <div class="kind-chip {kindChannel[kind] ?? 'accent'}">
@@ -460,7 +657,7 @@
           </button>
         {/if}
         <div class="overflow-divider"></div>
-        <button class="overflow-item danger" onclick={() => { menuOpen = false; }}>
+        <button class="overflow-item danger" onclick={() => { menuOpen = false; confirmDelete = true; }}>
           <span class="material-symbols-outlined" style="font-size: 20px;">delete</span>
           Delete
         </button>
@@ -468,6 +665,32 @@
     {/if}
 
     <!-- Content area -->
+    {#if lossyLocked}
+      <div class="draft-banner lossy" role="status">
+        <span class="material-symbols-outlined" aria-hidden="true">warning</span>
+        <span class="draft-text">
+          This note uses formatting the editor can't keep:
+          {lossy.map(c => c.label).join("; ")}.
+          It's read-only until you choose — saving after editing would apply those changes.
+        </span>
+        <button class="draft-btn primary" onclick={() => (lossyAccepted = true)}>
+          Edit anyway
+        </button>
+        <a class="draft-btn" href="/">Leave it alone</a>
+      </div>
+    {/if}
+
+    {#if pendingDraft}
+      <div class="draft-banner" role="status">
+        <span class="material-symbols-outlined" aria-hidden="true">history</span>
+        <span class="draft-text">
+          Unsaved changes from {formatRelative(pendingDraft.updated_at)} ago aren't in the saved note.
+        </span>
+        <button class="draft-btn primary" onclick={applyDraft}>Restore them</button>
+        <button class="draft-btn" onclick={discardDraft}>Keep saved version</button>
+      </div>
+    {/if}
+
     <div class="editor-content">
       <!-- Title -->
       <textarea
@@ -535,15 +758,22 @@
 
       <!-- Body editors -->
       <div class="editor-body">
-        {#if kind === "document"}
-          <MarkdownEditor bind:content initialPreview={modeParam === "edit" ? false : modeParam === "view" ? true : !isNew} />
-        {:else if kind === "checklist"}
-          <ChecklistEditor bind:content />
-        {:else if kind === "kanban"}
-          <KanbanEditor bind:content />
-        {:else if kind === "table"}
-          <TableEditor bind:content />
-        {/if}
+        <!-- Keyed on the load token, not the id: the split view reuses this
+             component across notes, and the editor must only be rebuilt once the
+             new note's content is in place (see loadToken). -->
+        {#key loadToken}
+          {#if kind === "document"}
+            <!-- WYSIWYG now, so there is no edit/preview split — only ?mode=view
+                 still means read-only. -->
+            <RichEditor bind:content editable={modeParam !== "view" && !lossyLocked} />
+          {:else if kind === "checklist"}
+            <ChecklistEditor bind:content />
+          {:else if kind === "kanban"}
+            <KanbanEditor bind:content />
+          {:else if kind === "table"}
+            <TableEditor bind:content />
+          {/if}
+        {/key}
       </div>
 
       <!-- Tags -->
@@ -575,6 +805,11 @@
         <span>Show preview on list</span>
       </label>
       <div class="footer-spacer"></div>
+      {#if draftStatus && !pendingDraft}
+        <span class="draft-status" role="status">
+          {draftStatus === "saving" ? "Saving draft…" : "Draft saved"}
+        </span>
+      {/if}
       <button class="save-btn" onclick={save} disabled={saving}>
         {saving ? "Saving…" : "Save"}
       </button>
@@ -588,13 +823,25 @@
   </div>
 {/if}
 
+{#if confirmDelete}
+  <ConfirmModal
+    title="Delete note?"
+    message="This note will be permanently deleted. This cannot be undone."
+    confirmLabel="Delete"
+    destructive
+    onconfirm={doDelete}
+    oncancel={() => confirmDelete = false}
+  />
+{/if}
+
 {#if pendingNavUrl !== null}
   <ConfirmModal
     title="Unsaved changes"
-    message="You have unsaved changes. Leave without saving?"
-    confirmLabel="Discard"
-    destructive
-    onconfirm={discardAndNavigate}
+    message="Save this note before leaving?"
+    confirmLabel={saving ? "Saving…" : "Save"}
+    altLabel="Discard"
+    onalt={discardAndNavigate}
+    onconfirm={saveAndNavigate}
     oncancel={() => pendingNavUrl = null}
   />
 {/if}
@@ -738,7 +985,10 @@
 
   /* ── Layout ── */
   .editor-layout {
-    display: flex; flex-direction: column; min-height: 100%;
+    /* height, not min-height: the body must fill down to the tag row on every
+       screen size. With min-height the flex children size to their content and
+       the editor collapses to a small box with dead space under it. */
+    display: flex; flex-direction: column; height: 100%;
     position: relative;
   }
   .editor-layout.has-bg-image {
@@ -829,10 +1079,41 @@
   .overflow-divider { height: 1px; background: var(--border); margin: 4px 6px; }
 
   /* ── Content area ── */
+  /* min-height:0 is required on both — without it these flex children refuse to
+     shrink and the inner editor falls back to its intrinsic height. */
+  /* Offers unsaved work from a previous session; never applies it silently. */
+  .draft-banner {
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+    margin: 0.5rem 1rem 0; padding: 0.6rem 0.8rem;
+    border: 1px solid var(--accent-muted); border-radius: var(--radius);
+    background: var(--accent-muted); color: var(--text);
+    font-size: 0.85rem; flex-shrink: 0;
+  }
+  .draft-text { flex: 1; min-width: 12rem; }
+  .draft-btn {
+    padding: 0.35rem 0.8rem; border-radius: var(--radius-full);
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text-secondary); cursor: pointer; font-family: inherit;
+    font-size: 0.82rem; font-weight: 600;
+  }
+  .draft-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .draft-btn.primary {
+    background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  }
+  .draft-status { font-size: 0.78rem; color: var(--muted); margin-right: 0.6rem; }
+  /* Warning, not information: this one is about losing formatting. */
+  .draft-banner.lossy {
+    border-color: var(--error); background: var(--error-surface);
+  }
+  .draft-banner.lossy .material-symbols-outlined { color: var(--error); }
+  /* The "leave it alone" escape is an anchor, so it needs the button's box. */
+  a.draft-btn { text-decoration: none; display: inline-flex; align-items: center; }
+
   .editor-content {
-    flex: 1; padding: 1.1rem 1.25rem 2rem;
+    flex: 1; min-height: 0; padding: 0.6rem 1rem 0.5rem;
     display: flex; flex-direction: column;
   }
+  .editor-layout.desktop .editor-content { padding: 0.75rem 1.5rem 0.5rem; }
 
   /* Title textarea */
   .title-input {
@@ -846,7 +1127,7 @@
   /* Edited subline */
   .edited-line {
     font-size: 0.78rem; font-weight: 500; color: var(--muted);
-    margin-bottom: 18px;
+    margin-bottom: 8px;
   }
 
   /* Error */
@@ -897,12 +1178,13 @@
   .bg-clear-btn:hover { background: var(--error-surface); }
 
   /* ── Editor body ── */
-  .editor-body { flex: 1; }
+  .editor-body { flex: 1; min-height: 0; }
 
   /* ── Tags ── */
   .tags-row {
     display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    margin-top: 26px;
+    /* Sits directly under the editor, which now fills the space above it. */
+    margin-top: 10px; flex-shrink: 0;
   }
   .tag-chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -960,7 +1242,7 @@
 
   @media (max-width: 640px) {
     .editor-header { padding: 0.5rem 0.6rem; }
-    .editor-content { padding: 0.9rem 1rem 2rem; }
+    .editor-content { padding: 0.5rem 0.8rem 0.5rem; }
     .title-input { font-size: 1.3rem; }
   }
 </style>
