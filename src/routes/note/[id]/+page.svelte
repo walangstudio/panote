@@ -13,7 +13,6 @@
   } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
   import { detectLossyConstructs, type LossyConstruct } from "$lib/markdownCompat";
-  import { recordNoteSaved } from "$lib/gamekit/store";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import RichEditor from "$lib/components/RichEditor.svelte";
@@ -393,8 +392,6 @@
       const input = { kind, title, content, tags, content_hint, show_preview: showPreview, bg_color: bgColor, bg_image: bgImage };
       if (isNew) created = await noteCreate(input);
       else await noteUpdate(id, input);
-      // Gamification — never let a tracking error block the save.
-      try { await recordNoteSaved({ isNew, kind, content }); } catch (e) { console.error("gamekit", e); }
       // Saving is the one place the editor can change a background, so it is the
       // one place that needs the cached image map refreshed.
       await refreshNotes({ withBackgrounds: true });

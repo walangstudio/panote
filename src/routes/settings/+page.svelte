@@ -7,7 +7,6 @@
   import QrShowModal from "$lib/components/QrShowModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
-  import { gameStats, initGamekit } from "$lib/gamekit/store";
 
   let appVersion = $state("");
   let deviceName = $state("");
@@ -119,13 +118,7 @@
     try { deviceName = await getDeviceName(); } catch {}
     try { receiving = await isReceiving(); } catch {}
     try { myIps = await deviceIps(); } catch {}
-    try { await initGamekit(); } catch {}
   });
-
-  function tierSub(t: typeof $gameStats.tier): string {
-    const level = t.current ? t.current[0].toUpperCase() + t.current.slice(1) : "Unranked";
-    return t.next ? `${level} · ${t.remaining} notes to ${t.next}` : level;
-  }
 
   async function saveName() {
     const trimmed = nameInput.trim();
@@ -271,40 +264,6 @@
           style="display:none"
           onchange={onFilePicked}
         />
-      </div>
-    </div>
-
-    <!-- Progress (gamekit) -->
-    <div class="settings-group">
-      <div class="group-label">Progress</div>
-      <div class="group-card">
-        <div class="row">
-          <span class="row-icon"><span class="material-symbols-outlined">trophy</span></span>
-          <div class="row-body">
-            <span class="row-title">Writer level</span>
-            <span class="row-sub">{tierSub($gameStats.tier)}</span>
-          </div>
-        </div>
-        <div class="row-divider"></div>
-        <div class="row">
-          <span class="row-icon"><span class="material-symbols-outlined">edit_note</span></span>
-          <div class="row-body">
-            <span class="row-title">{$gameStats.notes} notes · {$gameStats.words.toLocaleString()} words</span>
-            <span class="row-sub">🔥 {$gameStats.streak.current}-day streak · best {$gameStats.streak.best}</span>
-          </div>
-        </div>
-        <div class="row-divider"></div>
-        <div class="row">
-          <span class="row-icon"><span class="material-symbols-outlined">military_tech</span></span>
-          <div class="row-body">
-            <span class="row-title">Badges · {$gameStats.earnedCount}/{$gameStats.badges.length}</span>
-            <div class="badge-grid">
-              {#each $gameStats.badges as b (b.code)}
-                <span class="badge" class:locked={!b.earned} title={`${b.name} — ${b.description}`}>{b.emoji}</span>
-              {/each}
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -588,30 +547,6 @@
   .name-value:hover { text-decoration: underline; }
 
   .mono { font-family: monospace; font-size: 0.8rem; }
-
-  /* ── Badge grid (Progress) ── */
-  .badge-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 8px;
-  }
-  .badge {
-    width: 34px;
-    height: 34px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    border-radius: var(--radius-full);
-    background: var(--accent-muted);
-    cursor: default;
-  }
-  .badge.locked {
-    filter: grayscale(1);
-    opacity: 0.35;
-    background: var(--surface-container);
-  }
 
   @media (max-width: 640px) {
     .settings-body { padding: 0.9rem 0.6rem calc(2rem + env(safe-area-inset-bottom, 0px)); }

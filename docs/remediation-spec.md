@@ -109,7 +109,7 @@ toggling a mark with no selection only sets a stored mark and never fires TipTap
 | P2 | `formatRelative` built an `Intl.DateTimeFormat` per card. Hoisted. | done |
 | P3 | Search query lowercased inside the filter callback, re-running per note per keystroke. | done |
 | P4 | Per-card canvas luminance decoded full-resolution images and spread the whole `imgInk` map (O(k^2) allocation, k full list re-renders). Now keyed on image URL, batched, pruned. | done |
-| P5 | Gamekit log grew unbounded in localStorage; `countWords` counted raw markup. Capped at 300 with snapshot folding. | done |
+| P5 | Gamekit log grew unbounded in localStorage; `countWords` counted raw markup. Capped at 300 with snapshot folding. | done (fix lives on `experiment/gamekit`; the feature is not on this branch) |
 | P6 | Descending sort had no stable secondary key, so flipping direction scrambled within-group order. | done |
 
 ---
