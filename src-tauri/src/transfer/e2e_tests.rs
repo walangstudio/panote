@@ -1,0 +1,361 @@
+//! Two real devices, one real socket.
+//!
+//! Everything below the UI runs for real here: TCP, TLS 1.3 with TOFU, the
+//! SPAKE2 exchange, framing, chunking and the blob crypto. The two ends have
+//! separate databases and separate device keys, exactly as two machines would.
+//!
+//! This is the only place the transfer protocol is exercised end to end - every
+//! other transfer test stops at a function boundary, so a break in the wiring
+//! between them showed up on a phone rather than in CI.
+
+use super::lan::{send_note, send_notes, serve, TransferEvents};
+use crate::crypto::{note::decrypt_with_vault, vault::derive_key};
+use crate::db::{init_pool, queries};
+use crate::state::AppState;
+use crate::transfer::blob::TransferBlob;
+use serde_json::json;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpListener;
+
+const CODE: &str = "K4X7P2";
+
+async fn device(name: &str) -> Arc<AppState> {
+    let pool = init_pool(":memory:").await.unwrap();
+    let key = derive_key(name, &[0u8; 16]).unwrap();
+    Arc::new(AppState::new(pool, key, name.into()))
+}
+
+async fn seed(state: &AppState, title: &str, body: &str, tags: &[&str]) -> String {
+    let blob = TransferBlob {
+        id: format!("src-{title}"),
+        kind: "document".into(),
+        title: title.into(),
+        content: json!({ "body": body }),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_001,
+        origin_device_id: String::new(),
+        origin_note_id: String::new(),
+    };
+    crate::transfer::commands::import_blob(state, &state.device_key, blob)
+        .await
+        .unwrap()
+}
+
+/// The UI notifications, dropped on the floor. The test observes the same state
+/// the UI renders from (`pending_offers`, the database) rather than the events.
+struct Silent;
+impl TransferEvents for Silent {
+    fn offer_received(&self, _: &crate::state::PendingOffer) {}
+    fn transfer_received(&self, _: &str) {}
+    fn transfer_rejected(&self, _: &str) {}
+    fn notes_received(&self, _: &str, _: u32, _: u32) {}
+}
+
+/// Bind an ephemeral port and serve on it, so these can run in parallel and
+/// never collide with a real app holding TRANSFER_PORT.
+async fn listen(state: Arc<AppState>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = serve(listener, state, Arc::new(Silent)).await;
+    });
+    port
+}
+
+/// Stands in for the recipient typing the code the sender read out, polling for
+/// the offer the way the pending-offer list does.
+fn answer_with(state: Arc<AppState>, code: &str) -> tokio::task::JoinHandle<bool> {
+    let code = code.to_string();
+    tokio::spawn(async move {
+        for _ in 0..400 {
+            let entry = {
+                let mut responses = state.offer_responses.lock().unwrap();
+                let id = responses.keys().next().cloned();
+                id.and_then(|id| responses.remove(&id))
+            };
+            if let Some(tx) = entry {
+                return tx.send(code).is_ok();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    })
+}
+
+async fn received(state: &AppState) -> Vec<queries::NoteRow> {
+    queries::note_list_page(&state.db, 100, 0).await.unwrap()
+}
+
+/// `send_note` parks the note as a pending transfer and the recipient types the
+/// passphrase to open it. This is what `note_receive_accept` does, minus the
+/// Tauri `State` wrapper a test cannot construct.
+async fn accept_pending(state: &AppState, passphrase: &str) -> Result<String, String> {
+    let pending = state.list_pending();
+    let t = pending.first().ok_or("no pending transfer arrived")?;
+    let blob = super::lan::decrypt_transfer(
+        &t.transfer_salt,
+        &t.transfer_nonce,
+        &t.transfer_ct,
+        passphrase,
+    )
+    .map_err(|_| "wrong passphrase".to_string())?;
+    state.take_pending(&t.transfer_id);
+    crate::transfer::commands::import_blob(state, &state.device_key, blob)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Wait for the inbound connection to have parked its pending transfer - the
+/// sender's Ack returns before the receiver has finished storing it.
+async fn await_pending(state: &AppState) {
+    for _ in 0..400 {
+        if !state.list_pending().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Read a landed note back the way the app does: decrypt with the receiver's
+/// own device key, AAD-bound to the new note id.
+///
+/// Fetched with `note_get`, not from the list rows - the list query drops
+/// `content_ct` and `nonce` on purpose (they are dead weight on every card), so
+/// a list row cannot be decrypted.
+async fn open(state: &AppState, id: &str) -> (String, String, Vec<String>) {
+    let row = queries::note_get(&state.db, id).await.unwrap().unwrap();
+    let title = String::from_utf8(
+        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
+            .expect("receiver must be able to decrypt the title it stored"),
+    )
+    .unwrap();
+    let content_bytes =
+        decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
+            .expect("receiver must be able to decrypt the content it stored");
+    let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
+    // Tags are encrypted alongside the rest, not stored as readable JSON.
+    let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags)
+        .expect("receiver must be able to decrypt the tags it stored");
+    (title, content["body"].as_str().unwrap_or_default().to_string(), tags)
+}
+
+/// Full rows for everything the receiver holds.
+async fn opened_all(state: &AppState) -> Vec<(String, String, Vec<String>)> {
+    let mut out = Vec::new();
+    for row in received(state).await {
+        out.push(open(state, &row.id).await);
+    }
+    out
+}
+
+// ---- Single-note send: passphrase-wrapped, parked until the recipient opens it ----
+
+#[tokio::test]
+async fn a_note_sent_from_one_device_arrives_on_the_other() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Shopping", "milk and eggs", &["errands"]).await;
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .expect("the send should be acknowledged");
+    await_pending(&bob).await;
+
+    // It waits for the recipient rather than landing unannounced.
+    assert_eq!(bob.list_pending().len(), 1, "a transfer should be waiting");
+    assert!(received(&bob).await.is_empty(), "nothing lands before the code is entered");
+
+    accept_pending(&bob, CODE).await.expect("the right code should open it");
+
+    let rows = received(&bob).await;
+    assert_eq!(rows.len(), 1);
+    let (title, body, tags) = open(&bob, &rows[0].id).await;
+    assert_eq!(title, "Shopping");
+    assert_eq!(body, "milk and eggs");
+    assert_eq!(tags, vec!["errands"]);
+}
+
+/// The point of re-encrypting on arrival: the receiver holds it under its own
+/// key, so the sender's key is never needed to read it and never travels.
+#[tokio::test]
+async fn the_note_is_stored_under_the_receivers_own_key() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    assert_ne!(alice.device_key, bob.device_key, "the two devices must differ");
+    let note_id = seed(&alice, "Recipe", "sourdough starter", &[]).await;
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    let listed = received(&bob).await;
+    let row = queries::note_get(&bob.db, &listed[0].id).await.unwrap().unwrap();
+    assert_eq!(open(&bob, &row.id).await.1, "sourdough starter");
+    assert!(
+        decrypt_with_vault(&alice.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
+            .is_err(),
+        "the sender's key must not open the receiver's copy",
+    );
+}
+
+#[tokio::test]
+async fn the_wrong_code_opens_nothing_and_allows_a_retry() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Secret", "do not leak", &[]).await;
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+
+    assert!(accept_pending(&bob, "WRONGC").await.is_err(), "a wrong code must not decrypt");
+    assert!(received(&bob).await.is_empty(), "nothing may land on a wrong code");
+    assert_eq!(bob.list_pending().len(), 1, "the transfer stays pending so it can be retried");
+
+    accept_pending(&bob, CODE).await.expect("the correct code should still work");
+    let rows = received(&bob).await;
+    assert_eq!(open(&bob, &rows[0].id).await.1, "do not leak");
+}
+
+#[tokio::test]
+async fn unicode_and_tags_survive_the_wire() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let title = "Cafe - naive \u{65e5}\u{672c}\u{8a9e} \u{1F389}";
+    let body = "line one\nline two\ttabbed \u{2014} em dash \u{1F389}";
+    let note_id = seed(&alice, title, body, &["a", "b", "c"]).await;
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    let rows = received(&bob).await;
+    let (got_title, got_body, got_tags) = open(&bob, &rows[0].id).await;
+    assert_eq!(got_title, title);
+    assert_eq!(got_body, body);
+    assert_eq!(got_tags, vec!["a", "b", "c"]);
+}
+
+/// Well past a single frame, so chunking and reassembly are genuinely exercised.
+#[tokio::test]
+async fn a_note_larger_than_one_frame_arrives_whole() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let big = "x".repeat(400_000);
+    let note_id = seed(&alice, "Big", &big, &[]).await;
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    let rows = received(&bob).await;
+    let (_, body, _) = open(&bob, &rows[0].id).await;
+    assert_eq!(body.len(), big.len(), "large body must survive chunking intact");
+    assert_eq!(body, big);
+}
+
+#[tokio::test]
+async fn an_unreachable_peer_fails_instead_of_hanging() {
+    let alice = device("alice").await;
+    let note_id = seed(&alice, "Nowhere", "body", &[]).await;
+    // Nothing serves port 1.
+    let result = send_note(&alice, &note_id, "127.0.0.1", 1, CODE, "Alice").await;
+    assert!(result.is_err(), "an unreachable peer must surface an error");
+}
+
+/// Both directions across one pair of devices. The reply is a fresh connection
+/// in the opposite direction, not a reuse of the inbound one.
+#[tokio::test]
+async fn devices_can_send_both_ways() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let from_alice = seed(&alice, "ToBob", "hello bob", &[]).await;
+    let from_bob = seed(&bob, "ToAlice", "hello alice", &[]).await;
+
+    let alice_port = listen(alice.clone()).await;
+    let bob_port = listen(bob.clone()).await;
+
+    send_note(&alice, &from_alice, "127.0.0.1", bob_port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    send_note(&bob, &from_bob, "127.0.0.1", alice_port, CODE, "Bob").await.unwrap();
+    await_pending(&alice).await;
+    accept_pending(&alice, CODE).await.unwrap();
+
+    let on_bob: Vec<String> = opened_all(&bob).await.into_iter().map(|t| t.0).collect();
+    let on_alice: Vec<String> = opened_all(&alice).await.into_iter().map(|t| t.0).collect();
+    assert!(on_bob.contains(&"ToBob".to_string()), "bob should hold alice's note");
+    assert!(on_alice.contains(&"ToAlice".to_string()), "alice should hold bob's note");
+}
+
+// ---- Batch send: SPAKE2 offer, code confirmed, notes land directly ----
+
+#[tokio::test]
+async fn several_notes_go_in_one_offer() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let ids = vec![
+        seed(&alice, "One", "first", &[]).await,
+        seed(&alice, "Two", "second", &[]).await,
+        seed(&alice, "Three", "third", &[]).await,
+    ];
+
+    let port = listen(bob.clone()).await;
+    let responder = answer_with(bob.clone(), CODE);
+    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .expect("the batch transfer should succeed");
+    assert!(responder.await.unwrap(), "recipient never saw the offer");
+
+    let mut titles: Vec<String> = opened_all(&bob).await.into_iter().map(|t| t.0).collect();
+    titles.sort();
+    assert_eq!(titles, vec!["One", "Three", "Two"]);
+}
+
+/// SPAKE2 means a mismatched code fails key confirmation, so the notes are
+/// never transmitted at all - not decrypted-and-discarded at the far end.
+#[tokio::test]
+async fn a_mismatched_code_aborts_the_batch_before_any_note_moves() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let ids = vec![seed(&alice, "Private", "do not send", &[]).await];
+
+    let port = listen(bob.clone()).await;
+    let responder = answer_with(bob.clone(), "WRONGC");
+
+    let result = send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await;
+    responder.await.unwrap();
+
+    assert!(result.is_err(), "a mismatched pairing code must fail the transfer");
+    assert!(received(&bob).await.is_empty(), "nothing may land on a failed pairing");
+}
+
+/// Re-sending after an edit is ordinary. It must update the copy already there
+/// rather than pile up duplicates.
+#[tokio::test]
+async fn resending_the_same_note_does_not_duplicate_it() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let ids = vec![seed(&alice, "Once", "body", &[]).await];
+    let port = listen(bob.clone()).await;
+
+    for _ in 0..2 {
+        let responder = answer_with(bob.clone(), CODE);
+        send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+        responder.await.unwrap();
+    }
+
+    assert_eq!(
+        received(&bob).await.len(),
+        1,
+        "re-receiving the same origin note should update, not duplicate",
+    );
+}
+

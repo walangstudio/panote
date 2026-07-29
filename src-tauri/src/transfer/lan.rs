@@ -184,9 +184,52 @@ pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
 
 // ---- TLS TCP server ----
 
+/// What the listener needs from the UI: two notifications. Behind a trait so the
+/// transport can be driven end to end without a window - `AppHandle` is the only
+/// real implementation.
+pub trait TransferEvents: Send + Sync + 'static {
+    fn offer_received(&self, offer: &crate::state::PendingOffer);
+    fn transfer_received(&self, transfer_id: &str);
+    fn transfer_rejected(&self, reason: &str);
+    fn notes_received(&self, from_peer: &str, inserted: u32, updated: u32);
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ReceiveSummary<'a> {
+    from_peer: &'a str,
+    inserted: u32,
+    updated: u32,
+}
+
+impl<R: tauri::Runtime> TransferEvents for tauri::AppHandle<R> {
+    fn offer_received(&self, offer: &crate::state::PendingOffer) {
+        self.emit("transfer-offer", offer).ok();
+    }
+    fn transfer_received(&self, transfer_id: &str) {
+        self.emit("transfer-received", transfer_id).ok();
+    }
+    fn transfer_rejected(&self, reason: &str) {
+        self.emit("transfer-rejected", reason).ok();
+    }
+    fn notes_received(&self, from_peer: &str, inserted: u32, updated: u32) {
+        self.emit("notes-received", ReceiveSummary { from_peer, inserted, updated }).ok();
+    }
+}
+
 pub async fn start_listener(
     state: Arc<AppState>,
-    app_handle: tauri::AppHandle,
+    events: Arc<dyn TransferEvents>,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(format!("0.0.0.0:{TRANSFER_PORT}")).await?;
+    serve(listener, state, events).await
+}
+
+/// The listener loop, split from the bind so a test can hand in a socket on an
+/// ephemeral port and drive a real client against it.
+pub async fn serve(
+    listener: TcpListener,
+    state: Arc<AppState>,
+    events: Arc<dyn TransferEvents>,
 ) -> anyhow::Result<()> {
     let (cert_der, key_der) = device_identity(&state.db, &state.device_key).await?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -194,7 +237,6 @@ pub async fn start_listener(
     let server_cfg = tls::server_config(cert_der, key_der, provider)?;
     let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{TRANSFER_PORT}")).await?;
     // K10: cap concurrent inbound TLS connections so a flood can't spawn unbounded tasks.
     let inbound_limit = Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_CONNECTIONS));
 
@@ -206,7 +248,7 @@ pub async fn start_listener(
         };
         let acceptor = acceptor.clone();
         let state = state.clone();
-        let handle = app_handle.clone();
+        let handle = events.clone();
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(e) = handle_incoming(stream, peer_addr, acceptor, state, handle).await {
@@ -221,7 +263,7 @@ async fn handle_incoming(
     peer_addr: std::net::SocketAddr,
     acceptor: TlsAcceptor,
     state: Arc<AppState>,
-    app_handle: tauri::AppHandle,
+    events: Arc<dyn TransferEvents>,
 ) -> anyhow::Result<()> {
     let mut tls = acceptor.accept(stream).await?;
     let payload = read_frame(&mut tls).await?;
@@ -236,7 +278,7 @@ async fn handle_incoming(
     match msg {
         Message::TransferOffer { from_peer, offer_id, note_count, pake_msg } => {
             handle_transfer_offer(
-                &mut tls, &state, &app_handle,
+                &mut tls, &state, &events,
                 &peer_ip, from_peer, offer_id, note_count, pake_msg,
             ).await?;
         }
@@ -252,7 +294,7 @@ async fn handle_incoming(
             };
             let transfer_id = transfer.transfer_id.clone();
             state.add_pending(transfer);
-            app_handle.emit("transfer-received", &transfer_id).ok();
+            events.transfer_received(&transfer_id);
 
             let ack = serde_json::to_vec(&Message::Ack { transfer_id })?;
             write_frame(&mut tls, &ack).await?;
@@ -278,7 +320,7 @@ async fn handle_incoming(
 async fn handle_transfer_offer(
     tls: &mut tokio_rustls::server::TlsStream<TcpStream>,
     state: &Arc<AppState>,
-    app_handle: &tauri::AppHandle,
+    events: &Arc<dyn TransferEvents>,
     peer_addr: &str,
     from_peer: String,
     offer_id: String,
@@ -330,7 +372,7 @@ async fn handle_transfer_offer(
         responses.insert(offer_id.clone(), tx);
     }
 
-    app_handle.emit("transfer-offer", &offer).ok();
+    events.offer_received(&offer);
 
     // Wait up to 5 minutes for the recipient to enter the code.
     let passphrase = tokio::time::timeout(
@@ -367,12 +409,12 @@ async fn handle_transfer_offer(
                     reason: "wrong pairing code".into(),
                 })?;
                 write_frame(tls, &reject).await?;
-                app_handle.emit("transfer-rejected", "wrong pairing code").ok();
+                events.transfer_rejected("wrong pairing code");
                 anyhow::bail!("sender failed key confirmation (wrong code)");
             }
         }
         Message::Reject { reason } => {
-            app_handle.emit("transfer-rejected", &reason).ok();
+            events.transfer_rejected(&reason);
             return Err(anyhow::anyhow!("sender rejected: {reason}"));
         }
         _ => anyhow::bail!("expected key confirmation from sender"),
@@ -398,18 +440,7 @@ async fn handle_transfer_offer(
     let ack = serde_json::to_vec(&Message::Ack { transfer_id: offer_id })?;
     write_frame(tls, &ack).await?;
 
-    #[derive(serde::Serialize, Clone)]
-    struct ReceiveSummary<'a> {
-        from_peer: &'a str,
-        inserted: u32,
-        updated: u32,
-    }
-    app_handle
-        .emit(
-            "notes-received",
-            ReceiveSummary { from_peer: &from_peer, inserted, updated },
-        )
-        .ok();
+    events.notes_received(&from_peer, inserted, updated);
     Ok(())
 }
 

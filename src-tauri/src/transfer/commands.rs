@@ -58,9 +58,10 @@ pub async fn start_receiving(
     state.receiving.store(true, Ordering::Relaxed);
 
     let s = std::sync::Arc::new(state.inner().clone());
-    let handle = app_handle.clone();
+    let events: std::sync::Arc<dyn super::lan::TransferEvents> =
+        std::sync::Arc::new(app_handle.clone());
     let task = tokio::spawn(async move {
-        if let Err(e) = super::lan::start_listener(s, handle).await {
+        if let Err(e) = super::lan::start_listener(s, events).await {
             eprintln!("[lan] listener error: {e}");
         }
     });
