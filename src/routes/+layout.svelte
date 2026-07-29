@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import {
     pendingOffersList, type PendingOffer,
+    pendingTransfersList, type PendingTransfer,
     isReceiving as checkReceiving, startReceiving, stopReceiving,
   } from "$lib/tauri";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -17,9 +18,11 @@
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   let offers = $state<PendingOffer[]>([]);
+  let transfers = $state<PendingTransfer[]>([]);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let unlistenOffer: UnlistenFn | null = null;
   let unlistenReceived: UnlistenFn | null = null;
+  let unlistenTransfer: UnlistenFn | null = null;
   let unsubTheme: (() => void) | null = null;
   let receiving = $state(false);
   let showNewNote = $state(false);
@@ -32,6 +35,7 @@
   function stopPoll() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     offers = [];
+    transfers = [];
   }
 
   async function toggleReceive() {
@@ -48,14 +52,34 @@
     } catch {}
   }
 
+  /// Accepting a delivered note imports it right there, with no event to say
+  /// so — the batch path gets `notes-received`, this one does not. Without the
+  /// refresh the note is in the database but absent from the list until the
+  /// next restart.
+  async function incomingChanged() {
+    await pollOffers();
+    await refreshNotes({ withBackgrounds: true });
+  }
+
+  /// Both queues, together — an arrival the user has to act on is an arrival
+  /// whichever protocol carried it.
   async function pollOffers() {
-    offers = await pendingOffersList().catch(() => []);
+    const [o, t] = await Promise.all([
+      pendingOffersList().catch(() => []),
+      pendingTransfersList().catch(() => []),
+    ]);
+    offers = o;
+    transfers = t;
   }
 
   onMount(async () => {
     unsubTheme = initTheme();
     if (!isTauri) return;
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
+    // Nothing listened for this, so a note delivered by the single-note
+    // protocol — what older senders still use — sat unreachable in memory and
+    // was lost when the app closed.
+    unlistenTransfer = await listen("transfer-received", () => pollOffers());
     unlistenReceived = await listen("notes-received", () => {
       pollOffers();
       refreshNotes({ withBackgrounds: true });
@@ -70,6 +94,7 @@
     if (unsubTheme) unsubTheme();
     if (pollTimer) clearInterval(pollTimer);
     if (unlistenOffer) unlistenOffer();
+    if (unlistenTransfer) unlistenTransfer();
     if (unlistenReceived) unlistenReceived();
   });
 </script>
@@ -86,7 +111,7 @@
       {@render children()}
     </div>
   {/if}
-  <IncomingTransferToast {offers} onupdate={pollOffers} />
+  <IncomingTransferToast {offers} {transfers} onupdate={incomingChanged} />
   {#if showNewNote}
     <NewNoteModal onclose={() => showNewNote = false} />
   {/if}

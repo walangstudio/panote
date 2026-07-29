@@ -1,63 +1,98 @@
 <script lang="ts">
-  import { transferOfferRespond, type PendingOffer } from "$lib/tauri";
+  import {
+    transferOfferRespond, noteReceiveAccept, noteReceiveReject,
+    type PendingOffer, type PendingTransfer,
+  } from "$lib/tauri";
 
   interface Props {
     offers: PendingOffer[];
+    /// Single notes already delivered and held encrypted until the recipient
+    /// enters the code. A different protocol from an offer, same thing to ask.
+    transfers?: PendingTransfer[];
     onupdate: () => void;
   }
-  let { offers, onupdate }: Props = $props();
+  let { offers, transfers = [], onupdate }: Props = $props();
 
   let codes = $state<Record<string, string>>({});
   let busy = $state<Record<string, boolean>>({});
   let errors = $state<Record<string, string>>({});
   let dismissed = $state<Set<string>>(new Set());
 
-  let visibleOffers = $derived(offers.filter((o) => !dismissed.has(o.offer_id)));
-
-  async function accept(o: PendingOffer) {
-    const code = (codes[o.offer_id] ?? "").replace(/-/g, "").toUpperCase();
-    if (!code) { errors = { ...errors, [o.offer_id]: "Enter the code from the sender." }; return; }
-    busy = { ...busy, [o.offer_id]: true };
-    errors = { ...errors, [o.offer_id]: "" };
-    try {
-      await transferOfferRespond(o.offer_id, code);
-      onupdate();
-    } catch (e) {
-      errors = { ...errors, [o.offer_id]: String(e) };
-    }
-    busy = { ...busy, [o.offer_id]: false };
+  /// The two arrivals differ only in how they are unlocked, so they are
+  /// normalised to one list and rendered by the same toast.
+  interface Incoming {
+    id: string;
+    from: string;
+    what: string;
+    unlock: (code: string) => Promise<unknown>;
+    drop: () => void;
   }
 
-  function dismiss(o: PendingOffer) {
-    // Hide for this session — the sender will time out
-    dismissed = new Set(dismissed).add(o.offer_id);
+  let items = $derived<Incoming[]>([
+    ...offers.map((o) => ({
+      id: o.offer_id,
+      from: o.from_peer,
+      what: `${o.note_count} ${o.note_count === 1 ? "note" : "notes"}`,
+      unlock: (code: string) => transferOfferRespond(o.offer_id, code),
+      // An offer is a live connection waiting on us; letting it time out is the
+      // only way to decline.
+      drop: () => {},
+    })),
+    ...transfers.map((t) => ({
+      id: t.transfer_id,
+      from: t.from_peer,
+      what: "1 note",
+      unlock: (code: string) => noteReceiveAccept(t.transfer_id, code),
+      // Already delivered and sitting in memory, so declining must discard it.
+      drop: () => { void noteReceiveReject(t.transfer_id).catch(() => {}); },
+    })),
+  ].filter((i) => !dismissed.has(i.id)));
+
+  async function accept(o: Incoming) {
+    const code = (codes[o.id] ?? "").replace(/-/g, "").toUpperCase();
+    if (!code) { errors = { ...errors, [o.id]: "Enter the code from the sender." }; return; }
+    busy = { ...busy, [o.id]: true };
+    errors = { ...errors, [o.id]: "" };
+    try {
+      await o.unlock(code);
+      onupdate();
+    } catch (e) {
+      errors = { ...errors, [o.id]: String(e) };
+    }
+    busy = { ...busy, [o.id]: false };
+  }
+
+  function dismiss(o: Incoming) {
+    o.drop();
+    dismissed = new Set(dismissed).add(o.id);
+    onupdate();
   }
 </script>
 
-{#if visibleOffers.length > 0}
+{#if items.length > 0}
   <div class="toast-stack">
-    {#each visibleOffers as o (o.offer_id)}
+    {#each items as o (o.id)}
       <div class="toast">
         <span class="badge">
           <span class="material-symbols-outlined">download</span>
         </span>
         <div class="text-block">
-          <div class="line1">{o.from_peer} wants to send</div>
-          <div class="line2">{o.note_count} {o.note_count === 1 ? "note" : "notes"}</div>
+          <div class="line1">{o.from} wants to send</div>
+          <div class="line2">{o.what}</div>
           <input
             class="code-input"
             placeholder="Enter code (e.g. K4X-7P2)"
-            bind:value={codes[o.offer_id]}
+            bind:value={codes[o.id]}
             onkeydown={(e) => { if (e.key === "Enter") accept(o); }}
           />
-          {#if errors[o.offer_id]}
-            <span class="err">{errors[o.offer_id]}</span>
+          {#if errors[o.id]}
+            <span class="err">{errors[o.id]}</span>
           {/if}
         </div>
         <div class="actions">
-          <button class="btn-decline" onclick={() => dismiss(o)} disabled={busy[o.offer_id]}>Dismiss</button>
-          <button class="btn-accept" onclick={() => accept(o)} disabled={busy[o.offer_id]}>
-            {busy[o.offer_id] ? "Accepting…" : "Accept"}
+          <button class="btn-decline" onclick={() => dismiss(o)} disabled={busy[o.id]}>Dismiss</button>
+          <button class="btn-accept" onclick={() => accept(o)} disabled={busy[o.id]}>
+            {busy[o.id] ? "Accepting…" : "Accept"}
           </button>
         </div>
       </div>

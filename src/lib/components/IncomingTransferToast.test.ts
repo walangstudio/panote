@@ -6,11 +6,15 @@
 // bleeding into another's.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mount, unmount } from "svelte";
-import type { PendingOffer } from "$lib/tauri";
+import type { PendingOffer, PendingTransfer } from "$lib/tauri";
 
-vi.mock("$lib/tauri", () => ({ transferOfferRespond: vi.fn(async () => {}) }));
+vi.mock("$lib/tauri", () => ({
+  transferOfferRespond: vi.fn(async () => {}),
+  noteReceiveAccept: vi.fn(async () => "new-note-id"),
+  noteReceiveReject: vi.fn(async () => {}),
+}));
 
-import { transferOfferRespond } from "$lib/tauri";
+import { transferOfferRespond, noteReceiveAccept, noteReceiveReject } from "$lib/tauri";
 import IncomingTransferToast from "./IncomingTransferToast.svelte";
 
 const offer = (id: string, over: Partial<PendingOffer> = {}): PendingOffer => ({
@@ -23,14 +27,17 @@ const offer = (id: string, over: Partial<PendingOffer> = {}): PendingOffer => ({
 let cleanup: (() => void) | null = null;
 const flush = async () => { await Promise.resolve(); await new Promise(r => setTimeout(r, 0)); };
 
-function setup(offers: PendingOffer[]) {
+function setup(offers: PendingOffer[], transfers: PendingTransfer[] = []) {
   const onupdate = vi.fn();
   const target = document.createElement("div");
   document.body.appendChild(target);
-  const app = mount(IncomingTransferToast, { target, props: { offers, onupdate } });
+  const app = mount(IncomingTransferToast, { target, props: { offers, transfers, onupdate } });
   cleanup = () => { try { unmount(app); } catch { /* teardown races are noise */ } };
   return { target, onupdate };
 }
+
+const transfer = (id: string, from = "Laptop"): PendingTransfer =>
+  ({ transfer_id: id, from_peer: from, received_at: 1_700_000_000 }) as PendingTransfer;
 
 const toasts = (t: HTMLElement) => [...t.querySelectorAll(".toast")];
 const codeInput = (t: HTMLElement, i = 0) =>
@@ -50,6 +57,8 @@ async function typeCode(t: HTMLElement, code: string, i = 0) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(transferOfferRespond).mockResolvedValue(undefined as never);
+  vi.mocked(noteReceiveAccept).mockResolvedValue("new-note-id" as never);
+  vi.mocked(noteReceiveReject).mockResolvedValue(undefined as never);
 });
 afterEach(() => {
   cleanup?.();
@@ -199,6 +208,86 @@ describe("keeping offers apart", () => {
 
     expect(acceptBtn(target, 0).disabled).toBe(true);
     expect(acceptBtn(target, 1).disabled).toBe(false);
+  });
+});
+
+// A note sent by the single-note protocol - what older senders still use -
+// arrives encrypted and waits for the code. Nothing in the UI surfaced it, so
+// it sat unreachable in memory and was lost when the app closed.
+describe("a delivered note waiting to be opened", () => {
+  it("is shown just like an offer", () => {
+    const { target } = setup([], [transfer("t1", "Desktop")]);
+    expect(toasts(target)).toHaveLength(1);
+    expect(target.textContent).toContain("Desktop wants to send");
+    expect(target.textContent).toContain("1 note");
+  });
+
+  it("opens with the code and tells the app to refresh", async () => {
+    const { target, onupdate } = setup([], [transfer("t1")]);
+    await typeCode(target, "K4X7P2");
+    acceptBtn(target).click();
+    await flush();
+
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
+    expect(transferOfferRespond).not.toHaveBeenCalled();
+    expect(onupdate).toHaveBeenCalled();
+  });
+
+  it("strips dashes here too", async () => {
+    const { target } = setup([], [transfer("t1")]);
+    await typeCode(target, "k4x-7p2");
+    acceptBtn(target).click();
+    await flush();
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
+  });
+
+  it("keeps the toast up on a wrong code so it can be retried", async () => {
+    vi.mocked(noteReceiveAccept).mockRejectedValue("wrong passphrase");
+    const { target } = setup([], [transfer("t1")]);
+    await typeCode(target, "BADBAD");
+    acceptBtn(target).click();
+    await flush();
+
+    expect(target.textContent).toContain("wrong passphrase");
+    expect(toasts(target)).toHaveLength(1);
+    expect(acceptBtn(target).disabled).toBe(false);
+  });
+
+  it("refuses an empty code without calling the backend", async () => {
+    const { target } = setup([], [transfer("t1")]);
+    acceptBtn(target).click();
+    await flush();
+    expect(noteReceiveAccept).not.toHaveBeenCalled();
+    expect(target.textContent).toContain("Enter the code from the sender.");
+  });
+
+  // Unlike an offer, this one is already on the device, so dismissing has to
+  // discard it rather than just hide the toast.
+  it("discards it on the backend when dismissed", async () => {
+    const { target, onupdate } = setup([], [transfer("t1")]);
+    dismissBtn(target).click();
+    await flush();
+
+    expect(noteReceiveReject).toHaveBeenCalledWith("t1");
+    expect(target.querySelector(".toast-stack")).toBeNull();
+    expect(onupdate).toHaveBeenCalled();
+  });
+
+  it("stacks alongside offers without confusing the two", async () => {
+    const { target } = setup([offer("o1", { from_peer: "Phone" })], [transfer("t1", "Desktop")]);
+    expect(toasts(target)).toHaveLength(2);
+
+    await typeCode(target, "AAA111", 1);
+    acceptBtn(target, 1).click();
+    await flush();
+
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "AAA111");
+    expect(transferOfferRespond).not.toHaveBeenCalled();
+  });
+
+  it("shows nothing when both queues are empty", () => {
+    const { target } = setup([], []);
+    expect(target.querySelector(".toast-stack")).toBeNull();
   });
 });
 
