@@ -675,7 +675,7 @@ async fn persist_protection(
         .map_err(|e| e.to_string())
 }
 
-async fn protect_impl(state: &AppState, id: &str, password: &str) -> Result<(), String> {
+pub(crate) async fn protect_impl(state: &AppState, id: &str, password: &str) -> Result<(), String> {
     if password.is_empty() {
         return Err(EMPTY_PASSWORD.into());
     }

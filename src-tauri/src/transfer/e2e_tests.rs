@@ -326,6 +326,205 @@ async fn devices_can_send_both_ways() {
     assert!(on_alice.contains(&"ToAlice".to_string()), "alice should hold bob's note");
 }
 
+// ---- Password-protected notes ----
+//
+// The password layer is peeled off before the blob is built, so protection does
+// NOT travel: the note arrives as an ordinary note and the recipient decides
+// whether to protect it again. Deliberate ("Model B"), and worth pinning,
+// because the alternative reading - that a protected note stays protected on the
+// far side - is what a user would assume.
+
+async fn protect(state: &AppState, id: &str, password: &str) {
+    crate::notes::commands::protect_impl(state, id, password)
+        .await
+        .expect("protecting should succeed");
+}
+
+#[tokio::test]
+async fn a_locked_note_refuses_to_send() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Bank", "account 12345", &[]).await;
+    protect(&alice, &note_id, "s3cret").await;
+    // Setting a password leaves the note open for the session, so lock it -
+    // this is the state after a restart, or after the inactivity timeout.
+    alice.lock_note(&note_id);
+
+    let port = listen(bob.clone()).await;
+    let result = send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await;
+
+    assert!(result.is_err(), "a locked note must not be sent");
+    assert!(
+        result.unwrap_err().to_lowercase().contains("unlock"),
+        "the error should say the note needs unlocking",
+    );
+    assert!(bob.list_pending().is_empty(), "nothing may reach the peer");
+}
+
+#[tokio::test]
+async fn an_unlocked_protected_note_sends_its_real_content() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Bank", "account 12345", &["finance"]).await;
+    protect(&alice, &note_id, "s3cret").await;
+    alice.unlock_note(&note_id, "s3cret");
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .expect("an unlocked note should send");
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    let rows = received(&bob).await;
+    let (title, body, tags) = open(&bob, &rows[0].id).await;
+    assert_eq!(title, "Bank");
+    assert_eq!(body, "account 12345", "the password layer must be peeled, not shipped");
+    assert_eq!(tags, vec!["finance"]);
+}
+
+#[tokio::test]
+async fn a_protected_note_arrives_unprotected() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Bank", "account 12345", &[]).await;
+    protect(&alice, &note_id, "s3cret").await;
+    alice.unlock_note(&note_id, "s3cret");
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
+    assert!(row.note_salt.is_none(), "protection does not travel with the note");
+    // And the sender's copy keeps its protection.
+    let src = queries::note_get(&alice.db, &note_id).await.unwrap().unwrap();
+    assert!(src.note_salt.is_some(), "the sender's copy must stay protected");
+}
+
+/// The receiving device can protect what arrived, with its own password - the
+/// sender's password is neither needed nor transmitted.
+#[tokio::test]
+async fn the_receiver_can_protect_what_arrived_with_a_different_password() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Bank", "account 12345", &[]).await;
+    protect(&alice, &note_id, "alice-password").await;
+    alice.unlock_note(&note_id, "alice-password");
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    protect(&bob, &new_id, "bob-password").await;
+    let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
+    assert!(row.note_salt.is_some(), "the receiver's own protection should apply");
+}
+
+// ---- Credential tables ----
+//
+// A masked column is `type: "masked"` inside the table content JSON, and content
+// crosses the wire verbatim. If that were dropped, an imported password column
+// would render in the clear on the far device.
+
+#[tokio::test]
+async fn a_credential_table_keeps_its_masked_columns() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+
+    let table = json!({
+        "columns": [
+            { "id": "c-site", "name": "Site" },
+            { "id": "c-user", "name": "Username" },
+            { "id": "c-pw", "name": "Password", "type": "masked" }
+        ],
+        "rows": [
+            { "id": "r1", "cells": { "c-site": "github.com", "c-user": "me", "c-pw": "hunter2" } }
+        ]
+    });
+
+    let blob = TransferBlob {
+        id: "src-creds".into(),
+        kind: "table".into(),
+        title: "Credentials".into(),
+        content: table.clone(),
+        tags: vec!["secrets".into()],
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_001,
+        origin_device_id: String::new(),
+        origin_note_id: String::new(),
+    };
+    let note_id = crate::transfer::commands::import_blob(&alice, &alice.device_key, blob)
+        .await
+        .unwrap();
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
+    let bytes =
+        decrypt_with_vault(&bob.device_key, &row.nonce, &row.content_ct, row.id.as_bytes()).unwrap();
+    let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(row.kind, "table", "it must still be a table");
+    assert_eq!(got, table, "the whole table, masking included, must round-trip");
+    assert_eq!(
+        got["columns"][2]["type"], "masked",
+        "the password column must arrive still masked, not in the clear",
+    );
+    assert_eq!(got["rows"][0]["cells"]["c-pw"], "hunter2", "and its value must survive");
+}
+
+#[tokio::test]
+async fn a_protected_credential_table_survives_the_whole_round_trip() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+
+    let table = json!({
+        "columns": [
+            { "id": "c-k", "name": "Key" },
+            { "id": "c-v", "name": "Secret", "type": "masked" }
+        ],
+        "rows": [
+            { "id": "r1", "cells": { "c-k": "API_TOKEN", "c-v": "sk-live-abc123" } },
+            { "id": "r2", "cells": { "c-k": "DB_PASSWORD", "c-v": "p@ssw0rd" } }
+        ]
+    });
+
+    let blob = TransferBlob {
+        id: "src-env".into(),
+        kind: "table".into(),
+        title: "Production env".into(),
+        content: table.clone(),
+        tags: vec![],
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_001,
+        origin_device_id: String::new(),
+        origin_note_id: String::new(),
+    };
+    let note_id = crate::transfer::commands::import_blob(&alice, &alice.device_key, blob)
+        .await
+        .unwrap();
+    protect(&alice, &note_id, "vault-password").await;
+    alice.unlock_note(&note_id, "vault-password");
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
+    let bytes =
+        decrypt_with_vault(&bob.device_key, &row.nonce, &row.content_ct, row.id.as_bytes()).unwrap();
+    let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(got, table, "both secret rows must arrive intact");
+    assert!(row.note_salt.is_none(), "and, as ever, unprotected on arrival");
+}
+
 // ---- Batch send: SPAKE2 offer, code confirmed, notes land directly ----
 
 #[tokio::test]
