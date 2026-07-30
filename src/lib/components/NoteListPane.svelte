@@ -887,7 +887,13 @@
   /* A folder reads as a card like any other row, but with its own badge tint so
      it is obvious at a glance that opening it goes somewhere. */
   .folder-card .folder-badge { background: var(--secondary-surface); color: var(--secondary); }
-  .folder-card .trailing { align-self: center; color: var(--muted); }
+  /* A note stacks its date above its menu, so `.trailing` is a column. A folder
+     has a menu and a chevron, which belong side by side — stacked, they made the
+     folder card taller than every note card and broke the uniform height. */
+  .folder-card .trailing {
+    flex-direction: row; align-items: center; align-self: center;
+    justify-content: flex-end; color: var(--muted); gap: 0;
+  }
 
   /* Level bar: create here, or go up a level. */
   .level-bar { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; padding: 0 0.15rem; }
