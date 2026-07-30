@@ -92,6 +92,14 @@
         background: var(--bg-gradient), var(--bg);
         color: var(--text);
       }
+      /* Android's WebView reports safe-area insets as 0 even under Android 15's
+         edge-to-edge default, so the inset above collapses and the status bar's
+         clock and battery sit on top of the app's own chrome. `max` keeps the
+         real inset where one is reported (iOS notches) and falls back to a floor
+         where it is not. Touch only: a desktop window has no status bar to clear. */
+      @media (hover: none) {
+        body { padding-top: max(env(safe-area-inset-top, 0px), 28px); }
+      }
       button { font-family: inherit; }
       a { color: var(--accent); }
       .material-symbols-outlined {

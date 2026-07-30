@@ -11,7 +11,10 @@
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { listFilter, listSelecting, listSelected, listFolder } from "$lib/stores/listState";
-  import { folders } from "$lib/stores/folders";
+  import { folders, refreshFolders } from "$lib/stores/folders";
+  import { folderCreate, folderMove, folderRename, folderDelete, noteSetFolder } from "$lib/tauri";
+  import FolderPickerModal from "$lib/components/FolderPickerModal.svelte";
+  import FolderNameModal from "$lib/components/FolderNameModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
@@ -35,6 +38,62 @@
   let menuNoteId = $state<string | null>(null);
   let fabOpen = $state(false);
   let showNewNote = $state(false);
+
+  // ---- Folder create / move ----
+  //
+  // The backend is what actually protects the tree: folder_move refuses a cycle
+  // or a move past the depth cap. These surface its refusal rather than
+  // duplicating the rule, so the two can never disagree.
+  let nameModal = $state<{ mode: "create" | "rename"; id?: string; initial: string } | null>(null);
+  let nameError = $state("");
+  /// What is being moved: a note, or a folder (whose own subtree is off-limits).
+  let moveTarget = $state<{ kind: "note" | "folder"; id: string; from: string | null } | null>(null);
+  let moveError = $state("");
+  let folderMenuId = $state<string | null>(null);
+
+  async function submitName(name: string) {
+    if (!nameModal) return;
+    nameError = "";
+    try {
+      if (nameModal.mode === "create") await folderCreate(name, $listFolder);
+      else await folderRename(nameModal.id!, name);
+      await refreshFolders();
+      nameModal = null;
+    } catch (e) {
+      nameError = folderMessage(e);
+    }
+  }
+
+  async function submitMove(dest: string | null) {
+    if (!moveTarget) return;
+    moveError = "";
+    try {
+      if (moveTarget.kind === "note") await noteSetFolder(moveTarget.id, dest);
+      else await folderMove(moveTarget.id, dest);
+      await Promise.all([refreshFolders(), refreshNotes()]);
+      moveTarget = null;
+    } catch (e) {
+      moveError = folderMessage(e);
+    }
+  }
+
+  /// Turn the backend's codes into something a person can act on.
+  function folderMessage(e: unknown): string {
+    const raw = String(e);
+    if (raw.includes("FOLDER_CYCLE")) return "A folder can't be moved inside itself.";
+    if (raw.includes("FOLDER_TOO_DEEP")) return "That would nest folders too deeply.";
+    if (raw.includes("FOLDER_NAME_EMPTY")) return "Give the folder a name.";
+    return raw;
+  }
+
+  async function removeFolder(id: string, name: string) {
+    folderMenuId = null;
+    try {
+      await folderDelete(id);
+      await Promise.all([refreshFolders(), refreshNotes()]);
+      if ($listFolder === id) listFolder.set(null);
+    } catch (e) { moveError = folderMessage(e); }
+  }
 
   const activeId = $derived(page.params.id ?? "");
 
@@ -467,6 +526,10 @@
                 <span class="material-symbols-outlined" style="font-size: 18px;">visibility</span>
                 View
               </button>
+              <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; moveError = ""; moveTarget = { kind: "note", id: note.id, from: note.folder_id ?? null }; }}>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">swap_horiz</span>
+                Move to
+              </button>
               <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; goto(`/note/${note.id}?mode=edit`); }}>
                 <span class="material-symbols-outlined" style="font-size: 18px;">edit</span>
                 Edit
@@ -516,6 +579,19 @@
     </nav>
   {/if}
 
+  <div class="level-bar">
+    <button class="new-folder-btn" onclick={() => { nameError = ""; nameModal = { mode: "create", initial: "" }; }}>
+      <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">create_new_folder</span>
+      New folder
+    </button>
+    {#if $listFolder}
+      <button class="up-btn" onclick={() => listFolder.set(trail().length > 1 ? trail()[trail().length - 2].id : null)}>
+        <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">arrow_upward</span>
+        Up
+      </button>
+    {/if}
+  </div>
+
   <ul class="note-list">
     <!-- Folders first, as rows you open — the list is a level, not a filter. -->
     {#if !query}
@@ -540,9 +616,37 @@
               <div class="tags"></div>
             </div>
             <div class="trailing">
-              <span class="material-symbols-outlined" style="font-size: 20px;">chevron_right</span>
+              <button
+                class="card-menu"
+                aria-label={`Actions for ${f.name}`}
+                onclick={(e) => { e.stopPropagation(); folderMenuId = folderMenuId === f.id ? null : f.id; }}
+              >
+                <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+              </button>
+              <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">chevron_right</span>
             </div>
           </div>
+          {#if folderMenuId === f.id}
+            <div class="card-menu-backdrop" role="presentation" onclick={(e) => { e.stopPropagation(); folderMenuId = null; }}></div>
+            <div class="card-popover">
+              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; }}>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">create_new_folder</span>
+                New folder inside
+              </button>
+              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; }}>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">edit</span>
+                Rename
+              </button>
+              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; }}>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">swap_horiz</span>
+                Move to
+              </button>
+              <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); removeFolder(f.id, f.name); }}>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">delete</span>
+                Delete
+              </button>
+            </div>
+          {/if}
         </li>
       {/each}
     {/if}
@@ -630,6 +734,37 @@
 
 {#if showNewNote}
   <NewNoteModal onclose={() => showNewNote = false} />
+{/if}
+
+{#if nameModal}
+  <FolderNameModal
+    title={nameModal.mode === "create" ? "New folder" : "Rename folder"}
+    confirmLabel={nameModal.mode === "create" ? "Create" : "Rename"}
+    initial={nameModal.initial}
+    error={nameError}
+    onsubmit={submitName}
+    onclose={() => { nameModal = null; nameError = ""; }}
+  />
+{/if}
+
+{#if moveTarget}
+  <FolderPickerModal
+    title={moveTarget.kind === "note" ? "Move note to" : "Move folder to"}
+    current={moveTarget.from}
+    excludeSubtreeOf={moveTarget.kind === "folder" ? moveTarget.id : null}
+    onpick={submitMove}
+    onclose={() => { moveTarget = null; moveError = ""; }}
+  />
+{/if}
+
+{#if moveError}
+  <div class="folder-error" role="alert">
+    <span class="material-symbols-outlined" style="font-size: 16px;" aria-hidden="true">warning</span>
+    <span>{moveError}</span>
+    <button onclick={() => moveError = ""} aria-label="Dismiss">
+      <span class="material-symbols-outlined" style="font-size: 16px;" aria-hidden="true">close</span>
+    </button>
+  </div>
 {/if}
 
 {#if pwModal}
@@ -753,6 +888,39 @@
      it is obvious at a glance that opening it goes somewhere. */
   .folder-card .folder-badge { background: var(--secondary-surface); color: var(--secondary); }
   .folder-card .trailing { align-self: center; color: var(--muted); }
+
+  /* Level bar: create here, or go up a level. */
+  .level-bar { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; padding: 0 0.15rem; }
+  .new-folder-btn, .up-btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.45rem 0.8rem; min-height: 40px;
+    border: 1px dashed var(--border); background: none; cursor: pointer;
+    border-radius: var(--radius-full); color: var(--text-secondary);
+    font-size: 0.82rem; font-weight: 600;
+  }
+  .new-folder-btn:hover, .up-btn:hover {
+    border-color: var(--accent); color: var(--accent); background: var(--accent-muted);
+  }
+
+  /* Surfaced backend refusals — a cycle, or too deep. */
+  .folder-error {
+    position: fixed; z-index: 302;
+    left: 50%; transform: translateX(-50%);
+    bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    display: flex; align-items: center; gap: 0.5rem;
+    max-width: min(420px, calc(100vw - 2rem));
+    padding: 0.6rem 0.5rem 0.6rem 0.85rem;
+    border-radius: var(--radius-full);
+    background: var(--surface); border: 1px solid var(--error);
+    color: var(--text); font-size: 0.85rem;
+    box-shadow: 0 8px 24px var(--shadow-color-hover);
+  }
+  .folder-error button {
+    border: none; background: none; cursor: pointer; color: var(--muted);
+    display: flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: var(--radius-full);
+  }
+  .folder-error button:hover { color: var(--text); background: var(--hover); }
 
   .note-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   li { display: flex; align-items: center; min-width: 0; position: relative; }
