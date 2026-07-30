@@ -25,7 +25,8 @@ import { page } from "$app/state";
 
 import { noteList, notesUnprotect } from "$lib/tauri";
 import { notes, bgImages } from "$lib/stores/notes";
-import { resetListState } from "$lib/stores/listState";
+import { resetListState, listFolder } from "$lib/stores/listState";
+import { folders } from "$lib/stores/folders";
 import NoteListPane from "./NoteListPane.svelte";
 
 const DAY = 86_400_000;
@@ -205,6 +206,131 @@ describe("uniform card shape", () => {
   it("never renders more than three tags", async () => {
     const t = await setup([note({ id: "a", tags: ["a", "b", "c", "d", "e"] })]);
     expect(t.querySelectorAll(".tag")).toHaveLength(3);
+  });
+});
+
+// Explorer semantics: the list is a level, not a filter. You see the folders and
+// notes directly inside where you are, and you go one level at a time.
+//
+// Before this, selecting a folder filtered notes but never showed subfolders, so
+// a folder whose notes were one level down looked empty while its badge said 1 -
+// and the list disagreed with folder_send, which sends the whole subtree.
+describe("browsing folders like a file manager", () => {
+  const folderRows = (t: HTMLElement) =>
+    [...t.querySelectorAll(".folder-card .note-info strong")].map(e => e.textContent);
+  const noteRows = (t: HTMLElement) =>
+    [...t.querySelectorAll(".note-card:not(.folder-card) .note-info strong")].map(e => e.textContent);
+  /// What a screen reader would announce: the icon span is aria-hidden, so its
+  /// ligature text must not count.
+  const crumbs = (t: HTMLElement) =>
+    [...t.querySelectorAll(".crumb")].map(e =>
+      [...e.childNodes]
+        .filter(n => !(n instanceof HTMLElement && n.getAttribute("aria-hidden") === "true"))
+        .map(n => n.textContent ?? "")
+        .join("")
+        .trim(),
+    );
+
+  const tree = [
+    { id: "work", parent_id: null, name: "Work", note_count: 0 },
+    { id: "clients", parent_id: "work", name: "Clients", note_count: 1 },
+    { id: "personal", parent_id: null, name: "Personal", note_count: 0 },
+  ];
+  const library = [
+    note({ id: "loose", title: "Unfiled" }),
+    note({ id: "inwork", title: "Direct in Work", folder_id: "work" }),
+    note({ id: "deep", title: "Deep in Clients", folder_id: "clients" }),
+  ];
+
+  beforeEach(() => { folders.set(tree); });
+  afterEach(() => { folders.set([]); });
+
+  it("shows top-level folders and unfiled notes at the root", async () => {
+    const t = await setup(library);
+    expect(folderRows(t)).toEqual(["Personal", "Work"]);
+    expect(noteRows(t)).toEqual(["Unfiled"]);
+  });
+
+  it("does not show a foldered note at the root", async () => {
+    const t = await setup(library);
+    expect(noteRows(t)).not.toContain("Direct in Work");
+    expect(noteRows(t)).not.toContain("Deep in Clients");
+  });
+
+  it("opens a folder to its subfolders and its own notes", async () => {
+    const t = await setup(library);
+    [...t.querySelectorAll<HTMLElement>(".folder-card")]
+      .find(c => c.textContent!.includes("Work"))!.click();
+    await flush();
+
+    expect(folderRows(t)).toEqual(["Clients"]);
+    expect(noteRows(t)).toEqual(["Direct in Work"]);
+    // one level at a time: the nested note is not pulled up
+    expect(noteRows(t)).not.toContain("Deep in Clients");
+  });
+
+  it("counts what opening the folder will actually show", async () => {
+    const t = await setup(library);
+    const work = [...t.querySelectorAll<HTMLElement>(".folder-card")]
+      .find(c => c.textContent!.includes("Work"))!;
+    // Work holds one subfolder and one note.
+    expect(work.querySelector(".preview-text")!.textContent).toContain("2 items");
+  });
+
+  it("shows a breadcrumb only once you are inside something", async () => {
+    const t = await setup(library);
+    expect(crumbs(t)).toEqual([]);
+
+    listFolder.set("clients");
+    await flush();
+    expect(crumbs(t)).toEqual(["Home", "Work", "Clients"]);
+  });
+
+  it("goes back up through the breadcrumb", async () => {
+    const t = await setup(library);
+    listFolder.set("clients");
+    await flush();
+
+    [...t.querySelectorAll<HTMLButtonElement>(".crumb")]
+      .find(c => c.textContent!.trim() === "Work")!.click();
+    await flush();
+    expect(folderRows(t)).toEqual(["Clients"]);
+
+    t.querySelector<HTMLButtonElement>(".crumb")!.click();
+    await flush();
+    expect(folderRows(t)).toEqual(["Personal", "Work"]);
+  });
+
+  it("says the folder is empty, not that the library is", async () => {
+    const t = await setup(library);
+    listFolder.set("personal");
+    await flush();
+    expect(t.querySelector(".empty")!.textContent).toContain("This folder is empty");
+    expect(t.textContent).not.toContain("No notes yet");
+  });
+
+  // Explorer searches into subfolders; stopping at the current level would hide
+  // the very thing being looked for.
+  it("searches into subfolders", async () => {
+    const t = await setup(library);
+    listFolder.set("work");
+    await flush();
+    await type(t, "deep");
+    expect(noteRows(t)).toEqual(["Deep in Clients"]);
+  });
+
+  it("does not let a search reach outside the folder you are in", async () => {
+    const t = await setup(library);
+    listFolder.set("work");
+    await flush();
+    await type(t, "unfiled");
+    expect(noteRows(t)).toEqual([]);
+  });
+
+  it("hides folder rows while searching, since results span levels", async () => {
+    const t = await setup(library);
+    await type(t, "unfiled");
+    expect(folderRows(t)).toEqual([]);
   });
 });
 

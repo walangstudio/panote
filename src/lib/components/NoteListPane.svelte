@@ -11,6 +11,7 @@
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { listFilter, listSelecting, listSelected, listFolder } from "$lib/stores/listState";
+  import { folders } from "$lib/stores/folders";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
@@ -107,12 +108,59 @@
     n.title.toLowerCase().includes(query) ||
     n.tags.some(t => t.toLowerCase().includes(query)) ||
     (n.preview_text?.toLowerCase().includes(query) ?? false);
-  // A folder narrows the list; a search then applies within it. Search does not
-  // escape the folder you are looking at — a result you cannot see in context is
-  // more confusing than a short list.
-  const inFolder = $derived(
-    $listFolder === null ? sorted : sorted.filter(n => n.folder_id === $listFolder),
+  // Explorer semantics: you see what is *directly* inside where you are — the
+  // subfolders and the notes — and you go one level at a time. The root is the
+  // top-level folders plus everything not filed anywhere.
+  const childFolders = $derived(
+    $folders
+      .filter(f => (f.parent_id ?? null) === $listFolder)
+      .sort((a, b) => a.name.localeCompare(b.name)),
   );
+  /// Direct children only, so the list matches the folder row you clicked.
+  const directNotes = $derived(sorted.filter(n => (n.folder_id ?? null) === $listFolder));
+
+  /// Every folder id at or below `id`, for the search-spans-subfolders case.
+  function subtreeIds(id: string | null): Set<string> {
+    const out = new Set<string>();
+    const walk = (parent: string | null, depth: number) => {
+      if (depth > 20) return;
+      for (const f of $folders) {
+        if ((f.parent_id ?? null) === parent) { out.add(f.id); walk(f.id, depth + 1); }
+      }
+    };
+    if (id !== null) out.add(id);
+    walk(id, 0);
+    return out;
+  }
+
+  // Searching looks into subfolders, the way Explorer does — a search that
+  // stopped at the current level would hide the thing you are looking for.
+  const searchScope = $derived(() => {
+    if ($listFolder === null) return sorted;
+    const ids = subtreeIds($listFolder);
+    return sorted.filter(n => n.folder_id && ids.has(n.folder_id));
+  });
+  const inFolder = $derived(query ? searchScope() : directNotes);
+
+  /// Root-to-here, for the breadcrumb.
+  const trail = $derived(() => {
+    const out: { id: string; name: string }[] = [];
+    let cursor = $listFolder;
+    for (let i = 0; cursor && i <= 20; i++) {
+      const f = $folders.find(x => x.id === cursor);
+      if (!f) break;
+      out.unshift({ id: f.id, name: f.name });
+      cursor = f.parent_id ?? null;
+    }
+    return out;
+  });
+
+  /// How many things sit directly inside a folder — which is exactly what
+  /// opening it will show, so the number never disagrees with the list.
+  function directCount(id: string): number {
+    const subs = $folders.filter(f => (f.parent_id ?? null) === id).length;
+    return subs + $notes.filter(n => (n.folder_id ?? null) === id).length;
+  }
   const filtered = $derived(
     // No query → show everything, including secret notes. With one, secret notes
     // are never searchable — not by title, tags, preview, or anything.
@@ -448,7 +496,56 @@
       </li>
   {/snippet}
 
+  <!-- Breadcrumb: only meaningful once you are inside something. -->
+  {#if trail().length}
+    <nav class="crumbs" aria-label="Folder path">
+      <button class="crumb" onclick={() => listFolder.set(null)}>
+        <!-- aria-hidden: the ligature text is what a screen reader would read,
+             and "inbox Home" is not what this button is called. -->
+        <span class="material-symbols-outlined" style="font-size: 16px;" aria-hidden="true">inbox</span>
+        Home
+      </button>
+      {#each trail() as c, i (c.id)}
+        <span class="crumb-sep" aria-hidden="true">/</span>
+        {#if i === trail().length - 1}
+          <span class="crumb current" aria-current="page">{c.name}</span>
+        {:else}
+          <button class="crumb" onclick={() => listFolder.set(c.id)}>{c.name}</button>
+        {/if}
+      {/each}
+    </nav>
+  {/if}
+
   <ul class="note-list">
+    <!-- Folders first, as rows you open — the list is a level, not a filter. -->
+    {#if !query}
+      {#each childFolders as f (f.id)}
+        <li>
+          <div
+            class="note-card folder-card"
+            role="button" tabindex="0"
+            onclick={() => listFolder.set(f.id)}
+            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
+          >
+            <span class="badge-wrap">
+              <span class="kind-badge folder-badge">
+                <span class="material-symbols-outlined">folder</span>
+              </span>
+            </span>
+            <div class="note-info">
+              <div class="title-row"><strong>{f.name}</strong></div>
+              <p class="preview-text">
+                {directCount(f.id)} {directCount(f.id) === 1 ? "item" : "items"}
+              </p>
+              <div class="tags"></div>
+            </div>
+            <div class="trailing">
+              <span class="material-symbols-outlined" style="font-size: 20px;">chevron_right</span>
+            </div>
+          </div>
+        </li>
+      {/each}
+    {/if}
     {#if pinnedNotes.length}
       <li class="section-label">
         <span class="material-symbols-outlined sec-ico" style="font-size: 15px; font-variation-settings: 'FILL' 1;">push_pin</span>
@@ -460,10 +557,20 @@
       <li class="section-label"><span>All notes</span></li>
     {/if}
     {#each otherNotes as note (note.id)}{@render noteCard(note)}{/each}
-    {#if filtered.length === 0}
+    <!-- An empty folder is not an empty library; saying "no notes yet" when the
+         note is one level up reads as data loss. -->
+    {#if filtered.length === 0 && (query || childFolders.length === 0)}
       <li class="empty">
-        <span class="material-symbols-outlined empty-icon">{filter ? "search_off" : "note_add"}</span>
-        <span>{filter ? "No notes match your search." : desktop ? "No notes yet. Use + to create one." : "No notes yet. Tap + to create one."}</span>
+        <span class="material-symbols-outlined empty-icon">{filter ? "search_off" : $listFolder ? "folder" : "note_add"}</span>
+        <span>
+          {#if filter}
+            No notes match your search.
+          {:else if $listFolder}
+            This folder is empty.
+          {:else}
+            No notes yet. {desktop ? "Use" : "Tap"} + to create one.
+          {/if}
+        </span>
       </li>
     {/if}
     {#if hiddenLocked}
@@ -626,6 +733,27 @@
   }
 
   /* Note list */
+  /* Breadcrumb — where you are, and a way back up. */
+  .crumbs {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+    margin-bottom: 0.6rem; padding: 0 0.15rem;
+    font-size: 0.8rem; color: var(--muted); min-height: 32px;
+  }
+  .crumb {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: none; border: none; cursor: pointer; color: var(--accent);
+    font-size: 0.8rem; font-weight: 600; padding: 4px 6px;
+    border-radius: var(--radius-full);
+  }
+  .crumb:hover { background: var(--hover); }
+  .crumb.current { color: var(--text); cursor: default; font-weight: 700; }
+  .crumb-sep { opacity: 0.5; }
+
+  /* A folder reads as a card like any other row, but with its own badge tint so
+     it is obvious at a glance that opening it goes somewhere. */
+  .folder-card .folder-badge { background: var(--secondary-surface); color: var(--secondary); }
+  .folder-card .trailing { align-self: center; color: var(--muted); }
+
   .note-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   li { display: flex; align-items: center; min-width: 0; position: relative; }
   .note-card {
