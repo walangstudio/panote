@@ -127,17 +127,9 @@ import { refreshFolders } from "$lib/stores/folders";
 {/if}
 
 <style>
-  /* Grid with one row, so the routed page is stretched to the full height rather
-     than having to resolve `height: 100%` up through this chain itself. It did
-     not: the note editor collapsed to its content and left the bottom half of a
-     phone screen as dead space below the Save bar. */
   .app-content {
     height: 100%; overflow-y: auto;
-    display: grid; grid-template-rows: 1fr; align-items: stretch;
   }
-  /* A grid item defaults to min-height:auto, which lets tall content push the row
-     open instead of scrolling inside it. */
-  .app-content > :global(*) { min-height: 0; }
   /* Two independent scrollers — the list keeps its place while the note scrolls. */
   .split {
     height: 100%;

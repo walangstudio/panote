@@ -134,6 +134,7 @@
 
   // Bottom-up speed-dial: last item sits nearest the FAB (prototype order).
   const fabKinds = [
+    { id: "folder", icon: "create_new_folder", label: "Folder" },
     { id: "table", icon: "table_chart", label: "Table" },
     { id: "kanban", icon: "view_kanban", label: "Kanban" },
     { id: "checklist", icon: "checklist", label: "Checklist" },
@@ -579,19 +580,6 @@
     </nav>
   {/if}
 
-  <div class="level-bar">
-    <button class="new-folder-btn" onclick={() => { nameError = ""; nameModal = { mode: "create", initial: "" }; }}>
-      <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">create_new_folder</span>
-      New folder
-    </button>
-    {#if $listFolder}
-      <button class="up-btn" onclick={() => listFolder.set(trail().length > 1 ? trail()[trail().length - 2].id : null)}>
-        <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">arrow_upward</span>
-        Up
-      </button>
-    {/if}
-  </div>
-
   <ul class="note-list">
     <!-- Folders first, as rows you open — the list is a level, not a filter. -->
     {#if !query}
@@ -702,7 +690,11 @@
       <div class="fab-options">
         {#each fabKinds as kind, i}
           <button class="fab-option" style="animation-delay: {(fabKinds.length - 1 - i) * 40}ms"
-            onclick={() => { fabOpen = false; goto(`/note/new?kind=${kind.id}`); }}>
+            onclick={() => {
+              fabOpen = false;
+              if (kind.id === "folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
+              else goto(`/note/new?kind=${kind.id}`);
+            }}>
             <span class="fab-label">{kind.label}</span>
             <span class="fab-badge"><span class="material-symbols-outlined">{kind.icon}</span></span>
           </button>
@@ -733,7 +725,10 @@
 {/if}
 
 {#if showNewNote}
-  <NewNoteModal onclose={() => showNewNote = false} />
+  <NewNoteModal
+    onclose={() => showNewNote = false}
+    onnewfolder={() => { nameError = ""; nameModal = { mode: "create", initial: "" }; }}
+  />
 {/if}
 
 {#if nameModal}
@@ -893,19 +888,6 @@
   .folder-card .trailing {
     flex-direction: row; align-items: center; align-self: center;
     justify-content: flex-end; color: var(--muted); gap: 0;
-  }
-
-  /* Level bar: create here, or go up a level. */
-  .level-bar { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; padding: 0 0.15rem; }
-  .new-folder-btn, .up-btn {
-    display: inline-flex; align-items: center; gap: 0.4rem;
-    padding: 0.45rem 0.8rem; min-height: 40px;
-    border: 1px dashed var(--border); background: none; cursor: pointer;
-    border-radius: var(--radius-full); color: var(--text-secondary);
-    font-size: 0.82rem; font-weight: 600;
-  }
-  .new-folder-btn:hover, .up-btn:hover {
-    border-color: var(--accent); color: var(--accent); background: var(--accent-muted);
   }
 
   /* Surfaced backend refusals — a cycle, or too deep. */

@@ -1110,7 +1110,13 @@
     flex: 1; min-height: 0; padding: 0.6rem 1rem 0.5rem;
     display: flex; flex-direction: column;
   }
-  .editor-layout.desktop .editor-content { padding: 0.75rem 1.5rem 0.5rem; }
+  /* Same treatment as touch: no horizontal padding on the column, so the writing
+     surface runs to both edges of the pane. The text is inset by the children
+     below instead, so it never sits against the edge. */
+  .editor-layout.desktop .editor-content { padding: 0.75rem 0 0; }
+  .editor-layout.desktop .editor-content > .title-input,
+  .editor-layout.desktop .editor-content > .edited-line,
+  .editor-layout.desktop .editor-content > .tags-row { padding-left: 1.1rem; padding-right: 1.1rem; }
 
   /* Title textarea */
   .title-input {
@@ -1202,6 +1208,9 @@
 
   /* ── Footer ── */
   .editor-footer {
+    /* Never shrinks and never grows: the editor body above it takes the slack, so
+       this stays against the bottom edge. */
+    flex-shrink: 0;
     display: flex; align-items: center; gap: 0.75rem;
     padding: 0.5rem 1rem 0.5rem 1.25rem;
     border-top: 1px solid var(--border);
@@ -1238,6 +1247,19 @@
   .editor-layout.light-ink .tag-input { color: rgba(255,255,255,0.88); }
 
   @media (max-width: 640px) {
+    /* An explicit height rather than `height: 100%`, which needs every ancestor
+       to have a definite height and silently collapses to content when one does
+       not — it did, and the editor sat in a short box with the footer floating
+       mid-screen and dead space beneath it. Measured off the viewport instead, so
+       nothing above it can defeat it, minus the safe-area padding body carries.
+       dvh, not vh, so the mobile browser chrome collapsing does not leave a gap. */
+    .editor-layout {
+      height: calc(
+        100dvh
+        - max(env(safe-area-inset-top, 0px), 28px)
+        - env(safe-area-inset-bottom, 0px)
+      );
+    }
     .editor-header { padding: 0.5rem 0.6rem; }
     /* No horizontal padding on the column: the writing surface runs to both
        edges, the way it does when the desktop pane is wide. The text inside is

@@ -3,8 +3,12 @@
   import { goto } from "$app/navigation";
   import { trapFocus } from "$lib/trapFocus";
 
-  interface Props { onclose: () => void; }
-  let { onclose }: Props = $props();
+  interface Props {
+    onclose: () => void;
+    /// A folder is created where the list already is, so the caller owns it.
+    onnewfolder?: () => void;
+  }
+  let { onclose, onnewfolder }: Props = $props();
 
   let previouslyFocused: HTMLElement | null = null;
   let kindButtons: (HTMLButtonElement | undefined)[] = $state([]);
@@ -14,10 +18,14 @@
     { id: "checklist", icon: "checklist", label: "Checklist", color: "tertiary", desc: "Tick off tasks" },
     { id: "kanban", icon: "view_kanban", label: "Kanban", color: "tertiary", desc: "Columns of cards" },
     { id: "table", icon: "table_chart", label: "Table", color: "secondary", desc: "Rows and columns" },
+    // A folder is not a note kind, so `pick` routes it separately.
+    { id: "folder", icon: "create_new_folder", label: "Folder", color: "secondary", desc: "Group notes together" },
   ] as const;
 
   function pick(id: string) {
     onclose();
+    // A folder is created where you are, not by navigating to an editor.
+    if (id === "folder") { onnewfolder?.(); return; }
     goto(`/note/new?kind=${id}`);
   }
 
