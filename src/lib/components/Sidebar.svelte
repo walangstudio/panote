@@ -1,7 +1,11 @@
 <script lang="ts">
   import { page } from "$app/state";
+  import { goto } from "$app/navigation";
   import { toggleDarkMode, theme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
+  import { folders, buildTree, refreshFolders, type FolderNode } from "$lib/stores/folders";
+  import { listFolder } from "$lib/stores/listState";
+  import { folderCreate, folderDelete, folderRename } from "$lib/tauri";
 
   interface Props {
     receiving: boolean;
@@ -11,6 +15,54 @@
   let { receiving, ontogglereceive, onnewnote }: Props = $props();
 
   const activeTab = $derived(page.url.pathname.startsWith("/settings") ? "settings" : "notes");
+
+  const tree = $derived(buildTree($folders));
+  /// Collapsed by id. Collapsed-by-default would hide the structure the tree
+  /// exists to show, so folders start open.
+  let collapsed = $state<Set<string>>(new Set());
+  let busy = $state(false);
+
+  function toggle(id: string) {
+    const next = new Set(collapsed);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    collapsed = next;
+  }
+
+  function openFolder(id: string | null) {
+    listFolder.set(id);
+    sidebarOpen.set(false);
+    if (page.url.pathname !== "/") goto("/");
+  }
+
+  async function addFolder(parentId: string | null) {
+    const name = prompt(parentId ? "Name for the subfolder" : "Name for the new folder");
+    if (!name?.trim() || busy) return;
+    busy = true;
+    try { await folderCreate(name, parentId); await refreshFolders(); } catch {}
+    busy = false;
+  }
+
+  async function renameFolder(f: FolderNode) {
+    const name = prompt("Rename folder", f.name);
+    if (!name?.trim() || name === f.name || busy) return;
+    busy = true;
+    try { await folderRename(f.id, name); await refreshFolders(); } catch {}
+    busy = false;
+  }
+
+  async function removeFolder(f: FolderNode) {
+    // Say what happens to the notes: this is the question anyone deleting a
+    // folder actually has, and the answer is reassuring.
+    const sub = f.children.length ? " Subfolders go with it." : "";
+    if (!confirm(`Delete "${f.name}"?${sub} Its notes are kept and moved out of the folder.`)) return;
+    busy = true;
+    try {
+      await folderDelete(f.id);
+      await refreshFolders();
+      if ($listFolder === f.id) listFolder.set(null);
+    } catch {}
+    busy = false;
+  }
 
   function nav() {
     sidebarOpen.set(false);
@@ -48,6 +100,76 @@
       <span>Settings</span>
     </a>
   </nav>
+
+  <!-- Folders. Recursive snippet with a depth guard, the same shape the
+       checklist editor uses for its nested items. -->
+  <div class="folders">
+    <div class="folders-head">
+      <span class="folders-label">Folders</span>
+      <button class="folder-add" onclick={() => addFolder(null)} aria-label="New folder" disabled={busy}>
+        <span class="material-symbols-outlined" style="font-size: 18px;">create_new_folder</span>
+      </button>
+    </div>
+
+    <button
+      class="folder-row all"
+      class:selected={$listFolder === null}
+      onclick={() => openFolder(null)}
+    >
+      <span class="material-symbols-outlined folder-icon">inbox</span>
+      <span class="folder-name">All notes</span>
+    </button>
+
+    {#snippet renderFolders(nodes: FolderNode[], depth: number)}
+      {#each nodes as f (f.id)}
+        <div class="folder-line" style="padding-left: {depth * 0.85}rem">
+          {#if f.children.length}
+            <button
+              class="folder-twisty"
+              onclick={() => toggle(f.id)}
+              aria-label={collapsed.has(f.id) ? `Expand ${f.name}` : `Collapse ${f.name}`}
+              aria-expanded={!collapsed.has(f.id)}
+            >
+              <span class="material-symbols-outlined" style="font-size: 18px;">
+                {collapsed.has(f.id) ? "chevron_right" : "expand_more"}
+              </span>
+            </button>
+          {:else}
+            <span class="folder-twisty spacer"></span>
+          {/if}
+          <button
+            class="folder-row"
+            class:selected={$listFolder === f.id}
+            onclick={() => openFolder(f.id)}
+          >
+            <span class="material-symbols-outlined folder-icon">folder</span>
+            <span class="folder-name">{f.name}</span>
+            {#if f.totalCount}<span class="folder-count">{f.totalCount}</span>{/if}
+          </button>
+          <span class="folder-actions">
+            <button onclick={() => addFolder(f.id)} aria-label={`New folder in ${f.name}`} disabled={busy}>
+              <span class="material-symbols-outlined" style="font-size: 16px;">add</span>
+            </button>
+            <button onclick={() => renameFolder(f)} aria-label={`Rename ${f.name}`} disabled={busy}>
+              <span class="material-symbols-outlined" style="font-size: 16px;">edit</span>
+            </button>
+            <button onclick={() => removeFolder(f)} aria-label={`Delete ${f.name}`} disabled={busy}>
+              <span class="material-symbols-outlined" style="font-size: 16px;">delete</span>
+            </button>
+          </span>
+        </div>
+        {#if f.children.length && !collapsed.has(f.id) && depth < 20}
+          {@render renderFolders(f.children, depth + 1)}
+        {/if}
+      {/each}
+    {/snippet}
+
+    {@render renderFolders(tree, 0)}
+
+    {#if tree.length === 0}
+      <p class="folders-empty">No folders yet.</p>
+    {/if}
+  </div>
 
   <div class="drawer-bottom">
     <button class="receive-row" onclick={ontogglereceive}>
@@ -116,7 +238,57 @@
   .new-note-btn:hover { transform: scale(1.02); box-shadow: 0 6px 20px var(--shadow-color-hover); }
   .new-note-btn:active { transform: scale(0.97); }
 
-  nav { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; }
+  /* nav no longer takes the slack; the folder list does, so it can scroll. */
+  nav { display: flex; flex-direction: column; gap: 0.25rem; }
+
+  .folders {
+    flex: 1; min-height: 0; overflow-y: auto;
+    margin-top: 0.75rem; padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+  .folders-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 0.5rem 0.25rem 1rem;
+  }
+  .folders-label {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .folder-add, .folder-twisty, .folder-actions button {
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    display: flex; align-items: center; justify-content: center; padding: 0;
+    border-radius: var(--radius-full);
+  }
+  .folder-add:hover, .folder-twisty:hover, .folder-actions button:hover { color: var(--accent); }
+  /* 44px touch targets, per the same rule the rest of the app follows. */
+  .folder-add { width: 44px; height: 44px; }
+  .folder-twisty { width: 28px; height: 44px; flex-shrink: 0; }
+  .folder-twisty.spacer { pointer-events: none; }
+
+  .folder-line { display: flex; align-items: center; min-width: 0; }
+  .folder-row {
+    flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.55rem 0.6rem; border: none; background: none; cursor: pointer;
+    border-radius: var(--radius-full); color: var(--text-secondary);
+    font-size: 0.88rem; font-weight: 500; text-align: left; min-height: 44px;
+  }
+  .folder-row.all { margin-left: 28px; }
+  .folder-row:hover { background: var(--hover); color: var(--text); }
+  .folder-row.selected { background: var(--accent-muted); color: var(--accent); font-weight: 700; }
+  .folder-icon { font-size: 19px; flex-shrink: 0; }
+  .folder-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .folder-count {
+    margin-left: auto; font-size: 0.7rem; font-weight: 600; color: var(--muted);
+    background: var(--surface-container); padding: 1px 8px; border-radius: var(--radius-full);
+  }
+  /* Revealed on hover or keyboard focus, so the row stays readable but the
+     actions are still reachable without a mouse. */
+  .folder-actions { display: flex; opacity: 0; flex-shrink: 0; }
+  .folder-actions button { width: 30px; height: 44px; }
+  .folder-line:hover .folder-actions,
+  .folder-actions:focus-within { opacity: 1; }
+  .folders-empty { margin: 0.5rem 1rem; font-size: 0.8rem; color: var(--muted); }
   .nav-item {
     padding: 0.6rem 1rem; border-radius: var(--radius-full);
     text-decoration: none; color: var(--text-secondary); font-size: 0.9rem; font-weight: 500;

@@ -5,6 +5,7 @@ mod notes;
 mod state;
 mod transfer;
 
+use folders::commands::*;
 use notes::commands::*;
 use notes::export::{notes_export, notes_import};
 use state::AppState;
@@ -91,6 +92,13 @@ pub fn run() {
             note_count,
             note_bg_images,
             note_pin,
+            // Folders — nested, one folder per note
+            folder_create,
+            folder_rename,
+            folder_move,
+            folder_delete,
+            folder_list,
+            note_set_folder,
             // Drafts — unsaved edits, kept apart from the committed note
             note_draft_save,
             note_draft_get,

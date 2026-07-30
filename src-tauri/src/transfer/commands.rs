@@ -565,6 +565,8 @@ pub async fn import_blob_detailed(
         }
         let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, effective_pw.as_deref())?;
         let row = NoteRow {
+            // Preserve where the recipient filed it; a re-send must not move it.
+            folder_id: prev.folder_id.clone(),
             id: prev.id.clone(),
             kind: blob.kind,
             title_nonce: title_nonce.to_vec(),
@@ -604,6 +606,7 @@ pub async fn import_blob_detailed(
     // Model B: new notes arrive unprotected; the receiver opts into protecting.
     let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, None)?;
     let row = NoteRow {
+        folder_id: None,
         id: id.clone(),
         kind: blob.kind,
         title_nonce: title_nonce.to_vec(),

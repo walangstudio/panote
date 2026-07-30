@@ -7,6 +7,7 @@
   } from "$lib/tauri";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { refreshNotes } from "$lib/stores/notes";
+import { refreshFolders } from "$lib/stores/folders";
   import { initTheme } from "$lib/stores/theme";
   import IncomingTransferToast from "$lib/components/IncomingTransferToast.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -75,6 +76,7 @@
   onMount(async () => {
     unsubTheme = initTheme();
     if (!isTauri) return;
+    refreshFolders();
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
     // Nothing listened for this, so a note delivered by the single-note
     // protocol — what older senders still use — sat unreachable in memory and

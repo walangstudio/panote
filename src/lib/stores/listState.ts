@@ -12,6 +12,10 @@ import { writable } from "svelte/store";
 export const listFilter = writable("");
 export const listSelecting = writable(false);
 export const listSelected = writable(new Set<string>());
+/// Which folder the list is showing; null means everything. Lives here for the
+/// same reason as the search text: opening a note on mobile unmounts the list,
+/// and a folder you had drilled into should still be there when you come back.
+export const listFolder = writable<string | null>(null);
 
 /// Clear it. Module-level state outlives any single component by design, which
 /// also means it outlives a single test — so tests must reset between cases.
@@ -19,4 +23,5 @@ export function resetListState() {
   listFilter.set("");
   listSelecting.set(false);
   listSelected.set(new Set());
+  listFolder.set(null);
 }

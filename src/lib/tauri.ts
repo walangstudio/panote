@@ -16,6 +16,8 @@ export interface NoteMetadata {
   bg_image?: string;
   show_preview: boolean;
   preview_text?: string;
+  /// Which folder the note is in; null at the root.
+  folder_id?: string | null;
 }
 
 export interface NoteDetail {
@@ -84,6 +86,26 @@ export const noteCreate = (input: NoteInput) =>
 export const noteUpdate = (id: string, input: NoteInput) =>
   invoke<NoteMetadata>("note_update", { id, input });
 export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
+/// A folder as the backend returns it: flat, with its parent. `note_count` is
+/// this folder only; the tree rolls subfolder counts up (see stores/folders.ts).
+export interface Folder {
+  id: string;
+  parent_id: string | null;
+  name: string;
+  note_count: number;
+}
+
+export const folderList = () => invoke<Folder[]>("folder_list");
+export const folderCreate = (name: string, parentId?: string | null) =>
+  invoke<string>("folder_create", { name, parentId: parentId ?? null });
+export const folderRename = (id: string, name: string) =>
+  invoke<void>("folder_rename", { id, name });
+export const folderMove = (id: string, parentId: string | null) =>
+  invoke<void>("folder_move", { id, parentId });
+export const folderDelete = (id: string) => invoke<void>("folder_delete", { id });
+export const noteSetFolder = (noteId: string, folderId: string | null) =>
+  invoke<void>("note_set_folder", { noteId, folderId });
+
 export const noteList = () => invoke<NoteMetadata[]>("note_list");
 /// Total notes in the database. The list is capped (K14), so this is how the UI
 /// knows when it is showing a partial view instead of silently omitting notes.

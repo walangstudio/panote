@@ -107,6 +107,8 @@ pub struct NoteMetadata {
     pub bg_image: Option<String>,
     pub show_preview: bool,
     pub preview_text: Option<String>,
+    /// Which folder the note sits in; None means the root.
+    pub folder_id: Option<String>,
 }
 
 /// Full note returned by note_get.

@@ -159,6 +159,7 @@ pub async fn note_create(
         .transpose()?;
 
     let row = NoteRow {
+        folder_id: None, // owned by note_set_folder; note_insert/update never write it
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
@@ -188,6 +189,7 @@ pub async fn note_create(
         .map_err(|e| e.to_string())?;
 
     Ok(NoteMetadata {
+        folder_id: None,
         id,
         kind: input.kind,
         title: input.title,
@@ -248,6 +250,7 @@ pub async fn note_update(
     };
 
     let row = NoteRow {
+        folder_id: None, // owned by note_set_folder; note_insert/update never write it
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
@@ -284,6 +287,8 @@ pub async fn note_update(
         .map_err(|e| e.to_string())?;
 
     Ok(NoteMetadata {
+        // Unchanged by a save; report what the row already had.
+        folder_id: original.folder_id.clone(),
         id,
         kind: input.kind,
         title: input.title,
@@ -472,6 +477,7 @@ pub async fn note_list(
             .as_deref()
             .and_then(|p| decrypt_preview(key, &row.id, p));
         result.push(NoteMetadata {
+            folder_id: row.folder_id,
             id: row.id,
             kind: migrate_kind(&row.kind).to_string(),
             title,

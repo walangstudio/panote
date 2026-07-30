@@ -10,7 +10,7 @@
   import type { NoteMetadata } from "$lib/tauri";
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import { listFilter, listSelecting, listSelected } from "$lib/stores/listState";
+  import { listFilter, listSelecting, listSelected, listFolder } from "$lib/stores/listState";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
@@ -107,15 +107,21 @@
     n.title.toLowerCase().includes(query) ||
     n.tags.some(t => t.toLowerCase().includes(query)) ||
     (n.preview_text?.toLowerCase().includes(query) ?? false);
+  // A folder narrows the list; a search then applies within it. Search does not
+  // escape the folder you are looking at — a result you cannot see in context is
+  // more confusing than a short list.
+  const inFolder = $derived(
+    $listFolder === null ? sorted : sorted.filter(n => n.folder_id === $listFolder),
+  );
   const filtered = $derived(
     // No query → show everything, including secret notes. With one, secret notes
     // are never searchable — not by title, tags, preview, or anything.
-    query ? sorted.filter(n => !n.has_note_password && matches(n)) : sorted,
+    query ? inFolder.filter(n => !n.has_note_password && matches(n)) : inFolder,
   );
   // Holding locked notes back is deliberate, but silently returning nothing reads
   // as broken search, so the list owns up to what it withheld.
   const hiddenLocked = $derived(
-    query ? sorted.filter(n => n.has_note_password).length : 0,
+    query ? inFolder.filter(n => n.has_note_password).length : 0,
   );
 
   /// How many notes the backend page cap is leaving out. Only meaningful with no
