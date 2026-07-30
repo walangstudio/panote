@@ -160,6 +160,7 @@ pub async fn note_create(
 
     let row = NoteRow {
         folder_id: None, // owned by note_set_folder; note_insert/update never write it
+        sort_order: 0,   // owned by notes_set_order, likewise
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
@@ -251,6 +252,7 @@ pub async fn note_update(
 
     let row = NoteRow {
         folder_id: None, // owned by note_set_folder; note_insert/update never write it
+        sort_order: 0,   // owned by notes_set_order, likewise
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),

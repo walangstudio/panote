@@ -252,6 +252,20 @@ pub async fn folder_delete(id: String, state: State<'_, AppState>) -> Result<(),
     queries::delete(&state.db, &id).await.map_err(|e| e.to_string())
 }
 
+/// Write an explicit order for one level. The caller sends the ids as arranged,
+/// so a reorder is one call and cannot leave two rows claiming a position.
+#[tauri::command]
+pub async fn notes_reorder(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    crate::db::queries::notes_set_order(&state.db, &ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn folders_reorder(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    queries::set_order(&state.db, &ids).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn folder_list(state: State<'_, AppState>) -> Result<Vec<FolderJson>, String> {
     list_impl(&state).await

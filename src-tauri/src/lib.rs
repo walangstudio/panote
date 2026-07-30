@@ -99,6 +99,8 @@ pub fn run() {
             folder_delete,
             folder_list,
             note_set_folder,
+            notes_reorder,
+            folders_reorder,
             // Drafts — unsaved edits, kept apart from the committed note
             note_draft_save,
             note_draft_get,

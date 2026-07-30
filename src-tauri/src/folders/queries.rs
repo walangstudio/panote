@@ -8,6 +8,7 @@ pub struct FolderRow {
     pub name_ct: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub sort_order: i64,
 }
 
 fn to_row(r: sqlx::sqlite::SqliteRow) -> FolderRow {
@@ -17,6 +18,7 @@ fn to_row(r: sqlx::sqlite::SqliteRow) -> FolderRow {
         name_ct: r.get("name_ct"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
+        sort_order: r.get("sort_order"),
     }
 }
 
@@ -42,7 +44,7 @@ pub async fn insert(
 }
 
 pub async fn get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<FolderRow>> {
-    let row = sqlx::query("SELECT id, parent_id, name_ct, created_at, updated_at FROM folders WHERE id = ?")
+    let row = sqlx::query("SELECT id, parent_id, name_ct, created_at, updated_at, sort_order FROM folders WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -51,11 +53,25 @@ pub async fn get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<FolderRow
 
 pub async fn list(pool: &SqlitePool) -> anyhow::Result<Vec<FolderRow>> {
     let rows = sqlx::query(
-        "SELECT id, parent_id, name_ct, created_at, updated_at FROM folders ORDER BY created_at",
+        "SELECT id, parent_id, name_ct, created_at, updated_at, sort_order FROM folders ORDER BY sort_order, created_at",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(to_row).collect())
+}
+
+/// See `notes_set_order` - same contract, folders instead.
+pub async fn set_order(pool: &SqlitePool, ids: &[String]) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    for (i, id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE folders SET sort_order = ? WHERE id = ?")
+            .bind(i as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn rename(pool: &SqlitePool, id: &str, name_ct: &str, now: i64) -> anyhow::Result<()> {

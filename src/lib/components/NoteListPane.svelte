@@ -12,7 +12,10 @@
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { listFilter, listSelecting, listSelected, listFolder } from "$lib/stores/listState";
   import { folders, refreshFolders } from "$lib/stores/folders";
-  import { folderCreate, folderMove, folderRename, folderDelete, noteSetFolder } from "$lib/tauri";
+  import {
+    folderCreate, folderMove, folderRename, folderDelete, noteSetFolder,
+    notesReorder, foldersReorder,
+  } from "$lib/tauri";
   import FolderPickerModal from "$lib/components/FolderPickerModal.svelte";
   import FolderNameModal from "$lib/components/FolderNameModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
@@ -141,7 +144,72 @@
     { id: "document", icon: "edit_note", label: "Document" },
   ] as const;
 
+  // ---- Manual arrangement ----
+  //
+  // Only offered while the Manual sort is active: dragging under a date sort
+  // would look like it worked and then be silently undone by the next refresh.
+  let reordering = $state(false);
+  const canReorder = $derived($sortPref.field === "manual");
+
+  /// Local order while dragging, so rows follow the finger without a round trip.
+  let dragIds = $state<string[] | null>(null);
+  let dragKind = $state<"note" | "folder" | null>(null);
+  let dragId = $state<string | null>(null);
+
+  function startReorder(e: PointerEvent, kind: "note" | "folder", id: string, ids: string[]) {
+    e.preventDefault();
+    dragKind = kind;
+    dragId = id;
+    dragIds = [...ids];
+    window.addEventListener("pointermove", onReorderMove);
+    window.addEventListener("pointerup", onReorderUp);
+  }
+
+  function onReorderMove(e: PointerEvent) {
+    if (!dragIds || !dragId) return;
+    // Hit-test the row under the finger, the same approach the kanban board uses,
+    // so this works with a mouse and a touch without separate code paths.
+    let el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    while (el) {
+      const over = el.dataset?.rowId;
+      if (over && over !== dragId) {
+        const from = dragIds.indexOf(dragId);
+        const to = dragIds.indexOf(over);
+        if (from !== -1 && to !== -1) {
+          const next = [...dragIds];
+          next.splice(to, 0, ...next.splice(from, 1));
+          dragIds = next;
+        }
+        return;
+      }
+      el = el.parentElement;
+    }
+  }
+
+  async function onReorderUp() {
+    window.removeEventListener("pointermove", onReorderMove);
+    window.removeEventListener("pointerup", onReorderUp);
+    const ids = dragIds;
+    const kind = dragKind;
+    dragIds = null; dragKind = null; dragId = null;
+    if (!ids || !kind) return;
+    try {
+      if (kind === "note") await notesReorder(ids);
+      else await foldersReorder(ids);
+      await Promise.all([refreshNotes(), refreshFolders()]);
+    } catch (e) { moveError = folderMessage(e); }
+  }
+
+  /// Rows in the order to paint: the in-flight arrangement while dragging that
+  /// kind, otherwise whatever the backend gave us.
+  function ordered<T extends { id: string }>(rows: T[], kind: "note" | "folder"): T[] {
+    if (!dragIds || dragKind !== kind) return rows;
+    const by = new Map(rows.map(r => [r.id, r]));
+    return dragIds.map(id => by.get(id)).filter((r): r is T => !!r);
+  }
+
   const sortOptions: { field: SortField; label: string }[] = [
+    { field: "manual", label: "Manual (drag to arrange)" },
     { field: "updated", label: "Date edited" },
     { field: "created", label: "Date created" },
     { field: "title", label: "Title" },
@@ -444,6 +512,20 @@
         </div>
       {/if}
     </div>
+    <!-- Only while Manual is the active sort: a drag under a date sort would be
+         undone by the next refresh, which reads as the app losing the change. -->
+    {#if canReorder}
+      <button
+        class="select-btn"
+        class:active={reordering}
+        onclick={() => { reordering = !reordering; if (reordering) selecting = false; }}
+        aria-pressed={reordering}
+        aria-label={reordering ? "Done arranging" : "Arrange notes"}
+        title={reordering ? "Done arranging" : "Arrange notes"}
+      >
+        <span class="material-symbols-outlined" aria-hidden="true">{reordering ? "check" : "swap_vert"}</span>
+      </button>
+    {/if}
     <button class="select-btn" class:active={selecting} onclick={toggleSelect} aria-label={selecting ? "Cancel selection" : "Select notes"}>
       <span class="material-symbols-outlined">{selecting ? "check_box" : "checklist_rtl"}</span>
     </button>
@@ -472,6 +554,8 @@
           </button>
         {:else}
           <div class="note-card"
+            class:reordering
+            data-row-id={note.id}
             role="button" tabindex="0"
             class:active={desktop && note.id === activeId}
             class:dark-ink={cardInk(note) === "dark"}
@@ -479,9 +563,18 @@
             class:has-bg-image={bgOf(note.id)}
             style:background-color={note.bg_color ?? undefined}
             style:background-image={safeBgImageUrl(bgOf(note.id))}
-            onclick={() => goto(`/note/${note.id}`)}
+            onclick={() => { if (!reordering) goto(`/note/${note.id}`); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goto(`/note/${note.id}`); } }}
           >
+            {#if reordering}
+              <button
+                type="button"
+                class="drag-grip"
+                aria-label={`Reorder ${note.title || "Untitled"}`}
+                onclick={(e) => e.stopPropagation()}
+                onpointerdown={(e) => startReorder(e, "note", note.id, ordered(otherNotes, "note").map(x => x.id))}
+              >⠿</button>
+            {/if}
             <span class="badge-wrap">
               <span class="kind-badge {noteColor(note)}">
                 <span class="material-symbols-outlined">{noteIcon(note)}</span>
@@ -583,14 +676,25 @@
   <ul class="note-list">
     <!-- Folders first, as rows you open — the list is a level, not a filter. -->
     {#if !query}
-      {#each childFolders as f (f.id)}
+      {#each ordered(childFolders, "folder") as f (f.id)}
         <li>
           <div
             class="note-card folder-card"
+            class:reordering
+            data-row-id={f.id}
             role="button" tabindex="0"
-            onclick={() => listFolder.set(f.id)}
+            onclick={() => { if (!reordering) listFolder.set(f.id); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
           >
+            {#if reordering}
+              <button
+                type="button"
+                class="drag-grip"
+                aria-label={`Reorder ${f.name}`}
+                onclick={(e) => e.stopPropagation()}
+                onpointerdown={(e) => startReorder(e, "folder", f.id, ordered(childFolders, "folder").map(x => x.id))}
+              >⠿</button>
+            {/if}
             <span class="badge-wrap">
               <span class="kind-badge folder-badge">
                 <span class="material-symbols-outlined">folder</span>
@@ -909,6 +1013,19 @@
     width: 32px; height: 32px; border-radius: var(--radius-full);
   }
   .folder-error button:hover { color: var(--text); background: var(--hover); }
+
+  /* Grip only appears in arrange mode, so the row is not permanently cluttered
+     and a scroll gesture cannot catch it by accident. */
+  .drag-grip {
+    border: none; background: none;
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; min-height: 44px; flex-shrink: 0;
+    color: var(--muted); cursor: grab; touch-action: none;
+    font-size: 1.1rem; user-select: none;
+  }
+  .drag-grip:active { cursor: grabbing; }
+  .note-card.reordering { cursor: default; }
+  .note-card.reordering:hover { transform: none; }
 
   .note-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   li { display: flex; align-items: center; min-width: 0; position: relative; }

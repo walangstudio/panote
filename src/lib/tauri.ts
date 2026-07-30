@@ -18,6 +18,8 @@ export interface NoteMetadata {
   preview_text?: string;
   /// Which folder the note is in; null at the root.
   folder_id?: string | null;
+  /// Position within its level, used only by the Manual sort.
+  sort_order?: number;
 }
 
 export interface NoteDetail {
@@ -93,6 +95,7 @@ export interface Folder {
   parent_id: string | null;
   name: string;
   note_count: number;
+  sort_order?: number;
 }
 
 export const folderList = () => invoke<Folder[]>("folder_list");
@@ -105,6 +108,9 @@ export const folderMove = (id: string, parentId: string | null) =>
 export const folderDelete = (id: string) => invoke<void>("folder_delete", { id });
 export const noteSetFolder = (noteId: string, folderId: string | null) =>
   invoke<void>("note_set_folder", { noteId, folderId });
+/// Ids in the order the user arranged them; positions are derived from the order.
+export const notesReorder = (ids: string[]) => invoke<void>("notes_reorder", { ids });
+export const foldersReorder = (ids: string[]) => invoke<void>("folders_reorder", { ids });
 
 export const noteList = () => invoke<NoteMetadata[]>("note_list");
 /// Total notes in the database. The list is capped (K14), so this is how the UI

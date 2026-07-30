@@ -19,12 +19,20 @@ vi.mock("$lib/tauri", () => ({
   notesUnprotect: vi.fn(async () => {}),
 }));
 
+// The shared stub exports plain functions, so navigation needs a spy to assert on.
+vi.mock("$app/navigation", () => ({
+  goto: vi.fn(async () => {}),
+  beforeNavigate: vi.fn(),
+  afterNavigate: vi.fn(),
+}));
+
 // The component reads `page.params.id`; the shared stub only carries `page.url`.
+import { goto } from "$app/navigation";
 import { page } from "$app/state";
 (page as unknown as { params: Record<string, string> }).params = { id: "" };
 
 import { noteList, notesUnprotect } from "$lib/tauri";
-import { notes, bgImages } from "$lib/stores/notes";
+import { notes, bgImages, sortPref } from "$lib/stores/notes";
 import { resetListState, listFolder } from "$lib/stores/listState";
 import { folders } from "$lib/stores/folders";
 import NoteListPane from "./NoteListPane.svelte";
@@ -331,6 +339,94 @@ describe("browsing folders like a file manager", () => {
     const t = await setup(library);
     await type(t, "unfiled");
     expect(folderRows(t)).toEqual([]);
+  });
+});
+
+// Hand-arranging the list. Only offered while the Manual sort is active: a drag
+// under a date sort would appear to work and then be undone by the next refresh,
+// which reads as the app losing the change.
+describe("arranging by hand", () => {
+  const grips = (t: HTMLElement) => t.querySelectorAll(".drag-grip");
+  const arrangeBtn = (t: HTMLElement) =>
+    [...t.querySelectorAll<HTMLButtonElement>(".select-btn")]
+      .find(b => /arrang/i.test(b.getAttribute("aria-label") ?? ""));
+
+  afterEach(() => { sortPref.set({ field: "updated", dir: "desc" }); });
+
+  it("offers no arrange control under a date sort", async () => {
+    sortPref.set({ field: "updated", dir: "desc" });
+    const t = await setup();
+    expect(arrangeBtn(t)).toBeUndefined();
+  });
+
+  it("offers it once the sort is Manual", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup();
+    expect(arrangeBtn(t)).toBeTruthy();
+  });
+
+  it("shows no grips until arrange mode is on", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup();
+    expect(grips(t)).toHaveLength(0);
+
+    arrangeBtn(t)!.click();
+    await flush();
+    expect(grips(t).length).toBeGreaterThan(0);
+  });
+
+  it("marks the toggle pressed while arranging", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup();
+    arrangeBtn(t)!.click();
+    await flush();
+    expect(arrangeBtn(t)!.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  // A row you are dragging must not also navigate when you let go.
+  it("does not open a note while arranging", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup();
+    arrangeBtn(t)!.click();
+    await flush();
+
+    vi.mocked(goto).mockClear();
+    t.querySelector<HTMLElement>(".note-card")!.click();
+    await flush();
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("opens a note normally when not arranging", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup();
+    vi.mocked(goto).mockClear();
+    t.querySelector<HTMLElement>(".note-card")!.click();
+    await flush();
+    expect(goto).toHaveBeenCalled();
+  });
+
+  it("respects the stored order under the Manual sort", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup([
+      note({ id: "c", title: "Third", sort_order: 2 }),
+      note({ id: "a", title: "First", sort_order: 0 }),
+      note({ id: "b", title: "Second", sort_order: 1 }),
+    ]);
+    expect(titles(t)).toEqual(["First", "Second", "Third"]);
+  });
+
+  // Rows never arranged all sit at 0; falling through to the id tiebreak keeps
+  // the list stable instead of reshuffling on every refresh.
+  it("stays stable when nothing has been arranged yet", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const list = [
+      note({ id: "b", title: "Bee" }),
+      note({ id: "a", title: "Ay" }),
+      note({ id: "c", title: "Cee" }),
+    ];
+    const first = titles(await setup(list));
+    cleanup?.(); cleanup = null; document.body.innerHTML = "";
+    expect(titles(await setup(list))).toEqual(first);
   });
 });
 

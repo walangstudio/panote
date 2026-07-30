@@ -140,6 +140,7 @@ pub struct NoteRow {
     pub origin_note_id: String,
     /// Optional recovery-code wrap of the vault ciphertext (migration 0011).
     pub folder_id: Option<String>,
+    pub sort_order: i64,
     pub rc_salt: Option<Vec<u8>>,
     pub rc_nonce: Option<Vec<u8>>,
     pub rc_ct: Option<Vec<u8>>,
@@ -169,6 +170,7 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
         folder_id: r.get("folder_id"),
+        sort_order: r.get("sort_order"),
         rc_salt: r.get("rc_salt"),
         rc_nonce: r.get("rc_nonce"),
         rc_ct: r.get("rc_ct"),
@@ -177,23 +179,25 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id";
+    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id, sort_order";
 
 /// The list view decrypts only the title and tags, so the body ciphertext and
 /// the recovery wrap are pure read amplification — they scale with note size
 /// and get dropped on the floor. Fetch neither.
 const LIST_COLS: &str =
-    "id, kind, title_nonce, title_ct, note_salt, created_at, updated_at, tags, content_hint, pinned, bg_color, show_preview, preview_text, origin_device_id, origin_note_id, folder_id";
+    "id, kind, title_nonce, title_ct, note_salt, created_at, updated_at, tags, content_hint, pinned, bg_color, show_preview, preview_text, origin_device_id, origin_note_id, folder_id, sort_order";
 
 /// Maps a `LIST_COLS` row. The columns the list never reads are left empty;
 /// only `note_list_page` may use this.
 fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
     let folder_id: Option<String> = r.get("folder_id");
+    let sort_order: i64 = r.get("sort_order");
     let origin_device_id: Option<String> = r.get("origin_device_id");
     let origin_note_id: Option<String> = r.get("origin_note_id");
     let id: String = r.get("id");
     NoteRow {
         folder_id,
+        sort_order,
         kind: r.get("kind"),
         title_nonce: r.get("title_nonce"),
         title_ct: r.get("title_ct"),
@@ -316,6 +320,21 @@ pub async fn note_pin(pool: &SqlitePool, id: &str, pinned: bool) -> anyhow::Resu
         .bind(id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// Write an explicit order for one level. Positions come from the sequence, so
+/// the caller sends the ids as the user arranged them and never computes indices.
+pub async fn notes_set_order(pool: &SqlitePool, ids: &[String]) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    for (i, id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE notes SET sort_order = ? WHERE id = ?")
+            .bind(i as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

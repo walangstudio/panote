@@ -28,7 +28,7 @@ export async function refreshNotes(opts: { withBackgrounds?: boolean } = {}) {
   if (opts.withBackgrounds) await refreshBgImages();
 }
 
-export type SortField = "updated" | "created" | "title" | "kind";
+export type SortField = "manual" | "updated" | "created" | "title" | "kind";
 export type SortDir = "asc" | "desc";
 export interface SortPref { field: SortField; dir: SortDir; }
 
@@ -55,6 +55,9 @@ export function sortNotes(list: NoteMetadata[], pref: SortPref): NoteMetadata[] 
       case "created": return a.created_at - b.created_at;
       case "title": return collator.compare(a.title, b.title);
       case "kind": return collator.compare(a.kind, b.kind);
+      // Hand-arranged order. Rows never arranged sit at 0 and fall through to the
+      // id tiebreak below, so the list stays stable rather than shuffling.
+      case "manual": return (a.sort_order ?? 0) - (b.sort_order ?? 0);
     }
   };
   // Ties break on id, and descending negates the comparator instead of reversing

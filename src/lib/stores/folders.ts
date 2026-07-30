@@ -42,7 +42,7 @@ export function buildTree(flat: Folder[], maxDepth = 20): FolderNode[] {
       n.totalCount = n.note_count + prune(n.children, depth + 1);
       sum += n.totalCount;
     }
-    nodes.sort((a, b) => a.name.localeCompare(b.name));
+    nodes.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name));
     return sum;
   };
   prune(roots, 1);
