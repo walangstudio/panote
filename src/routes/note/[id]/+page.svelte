@@ -1257,7 +1257,7 @@
       height: calc(
         100dvh
         - max(env(safe-area-inset-top, 0px), 28px)
-        - env(safe-area-inset-bottom, 0px)
+        - max(env(safe-area-inset-bottom, 0px), 24px)
       );
     }
     .editor-header { padding: 0.5rem 0.6rem; }
@@ -1270,6 +1270,8 @@
     .editor-content > .title-input,
     .editor-content > .edited-line,
     .editor-content > .tags-row { padding-left: 0.8rem; padding-right: 0.8rem; }
+    /* Clear of the footer's top border rather than touching it. */
+    .editor-content > .tags-row { padding-bottom: 0.4rem; }
     /* Fills the rest of the screen instead of sitting in a short box with dead
        space beneath it. */
     .editor-body { min-height: 0; }

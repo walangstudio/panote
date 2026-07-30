@@ -1046,6 +1046,23 @@
     padding: 0.25rem; box-shadow: 0 8px 24px var(--shadow-color-hover);
     min-width: 140px;
   }
+  /* Anchored under the card, this opened downward - so a card low in the list
+     pushed the menu off the bottom of the screen and not even the first item was
+     reachable. Note menus are the taller ones (pin, view, move, delete), which is
+     why folder menus looked fine. On touch it becomes a sheet at the bottom
+     instead: nothing to clip it, and the rows get a real tap target. */
+  @media (hover: none) {
+    .card-menu-backdrop { z-index: 309; background: var(--backdrop); }
+    .card-popover {
+      position: fixed; left: 0; right: 0; bottom: 0; top: auto;
+      z-index: 310; min-width: 0;
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      padding: 0.5rem 0.5rem calc(0.5rem + max(env(safe-area-inset-bottom, 0px), 24px));
+      max-height: 70vh; overflow-y: auto;
+    }
+    .popover-item { min-height: 48px; font-size: 0.95rem; padding: 0.75rem 1rem; }
+  }
+
   .popover-item {
     width: 100%; display: flex; align-items: center; gap: 0.5rem;
     padding: 0.5rem 0.75rem; border: none; background: none;

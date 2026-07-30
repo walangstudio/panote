@@ -98,7 +98,12 @@
          real inset where one is reported (iOS notches) and falls back to a floor
          where it is not. Touch only: a desktop window has no status bar to clear. */
       @media (hover: none) {
-        body { padding-top: max(env(safe-area-inset-top, 0px), 28px); }
+        body {
+          padding-top: max(env(safe-area-inset-top, 0px), 28px);
+          /* Same story at the bottom: reported as 0, so the footer sat under the
+             gesture bar and squeezed the tag row against it. */
+          padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+        }
       }
       button { font-family: inherit; }
       a { color: var(--accent); }
