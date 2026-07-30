@@ -1239,7 +1239,17 @@
 
   @media (max-width: 640px) {
     .editor-header { padding: 0.5rem 0.6rem; }
-    .editor-content { padding: 0.5rem 0.8rem 0.5rem; }
+    /* No horizontal padding on the column: the writing surface runs to both
+       edges, the way it does when the desktop pane is wide. The text inside is
+       inset by the children below, so it never touches the screen edge. */
+    .editor-content { padding: 0.5rem 0 0; }
     .title-input { font-size: 1.3rem; }
+
+    .editor-content > .title-input,
+    .editor-content > .edited-line,
+    .editor-content > .tags-row { padding-left: 0.8rem; padding-right: 0.8rem; }
+    /* Fills the rest of the screen instead of sitting in a short box with dead
+       space beneath it. */
+    .editor-body { min-height: 0; }
   }
 </style>

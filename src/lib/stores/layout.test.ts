@@ -24,6 +24,13 @@ function installMatchMedia() {
   }));
 }
 
+// The store reads matchMedia once at module scope, so testing the initial value
+// needs a genuinely fresh module — which means resetModules plus a dynamic import
+// per test. That recompile can pass the 5s default while the whole suite is
+// running in parallel, which made this file fail intermittently and only ever
+// under load. The work is slow, not broken, so it gets longer to do it.
+vi.setConfig({ testTimeout: 20_000 });
+
 async function load() {
   vi.resetModules();
   return (await import("./layout")).isDesktop;

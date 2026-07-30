@@ -251,6 +251,9 @@
   .fmt-btn .material-symbols-outlined { font-size: 19px; }
 
   .dropdown-wrap { position: relative; }
+  /* The bar is the fallback containing block for popovers on a narrow screen —
+     see the media query at the end. */
+  .format-bar { position: relative; }
   .dropdown-backdrop { position: fixed; inset: 0; z-index: 19; }
   .fmt-dropdown, .emoji-grid, .color-picker {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
@@ -280,6 +283,20 @@
     border: 2px solid transparent; transition: transform 0.12s ease, border-color 0.12s ease;
   }
   .color-swatch:hover { border-color: var(--text); transform: scale(1.15); }
+
+  /* A popover is anchored to its own toolbar button, so one near the right edge
+     opened partly off screen — the colour row and the 220px emoji grid both did.
+     Narrow screens anchor to the bar instead and span it, which cannot overflow
+     whichever button was pressed. */
+  @media (max-width: 640px) {
+    .dropdown-wrap { position: static; }
+    .fmt-dropdown, .emoji-grid, .color-picker {
+      left: 0.4rem; right: 0.4rem; width: auto; min-width: 0;
+      max-height: 50vh; overflow-y: auto;
+    }
+    .emoji-grid { grid-template-columns: repeat(8, 1fr); }
+    .color-picker { flex-wrap: wrap; row-gap: 8px; }
+  }
   .color-clear {
     width: 22px; height: 22px; border: none; background: none; cursor: pointer;
     color: var(--muted); display: flex; align-items: center; justify-content: center;
