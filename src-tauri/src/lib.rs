@@ -1,5 +1,6 @@
 mod crypto;
 mod db;
+mod folders;
 mod notes;
 mod state;
 mod transfer;

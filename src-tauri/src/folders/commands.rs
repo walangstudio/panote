@@ -1,0 +1,274 @@
+//! Folder commands. Names are encrypted with the device key, AAD-bound to the
+//! folder id, framed exactly like tags (`notes::commands::encrypt_tags`).
+
+use super::{queries, MAX_DEPTH};
+use crate::crypto::note::{decrypt_with_vault, encrypt_with_vault};
+use crate::state::{now_secs, AppState};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::Serialize;
+use sqlx::SqlitePool;
+use tauri::State;
+use uuid::Uuid;
+
+pub const NAME_EMPTY: &str = "FOLDER_NAME_EMPTY";
+pub const CYCLE: &str = "FOLDER_CYCLE";
+pub const TOO_DEEP: &str = "FOLDER_TOO_DEEP";
+
+const MAX_NAME_LEN: usize = 200;
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct FolderJson {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub note_count: i64,
+}
+
+fn encrypt_name(key: &[u8; 32], id: &str, name: &str) -> Result<String, String> {
+    let (nonce, ct) =
+        encrypt_with_vault(key, name.as_bytes(), id.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::with_capacity(nonce.len() + ct.len());
+    raw.extend_from_slice(&nonce);
+    raw.extend_from_slice(&ct);
+    Ok(STANDARD.encode(raw))
+}
+
+fn decrypt_name(key: &[u8; 32], id: &str, stored: &str) -> anyhow::Result<String> {
+    let raw = STANDARD.decode(stored)?;
+    if raw.len() <= 12 {
+        anyhow::bail!("folder name ciphertext too short to be a frame");
+    }
+    let (nonce, ct) = raw.split_at(12);
+    let bytes = decrypt_with_vault(key, nonce, ct, id.as_bytes())?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+/// Trim, reject empty, and cap length so a pasted file can't become a folder name.
+fn clean_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(NAME_EMPTY.into());
+    }
+    Ok(trimmed.chars().take(MAX_NAME_LEN).collect())
+}
+
+/// Root-to-folder chain, nearest ancestor last. Bounded by MAX_DEPTH so a cycle
+/// that somehow reached the database still terminates.
+async fn ancestors(pool: &SqlitePool, id: &str) -> anyhow::Result<Vec<String>> {
+    let mut chain = Vec::new();
+    let mut cursor = Some(id.to_string());
+    while let Some(current) = cursor {
+        if chain.len() > MAX_DEPTH {
+            break;
+        }
+        let Some(row) = queries::get(pool, &current).await? else { break };
+        chain.push(row.id);
+        cursor = row.parent_id;
+    }
+    Ok(chain)
+}
+
+/// How deep the subtree under `id` runs, counting `id` itself as 1.
+async fn subtree_height(pool: &SqlitePool, id: &str) -> anyhow::Result<usize> {
+    let all = queries::list(pool).await?;
+    fn walk(all: &[queries::FolderRow], id: &str, depth: usize) -> usize {
+        if depth > MAX_DEPTH {
+            return depth;
+        }
+        all.iter()
+            .filter(|f| f.parent_id.as_deref() == Some(id))
+            .map(|c| walk(all, &c.id, depth + 1))
+            .max()
+            .unwrap_or(depth)
+    }
+    Ok(walk(&all, id, 1))
+}
+
+async fn depth_of(pool: &SqlitePool, id: &str) -> anyhow::Result<usize> {
+    Ok(ancestors(pool, id).await?.len())
+}
+
+pub(crate) async fn create_impl(
+    state: &AppState,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<String, String> {
+    let name = clean_name(name)?;
+    if let Some(parent) = parent_id {
+        if queries::get(&state.db, parent).await.map_err(|e| e.to_string())?.is_none() {
+            return Err("parent folder not found".into());
+        }
+        let depth = depth_of(&state.db, parent).await.map_err(|e| e.to_string())?;
+        if depth + 1 > MAX_DEPTH {
+            return Err(TOO_DEEP.into());
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    let name_ct = encrypt_name(&state.device_key, &id, &name)?;
+    queries::insert(&state.db, &id, parent_id, &name_ct, now_secs())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+pub(crate) async fn rename_impl(
+    state: &AppState,
+    id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let name = clean_name(name)?;
+    if queries::get(&state.db, id).await.map_err(|e| e.to_string())?.is_none() {
+        return Err("folder not found".into());
+    }
+    let name_ct = encrypt_name(&state.device_key, id, &name)?;
+    queries::rename(&state.db, id, &name_ct, now_secs())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn move_impl(
+    state: &AppState,
+    id: &str,
+    new_parent: Option<&str>,
+) -> Result<(), String> {
+    if queries::get(&state.db, id).await.map_err(|e| e.to_string())?.is_none() {
+        return Err("folder not found".into());
+    }
+    if let Some(parent) = new_parent {
+        if parent == id {
+            return Err(CYCLE.into());
+        }
+        if queries::get(&state.db, parent).await.map_err(|e| e.to_string())?.is_none() {
+            return Err("parent folder not found".into());
+        }
+        // Moving a folder under its own descendant would detach the subtree from
+        // the root and make the tree walk loop forever.
+        let chain = ancestors(&state.db, parent).await.map_err(|e| e.to_string())?;
+        if chain.iter().any(|a| a == id) {
+            return Err(CYCLE.into());
+        }
+        let parent_depth = chain.len();
+        let height = subtree_height(&state.db, id).await.map_err(|e| e.to_string())?;
+        if parent_depth + height > MAX_DEPTH {
+            return Err(TOO_DEEP.into());
+        }
+    }
+    queries::set_parent(&state.db, id, new_parent, now_secs())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, String> {
+    let rows = queries::list(&state.db).await.map_err(|e| e.to_string())?;
+    let counts = queries::note_counts(&state.db).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            // A name that will not decrypt must not hide the whole tree; show
+            // the folder so it can still be renamed or deleted.
+            let name = decrypt_name(&state.device_key, &r.id, &r.name_ct)
+                .unwrap_or_else(|_| "(unreadable)".into());
+            let note_count = counts
+                .iter()
+                .find(|(fid, _)| *fid == r.id)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            FolderJson { id: r.id, parent_id: r.parent_id, name, note_count }
+        })
+        .collect())
+}
+
+/// Root-to-leaf names, for carrying a note's folder across a transfer. A name
+/// that will not decrypt is skipped rather than failing the send.
+pub(crate) async fn path_of(state: &AppState, folder_id: &str) -> Vec<String> {
+    let Ok(chain) = ancestors(&state.db, folder_id).await else { return Vec::new() };
+    let mut names = Vec::with_capacity(chain.len());
+    // `ancestors` returns nearest-first; a path reads from the root.
+    for id in chain.iter().rev() {
+        if let Ok(Some(row)) = queries::get(&state.db, id).await {
+            if let Ok(name) = decrypt_name(&state.device_key, id, &row.name_ct) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// Resolve a root-to-leaf path on the receiving device, creating whatever is
+/// missing, and return the leaf's id. Matching is by name among siblings, so a
+/// second send into the same folder files alongside the first instead of making
+/// a duplicate.
+pub(crate) async fn ensure_path(
+    state: &AppState,
+    path: &[String],
+) -> Result<Option<String>, String> {
+    let mut parent: Option<String> = None;
+    for raw in path.iter().take(MAX_DEPTH) {
+        let Ok(name) = clean_name(raw) else { continue };
+        let existing = list_impl(state)
+            .await?
+            .into_iter()
+            .find(|f| f.parent_id == parent && f.name == name)
+            .map(|f| f.id);
+        parent = Some(match existing {
+            Some(id) => id,
+            None => create_impl(state, &name, parent.as_deref()).await?,
+        });
+    }
+    Ok(parent)
+}
+
+// ---- Tauri commands ----
+
+#[tauri::command]
+pub async fn folder_create(
+    name: String,
+    parent_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    create_impl(&state, &name, parent_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn folder_rename(
+    id: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    rename_impl(&state, &id, &name).await
+}
+
+#[tauri::command]
+pub async fn folder_move(
+    id: String,
+    parent_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    move_impl(&state, &id, parent_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn folder_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    queries::delete(&state.db, &id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn folder_list(state: State<'_, AppState>) -> Result<Vec<FolderJson>, String> {
+    list_impl(&state).await
+}
+
+#[tauri::command]
+pub async fn note_set_folder(
+    note_id: String,
+    folder_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Some(f) = folder_id.as_deref() {
+        if queries::get(&state.db, f).await.map_err(|e| e.to_string())?.is_none() {
+            return Err("folder not found".into());
+        }
+    }
+    queries::set_note_folder(&state.db, &note_id, folder_id.as_deref(), now_secs())
+        .await
+        .map_err(|e| e.to_string())
+}

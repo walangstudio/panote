@@ -143,6 +143,71 @@ describe("search", () => {
   });
 });
 
+// Card height used to follow content, because the preview line and the tag row
+// were only rendered when they had something in them - so a bare note sat
+// noticeably shorter than one with both. Reserving the slots is what makes every
+// card the same height.
+//
+// The height itself cannot be asserted here: vitest runs with `css: false`, so
+// scoped styles are never applied and any getComputedStyle check would pass
+// vacuously. What is asserted is the structural invariant the CSS relies on.
+describe("uniform card shape", () => {
+  const slots = (t: HTMLElement) =>
+    [...t.querySelectorAll(".note-card")].map(c => ({
+      preview: !!c.querySelector(".preview-text"),
+      tags: !!c.querySelector(".tags"),
+    }));
+
+  it("reserves both slots on a note with neither a preview nor tags", async () => {
+    const t = await setup([note({ id: "bare", title: "Bare" })]);
+    expect(slots(t)).toEqual([{ preview: true, tags: true }]);
+  });
+
+  it("reserves them identically whatever the note carries", async () => {
+    const t = await setup([
+      note({ id: "a", title: "Bare" }),
+      note({ id: "b", title: "Preview only", preview_text: "some text" }),
+      note({ id: "c", title: "Tags only", tags: ["x", "y"] }),
+      note({ id: "d", title: "Both", preview_text: "some text", tags: ["x"] }),
+      note({ id: "e", title: "Locked", has_note_password: true }),
+    ]);
+    expect(slots(t)).toEqual(Array(5).fill({ preview: true, tags: true }));
+  });
+
+  it("still shows the preview text when there is some", async () => {
+    const t = await setup([note({ id: "a", preview_text: "milk and eggs" })]);
+    expect(t.querySelector(".preview-text")!.textContent!.trim()).toBe("milk and eggs");
+  });
+
+  it("leaves the reserved preview empty rather than printing something", async () => {
+    const t = await setup([note({ id: "a", title: "Bare" })]);
+    expect(t.querySelector(".preview-text")!.textContent!.trim()).toBe("");
+  });
+
+  it("says a locked note is locked instead of leaking a preview", async () => {
+    const t = await setup([
+      note({ id: "a", has_note_password: true, preview_text: "SHOULD NOT SHOW" }),
+    ]);
+    const text = t.querySelector(".preview-text")!.textContent!;
+    expect(text).toContain("Locked note");
+    expect(text).not.toContain("SHOULD NOT SHOW");
+  });
+
+  it("honours show_preview being off", async () => {
+    const t = await setup([
+      note({ id: "a", show_preview: false, preview_text: "hidden please" }),
+    ]);
+    expect(t.querySelector(".preview-text")!.textContent!.trim()).toBe("");
+  });
+
+  // The tag row is clipped to one line in CSS; capping at 3 keeps the markup
+  // honest about that rather than relying on overflow alone.
+  it("never renders more than three tags", async () => {
+    const t = await setup([note({ id: "a", tags: ["a", "b", "c", "d", "e"] })]);
+    expect(t.querySelectorAll(".tag")).toHaveLength(3);
+  });
+});
+
 describe("relative dates", () => {
   // toLocaleDateString builds a fresh Intl.DateTimeFormat every call. On a list
   // of old notes that is one throwaway formatter per card, per refresh.

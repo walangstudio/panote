@@ -381,18 +381,19 @@
                 <strong>{note.title || "Untitled"}</strong>
                 {#if note.has_note_password}<span class="lock"><span class="material-symbols-outlined" style="font-size: 14px;">lock</span></span>{/if}
               </div>
-              {#if note.show_preview}
-                {#if note.has_note_password}
-                  <p class="preview-text">Locked note</p>
-                {:else if note.preview_text}
-                  <p class="preview-text">{note.preview_text}</p>
+              <!-- Both slots always render, empty when there is nothing to
+                   show. Conditional slots made card height follow content, so a
+                   bare note sat noticeably shorter than one with a preview and
+                   tags. Reserving them keeps every card the same height without
+                   hard-coding one. -->
+              <p class="preview-text">
+                {#if note.show_preview}
+                  {#if note.has_note_password}Locked note{:else if note.preview_text}{note.preview_text}{/if}
                 {/if}
-              {/if}
-              {#if note.tags.length}
-                <div class="tags">
-                  {#each note.tags.slice(0, 3) as tag}<span class="tag">#{tag}</span>{/each}
-                </div>
-              {/if}
+              </p>
+              <div class="tags">
+                {#each note.tags.slice(0, 3) as tag}<span class="tag">#{tag}</span>{/each}
+              </div>
             </div>
             <div class="trailing">
               <span class="date">{formatRelative(note.updated_at)}</span>
@@ -683,12 +684,20 @@
     font-weight: 700; font-size: 0.95rem;
   }
   .lock { color: var(--muted); display: flex; flex-shrink: 0; }
+  /* Always occupies two clamped lines, so a one-line preview, a two-line one and
+     an empty one are the same height. Height comes from the type, not a magic
+     number, so it survives a font-size change. */
   .preview-text {
     margin: 3px 0 0; font-size: 0.78rem; color: var(--muted); line-height: 1.4;
     display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden;
+    min-height: calc(2 * 1.4 * 0.78rem);
   }
-  .tags { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  /* One row, never two: a fourth tag is clipped rather than growing the card. */
+  .tags {
+    display: flex; gap: 6px; margin-top: 8px; flex-wrap: nowrap;
+    overflow: hidden; min-height: 1.15rem;
+  }
   .tag {
     font-size: 0.68rem; padding: 2px 10px; font-weight: 600;
     background: var(--accent-muted); border-radius: var(--radius-full); color: var(--accent);
@@ -880,20 +889,23 @@
     border: none; box-shadow: none;
     padding: 0 0.25rem;
   }
-  .page.desktop .note-list { gap: 0; }
+  /* Desktop stays a little denser than touch, but it is still a list of cards:
+     `gap: 0` with hairline separators made the same list look unlike the phone.
+     Cards get real spacing, so the separators are gone with it. */
+  .page.desktop .note-list { gap: 0.4rem; }
   .page.desktop .note-card {
-    border-radius: var(--radius-sm);
-    box-shadow: none;
-    padding: 0.6rem 0.55rem;
-    gap: 0.6rem;
+    border-radius: var(--radius);
+    box-shadow: 0 2px 8px var(--shadow-color);
+    padding: 0.7rem;
+    gap: 0.7rem;
   }
-  .page.desktop .note-card:hover { transform: none; box-shadow: none; background-color: var(--hover); }
-  .page.desktop li + li .note-card::after {
-    content: ""; position: absolute; left: 0.55rem; right: 0.55rem; top: -1px;
-    height: 1px; background: var(--border);
+  /* No lift on hover: rows nudging themselves upward reads as jitter in a
+     dense list you are scanning with a mouse. */
+  .page.desktop .note-card:hover {
+    transform: none;
+    box-shadow: 0 4px 14px var(--shadow-color-hover);
+    background-color: var(--hover);
   }
-  .page.desktop .note-card:hover::after,
-  .page.desktop .note-card.active::after { display: none; }
   .page.desktop .note-card.active {
     background: var(--accent-muted); border-color: var(--accent-muted);
   }
