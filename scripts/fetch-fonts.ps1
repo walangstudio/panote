@@ -18,20 +18,24 @@ $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 $Icons = @(
   "add", "arrow_back", "arrow_downward", "arrow_forward", "arrow_upward",
   "assignment", "check", "check_box", "checklist", "checklist_rtl",
-  "chevron_right", "close", "code", "dark_mode", "data_object", "delete",
+  "chevron_right", "close", "code", "content_copy", "create_new_folder",
+  "dark_mode", "data_object", "delete",
   "description", "download", "edit", "edit_note", "emoji_emotions",
-  "file_download", "file_upload", "format_bold", "format_color_reset",
+  "expand_more", "file_download", "file_upload", "folder",
+  "format_bold", "format_color_reset",
   "format_color_text", "format_italic", "format_list_bulleted",
   "format_list_numbered", "format_quote", "format_strikethrough",
-  "horizontal_rule", "image", "info", "key", "keyboard_arrow_down",
+  "history", "horizontal_rule", "image", "inbox", "info", "key",
+  "keyboard_arrow_down",
   "keyboard_arrow_up", "lan", "light_mode", "link", "lock", "lock_open",
-  "menu", "military_tech", "more_vert", "note_add", "open_in_new", "palette",
+  "menu", "military_tech", "more_horiz", "more_vert", "note_add",
+  "open_in_new", "palette",
   "password", "push_pin", "qr_code_2", "qr_code_scanner",
   "radio_button_checked", "radio_button_unchecked", "refresh", "search",
   "search_off", "send", "settings", "smartphone", "sticky_note_2",
   "swap_horiz", "swap_vert", "table_chart", "table_rows", "title", "trophy",
-  "upload", "view_column", "view_kanban", "visibility", "warning",
-  "wifi_tethering"
+  "upload", "view_column", "view_kanban", "visibility", "visibility_off",
+  "warning", "wifi_tethering"
 ) -join ","
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

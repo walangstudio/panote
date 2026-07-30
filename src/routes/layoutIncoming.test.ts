@@ -41,6 +41,12 @@ vi.mock("$lib/stores/notes", () => ({
   totalNotes: writable(0),
 }));
 
+vi.mock("$lib/stores/folders", () => ({
+  refreshFolders: vi.fn(async () => {}),
+  folders: writable([]),
+  buildTree: () => [],
+}));
+
 vi.mock("$lib/stores/theme", () => ({ initTheme: vi.fn(() => () => {}), theme: writable("candy-light") }));
 vi.mock("$lib/stores/sidebar", () => ({ sidebarOpen: writable(false) }));
 vi.mock("$lib/stores/layout", () => ({ isDesktop: writable(false) }));
@@ -56,6 +62,7 @@ vi.mock("$lib/components/NewNoteModal.svelte", () => ({ default: () => ({}) }));
 
 import { pendingTransfersList, noteReceiveAccept } from "$lib/tauri";
 import { refreshNotes } from "$lib/stores/notes";
+import { refreshFolders } from "$lib/stores/folders";
 import Layout from "./+layout.svelte";
 
 const flush = async () => { await Promise.resolve(); await new Promise(r => setTimeout(r, 0)); };
@@ -136,5 +143,24 @@ describe("incoming single-note transfers", () => {
 
     expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
     expect(refreshNotes).toHaveBeenCalled();
+  });
+
+  // An arriving note can bring a folder this device did not have. The note
+  // showed up but the sidebar still read "No folders yet" until relaunch -
+  // caught on a real device, not by the protocol tests.
+  it("refreshes the folder tree too, since a note can arrive with one", async () => {
+    vi.mocked(pendingTransfersList).mockResolvedValue([pending("t1")] as never);
+    const target = await setup();
+
+    const input = target.querySelector<HTMLInputElement>(".code-input")!;
+    input.value = "K4X7P2";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    vi.mocked(refreshFolders).mockClear();
+    target.querySelector<HTMLButtonElement>(".btn-accept")!.click();
+    await settle();
+
+    expect(refreshFolders).toHaveBeenCalled();
   });
 });

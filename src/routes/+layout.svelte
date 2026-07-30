@@ -60,6 +60,10 @@ import { refreshFolders } from "$lib/stores/folders";
   async function incomingChanged() {
     await pollOffers();
     await refreshNotes({ withBackgrounds: true });
+    // An arriving note can bring a folder with it, creating one this device did
+    // not have. Without this the note appears but the sidebar still says "No
+    // folders yet" until the next launch.
+    await refreshFolders();
   }
 
   /// Both queues, together — an arrival the user has to act on is an arrival
@@ -85,6 +89,7 @@ import { refreshFolders } from "$lib/stores/folders";
     unlistenReceived = await listen("notes-received", () => {
       pollOffers();
       refreshNotes({ withBackgrounds: true });
+      refreshFolders();
     });
     try {
       receiving = await checkReceiving();

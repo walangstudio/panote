@@ -746,6 +746,12 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
 
     let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags)?;
 
+    // Empty for a note that is not in a folder, which is the ordinary case.
+    let folder_path = match row.folder_id.as_deref() {
+        Some(fid) => crate::folders::commands::path_of(state, fid).await,
+        None => Vec::new(),
+    };
+
     let blob = TransferBlob {
         id: row.id.clone(),
         kind: row.kind,
@@ -756,6 +762,7 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         updated_at: row.updated_at,
         origin_device_id: row.origin_device_id,
         origin_note_id: row.origin_note_id,
+        folder_path,
     };
     blob.encode()
 }

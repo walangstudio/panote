@@ -37,6 +37,7 @@ async fn seed(state: &AppState, title: &str, body: &str, tags: &[&str]) -> Strin
         updated_at: 1_700_000_001,
         origin_device_id: String::new(),
         origin_note_id: String::new(),
+        folder_path: Vec::new(),
     };
     crate::transfer::commands::import_blob(state, &state.device_key, blob)
         .await
@@ -168,17 +169,34 @@ async fn send_to_a_real_device() {
     let (host, port) = crate::transfer::commands::split_host_port(&peer).unwrap();
 
     let alice = device("harness").await;
-    let note_id = seed(&alice, "From Windows", "sent over a real network", &["cross-device"]).await;
 
     let probed = super::lan::hello_probe(&alice, &host, port, "WindowsHarness")
         .await
         .expect("TLS handshake with the real device should succeed");
     println!("handshake ok: {} at {}:{}", probed.name, probed.address, probed.port);
 
-    send_note(&alice, &note_id, &host, port, CODE, "WindowsHarness")
+    // Both cases in one run: a note in no folder must keep working exactly as
+    // before, and a nested one should rebuild its path on the far device.
+    let loose = seed(&alice, "No folder", "should land at the root", &["cross-device"]).await;
+    send_note(&alice, &loose, &host, port, CODE, "WindowsHarness")
         .await
-        .expect("the real device should accept the transfer");
-    println!("note sent; enter {CODE} on the device to open it");
+        .expect("a note with no folder should send");
+    println!("sent 'No folder' (root)");
+
+    let work = crate::folders::commands::create_impl(&alice, "Work", None).await.unwrap();
+    let clients = crate::folders::commands::create_impl(&alice, "Clients", Some(&work))
+        .await
+        .unwrap();
+    let filed = seed(&alice, "In a folder", "should land in Work/Clients", &["cross-device"]).await;
+    crate::folders::queries::set_note_folder(&alice.db, &filed, Some(&clients), 1)
+        .await
+        .unwrap();
+    send_note(&alice, &filed, &host, port, CODE, "WindowsHarness")
+        .await
+        .expect("a note in a folder should send");
+    println!("sent 'In a folder' (Work/Clients)");
+
+    println!("enter {CODE} on the device twice to open both");
 }
 
 // ---- Single-note send: passphrase-wrapped, parked until the recipient opens it ----
@@ -326,6 +344,160 @@ async fn devices_can_send_both_ways() {
     assert!(on_alice.contains(&"ToAlice".to_string()), "alice should hold bob's note");
 }
 
+// ---- Folders across the wire ----
+//
+// A note not in a folder is the ordinary case and must keep working exactly as
+// before; a note in one should arrive filed the same way on the far device.
+
+async fn folder(state: &AppState, name: &str, parent: Option<&str>) -> String {
+    crate::folders::commands::create_impl(state, name, parent).await.unwrap()
+}
+
+async fn folder_of(state: &AppState, note_id: &str) -> Option<String> {
+    crate::folders::queries::note_folder(&state.db, note_id).await.unwrap()
+}
+
+async fn folder_named(state: &AppState, name: &str) -> Option<String> {
+    crate::folders::commands::list_impl(state)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == name)
+        .map(|f| f.id)
+}
+
+#[tokio::test]
+async fn a_note_with_no_folder_still_transfers_and_lands_at_the_root() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Loose", "not in any folder", &[]).await;
+    assert_eq!(folder_of(&alice, &note_id).await, None);
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    assert_eq!(open(&bob, &new_id).await.1, "not in any folder");
+    assert_eq!(folder_of(&bob, &new_id).await, None, "it should sit at the root");
+    assert!(
+        crate::folders::commands::list_impl(&bob).await.unwrap().is_empty(),
+        "no folder should be invented for a note that had none",
+    );
+}
+
+#[tokio::test]
+async fn a_note_in_a_folder_arrives_in_that_folder() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let f = folder(&alice, "Work", None).await;
+    let note_id = seed(&alice, "Report", "quarterly numbers", &[]).await;
+    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&f), 1).await.unwrap();
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let landed = folder_named(&bob, "Work").await.expect("Work should have been created");
+    assert_eq!(folder_of(&bob, &new_id).await.as_deref(), Some(landed.as_str()));
+}
+
+#[tokio::test]
+async fn nesting_is_recreated_on_the_receiving_device() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let work = folder(&alice, "Work", None).await;
+    let clients = folder(&alice, "Clients", Some(&work)).await;
+    let note_id = seed(&alice, "Acme", "contract", &[]).await;
+    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&clients), 1).await.unwrap();
+
+    let port = listen(bob.clone()).await;
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let listed = crate::folders::commands::list_impl(&bob).await.unwrap();
+    let w = listed.iter().find(|f| f.name == "Work").expect("Work missing");
+    let c = listed.iter().find(|f| f.name == "Clients").expect("Clients missing");
+    assert_eq!(c.parent_id.as_deref(), Some(w.id.as_str()), "Clients must sit under Work");
+    assert_eq!(w.parent_id, None);
+    assert_eq!(folder_of(&bob, &new_id).await.as_deref(), Some(c.id.as_str()));
+}
+
+/// Two notes from the same folder must share one folder on arrival, not make a
+/// second copy of it.
+#[tokio::test]
+async fn a_second_note_files_into_the_folder_already_there() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let f = folder(&alice, "Work", None).await;
+    let port = listen(bob.clone()).await;
+
+    for title in ["One", "Two"] {
+        let id = seed(&alice, title, "body", &[]).await;
+        crate::folders::queries::set_note_folder(&alice.db, &id, Some(&f), 1).await.unwrap();
+        send_note(&alice, &id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+        await_pending(&bob).await;
+        accept_pending(&bob, CODE).await.unwrap();
+    }
+
+    let listed = crate::folders::commands::list_impl(&bob).await.unwrap();
+    assert_eq!(listed.len(), 1, "the folder must not be duplicated");
+    assert_eq!(listed[0].note_count, 2);
+}
+
+/// An older sender emits no folder_path at all. That must import, not fail.
+#[tokio::test]
+async fn a_blob_from_an_older_sender_without_a_folder_path_still_imports() {
+    let bob = device("bob").await;
+    let legacy = serde_json::json!({
+        "id": "old-1",
+        "kind": "document",
+        "title": "From an old build",
+        "content": { "body": "still works" },
+        "tags": ["legacy"],
+        "created_at": 1_700_000_000,
+        "updated_at": 1_700_000_001,
+    });
+    let blob = TransferBlob::decode(&serde_json::to_vec(&legacy).unwrap())
+        .expect("a blob with no folder_path must still decode");
+    assert!(blob.folder_path.is_empty());
+
+    let id = crate::transfer::commands::import_blob(&bob, &bob.device_key, blob)
+        .await
+        .unwrap();
+    assert_eq!(open(&bob, &id).await.1, "still works");
+    assert_eq!(folder_of(&bob, &id).await, None);
+}
+
+/// Re-sending a note the recipient has already filed somewhere of their own must
+/// not drag it back to the sender's folder.
+#[tokio::test]
+async fn a_resend_does_not_move_a_note_the_recipient_refiled() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let note_id = seed(&alice, "Shared", "body", &[]).await;
+    let port = listen(bob.clone()).await;
+
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    let new_id = accept_pending(&bob, CODE).await.unwrap();
+
+    let mine = folder(&bob, "Mine", None).await;
+    crate::folders::queries::set_note_folder(&bob.db, &new_id, Some(&mine), 1).await.unwrap();
+
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    await_pending(&bob).await;
+    accept_pending(&bob, CODE).await.unwrap();
+
+    assert_eq!(
+        folder_of(&bob, &new_id).await.as_deref(),
+        Some(mine.as_str()),
+        "the recipient's filing wins on a re-send",
+    );
+}
+
 // ---- Password-protected notes ----
 //
 // The password layer is peeled off before the blob is built, so protection does
@@ -455,6 +627,7 @@ async fn a_credential_table_keeps_its_masked_columns() {
         updated_at: 1_700_000_001,
         origin_device_id: String::new(),
         origin_note_id: String::new(),
+        folder_path: Vec::new(),
     };
     let note_id = crate::transfer::commands::import_blob(&alice, &alice.device_key, blob)
         .await
@@ -505,6 +678,7 @@ async fn a_protected_credential_table_survives_the_whole_round_trip() {
         updated_at: 1_700_000_001,
         origin_device_id: String::new(),
         origin_note_id: String::new(),
+        folder_path: Vec::new(),
     };
     let note_id = crate::transfer::commands::import_blob(&alice, &alice.device_key, blob)
         .await

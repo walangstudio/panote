@@ -20,6 +20,14 @@ pub struct TransferBlob {
     /// Sender's local id for this note. Pair with origin_device_id for dedup.
     #[serde(default)]
     pub origin_note_id: String,
+    /// Folder path from the root, e.g. ["Work", "Clients"]. Empty means the note
+    /// is not in a folder — the ordinary case, and what every older sender emits.
+    ///
+    /// A path rather than an id: folder ids are device-local, so only the names
+    /// mean anything on the far side. Plaintext inside the already-encrypted blob,
+    /// like the title and tags.
+    #[serde(default)]
+    pub folder_path: Vec<String>,
 }
 
 /// Max allowed JSON nesting depth in a decoded blob (N4) — rejects deeply
@@ -88,6 +96,7 @@ mod tests {
             updated_at: 1700000001,
             origin_device_id: "device-a".into(),
             origin_note_id: "test-uuid-1234".into(),
+            folder_path: vec!["Work".into(), "Clients".into()],
         }
     }
 

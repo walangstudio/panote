@@ -513,6 +513,8 @@ async fn insert_as_blob(
     // transfer blob doesn't carry. For updates we intentionally preserve the
     // existing row's extras to match transfer semantics.
     let blob = TransferBlob {
+        // A backup file carries no folder; import lands notes at the root.
+        folder_path: Vec::new(),
         id: entry.id.clone(),
         kind: entry.kind.clone(),
         title: entry.title.clone(),

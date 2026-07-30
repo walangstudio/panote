@@ -205,6 +205,8 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
     let tags = crate::notes::commands::decrypt_tags(&vault_key, &row.id, &row.tags)?;
 
     TransferBlob {
+        // The Bluetooth path does not carry folders; the note arrives at the root.
+        folder_path: Vec::new(),
         id: row.id.clone(),
         kind: row.kind,
         title,

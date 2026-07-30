@@ -1114,6 +1114,7 @@ mod tests {
             updated_at: 1,
             origin_device_id: String::new(),
             origin_note_id: String::new(),
+            folder_path: Vec::new(),
         };
         crate::transfer::commands::import_blob(state, &state.device_key, blob)
             .await
@@ -1135,6 +1136,7 @@ mod tests {
             updated_at: 1,
             origin_device_id: String::new(),
             origin_note_id: String::new(),
+            folder_path: Vec::new(),
         };
         crate::transfer::commands::import_blob(state, &state.device_key, blob)
             .await

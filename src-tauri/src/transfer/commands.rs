@@ -527,6 +527,9 @@ pub async fn import_blob_detailed(
 ) -> anyhow::Result<(String, ImportOutcome)> {
     let ts = now_secs();
 
+    // Taken before the blob is consumed building the row.
+    let folder_path = blob.folder_path.clone();
+
     let content_hint = infer_content_hint(&blob.kind, &blob.content);
 
     let has_origin = !blob.origin_device_id.is_empty() && !blob.origin_note_id.is_empty();
@@ -632,6 +635,23 @@ pub async fn import_blob_detailed(
     };
 
     queries::note_insert(&state.db, &row).await?;
+
+    // File it into the sender's folder, recreating the path if this device does
+    // not have it. An empty path means the note was not in a folder, which is
+    // the ordinary case and what every older sender emits.
+    if !folder_path.is_empty() {
+        match crate::folders::commands::ensure_path(state, &folder_path).await {
+            Ok(Some(folder_id)) => {
+                // A folder that cannot be created must not lose the note, so this
+                // is deliberately not fatal - the note simply lands at the root.
+                let _ = crate::folders::queries::set_note_folder(
+                    &state.db, &id, Some(&folder_id), ts,
+                ).await;
+            }
+            _ => eprintln!("[transfer] could not resolve folder path for an imported note"),
+        }
+    }
+
     Ok((id, ImportOutcome::Inserted))
 }
 
@@ -709,6 +729,7 @@ mod tests {
             updated_at: 1700000001,
             origin_device_id: "alice-device".into(),
             origin_note_id: "orig-id-from-sender".into(),
+            folder_path: Vec::new(),
         }
     }
 
