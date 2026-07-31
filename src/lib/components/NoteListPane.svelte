@@ -144,12 +144,16 @@
     { id: "document", icon: "edit_note", label: "Document" },
   ] as const;
 
-  // ---- Manual arrangement ----
+  // ---- Custom arrangement ----
   //
-  // Only offered while the Manual sort is active: dragging under a date sort
-  // would look like it worked and then be silently undone by the next refresh.
-  let reordering = $state(false);
-  const canReorder = $derived($sortPref.field === "manual");
+  // Live whenever Custom is the active sort - no mode to enter first. Under any
+  // other sort a drag would appear to work and then be undone by the next
+  // refresh, so the grips simply are not there.
+  const reordering = $derived($sortPref.field === "manual");
+
+  /// Set once a drag actually moves something. Rows stay clickable in Custom
+  /// view, so only a real drag may swallow the click that follows it.
+  let didDrag = $state(false);
 
   /// Local order while dragging, so rows follow the finger without a round trip.
   let dragIds = $state<string[] | null>(null);
@@ -158,6 +162,11 @@
 
   function startReorder(e: PointerEvent, kind: "note" | "folder", id: string, ids: string[]) {
     e.preventDefault();
+    e.stopPropagation();
+    // Keeps the events coming to this element even as the pointer leaves it,
+    // which a mouse drag across rows otherwise loses.
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    didDrag = false;
     dragKind = kind;
     dragId = id;
     dragIds = [...ids];
@@ -167,6 +176,7 @@
 
   function onReorderMove(e: PointerEvent) {
     if (!dragIds || !dragId) return;
+    didDrag = true;
     // Hit-test the row under the finger, the same approach the kanban board uses,
     // so this works with a mouse and a touch without separate code paths.
     let el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
@@ -193,6 +203,8 @@
     const kind = dragKind;
     dragIds = null; dragKind = null; dragId = null;
     if (!ids || !kind) return;
+    // Cleared after the click that ends the drag has had its chance to fire.
+    setTimeout(() => { didDrag = false; }, 0);
     try {
       if (kind === "note") await notesReorder(ids);
       else await foldersReorder(ids);
@@ -202,14 +214,18 @@
 
   /// Rows in the order to paint: the in-flight arrangement while dragging that
   /// kind, otherwise whatever the backend gave us.
-  function ordered<T extends { id: string }>(rows: T[], kind: "note" | "folder"): T[] {
-    if (!dragIds || dragKind !== kind) return rows;
+  ///
+  /// Derived rather than a function call in the template - a call did not track
+  /// `dragIds` as a dependency, so the list only reordered once the drag ended
+  /// and the rows never followed the pointer.
+  function arrange<T extends { id: string }>(rows: T[], ids: string[] | null): T[] {
+    if (!ids) return rows;
     const by = new Map(rows.map(r => [r.id, r]));
-    return dragIds.map(id => by.get(id)).filter((r): r is T => !!r);
+    return ids.map(id => by.get(id)).filter((r): r is T => !!r);
   }
 
   const sortOptions: { field: SortField; label: string }[] = [
-    { field: "manual", label: "Manual (drag to arrange)" },
+    { field: "manual", label: "Custom" },
     { field: "updated", label: "Date edited" },
     { field: "created", label: "Date created" },
     { field: "title", label: "Title" },
@@ -376,6 +392,9 @@
 
   const pinnedNotes = $derived(filtered.filter(n => n.pinned));
   const otherNotes = $derived(filtered.filter(n => !n.pinned));
+  const orderedNotes = $derived(arrange(otherNotes, dragKind === "note" ? dragIds : null));
+  const orderedFolders = $derived(arrange(childFolders, dragKind === "folder" ? dragIds : null));
+
 
   // Pick dark vs light ink for a note's custom background so text stays legible.
   function isLightColor(c: string): boolean {
@@ -512,20 +531,6 @@
         </div>
       {/if}
     </div>
-    <!-- Only while Manual is the active sort: a drag under a date sort would be
-         undone by the next refresh, which reads as the app losing the change. -->
-    {#if canReorder}
-      <button
-        class="select-btn"
-        class:active={reordering}
-        onclick={() => { reordering = !reordering; if (reordering) selecting = false; }}
-        aria-pressed={reordering}
-        aria-label={reordering ? "Done arranging" : "Arrange notes"}
-        title={reordering ? "Done arranging" : "Arrange notes"}
-      >
-        <span class="material-symbols-outlined" aria-hidden="true">{reordering ? "check" : "swap_vert"}</span>
-      </button>
-    {/if}
     <button class="select-btn" class:active={selecting} onclick={toggleSelect} aria-label={selecting ? "Cancel selection" : "Select notes"}>
       <span class="material-symbols-outlined">{selecting ? "check_box" : "checklist_rtl"}</span>
     </button>
@@ -563,7 +568,7 @@
             class:has-bg-image={bgOf(note.id)}
             style:background-color={note.bg_color ?? undefined}
             style:background-image={safeBgImageUrl(bgOf(note.id))}
-            onclick={() => { if (!reordering) goto(`/note/${note.id}`); }}
+            onclick={() => { if (!didDrag) goto(`/note/${note.id}`); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goto(`/note/${note.id}`); } }}
           >
             {#if reordering}
@@ -572,7 +577,7 @@
                 class="drag-grip"
                 aria-label={`Reorder ${note.title || "Untitled"}`}
                 onclick={(e) => e.stopPropagation()}
-                onpointerdown={(e) => startReorder(e, "note", note.id, ordered(otherNotes, "note").map(x => x.id))}
+                onpointerdown={(e) => startReorder(e, "note", note.id, orderedNotes.map(x => x.id))}
               >⠿</button>
             {/if}
             <span class="badge-wrap">
@@ -676,14 +681,14 @@
   <ul class="note-list">
     <!-- Folders first, as rows you open — the list is a level, not a filter. -->
     {#if !query}
-      {#each ordered(childFolders, "folder") as f (f.id)}
+      {#each orderedFolders as f (f.id)}
         <li>
           <div
             class="note-card folder-card"
             class:reordering
             data-row-id={f.id}
             role="button" tabindex="0"
-            onclick={() => { if (!reordering) listFolder.set(f.id); }}
+            onclick={() => { if (!didDrag) listFolder.set(f.id); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
           >
             {#if reordering}
@@ -692,7 +697,7 @@
                 class="drag-grip"
                 aria-label={`Reorder ${f.name}`}
                 onclick={(e) => e.stopPropagation()}
-                onpointerdown={(e) => startReorder(e, "folder", f.id, ordered(childFolders, "folder").map(x => x.id))}
+                onpointerdown={(e) => startReorder(e, "folder", f.id, orderedFolders.map(x => x.id))}
               >⠿</button>
             {/if}
             <span class="badge-wrap">

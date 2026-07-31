@@ -17,6 +17,8 @@ vi.mock("$lib/tauri", () => ({
   noteChangePassword: vi.fn(async () => {}),
   notesProtect: vi.fn(async () => {}),
   notesUnprotect: vi.fn(async () => {}),
+  folderCreate: vi.fn(), folderMove: vi.fn(), folderRename: vi.fn(), folderDelete: vi.fn(),
+  noteSetFolder: vi.fn(), notesReorder: vi.fn(async () => {}), foldersReorder: vi.fn(async () => {}),
 }));
 
 // The shared stub exports plain functions, so navigation needs a spy to assert on.
@@ -31,7 +33,7 @@ import { goto } from "$app/navigation";
 import { page } from "$app/state";
 (page as unknown as { params: Record<string, string> }).params = { id: "" };
 
-import { noteList, notesUnprotect } from "$lib/tauri";
+import { noteList, notesUnprotect, notesReorder } from "$lib/tauri";
 import { notes, bgImages, sortPref } from "$lib/stores/notes";
 import { resetListState, listFolder } from "$lib/stores/listState";
 import { folders } from "$lib/stores/folders";
@@ -346,84 +348,122 @@ describe("browsing folders like a file manager", () => {
 // under a date sort would appear to work and then be undone by the next refresh,
 // which reads as the app losing the change.
 describe("arranging by hand", () => {
-  const grips = (t: HTMLElement) => t.querySelectorAll(".drag-grip");
-  const arrangeBtn = (t: HTMLElement) =>
-    [...t.querySelectorAll<HTMLButtonElement>(".select-btn")]
-      .find(b => /arrang/i.test(b.getAttribute("aria-label") ?? ""));
+  const grips = (t: HTMLElement) => t.querySelectorAll<HTMLElement>(".drag-grip");
+  const rowIds = (t: HTMLElement) =>
+    [...t.querySelectorAll<HTMLElement>("[data-row-id]")].map(r => r.dataset.rowId);
 
   afterEach(() => { sortPref.set({ field: "updated", dir: "desc" }); });
 
-  it("offers no arrange control under a date sort", async () => {
+  const three = [
+    note({ id: "a", title: "Ay", sort_order: 0 }),
+    note({ id: "b", title: "Bee", sort_order: 1 }),
+    note({ id: "c", title: "Cee", sort_order: 2 }),
+  ];
+
+  /// One whole drag: pick a row up, move it over another, let go.
+  async function drag(t: HTMLElement, gripIndex: number, ontoRowIndex: number) {
+    const rows = [...t.querySelectorAll<HTMLElement>("[data-row-id]")];
+    grips(t)[gripIndex].dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }),
+    );
+    await flush();
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(rows[ontoRowIndex]);
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, clientY: 200 }));
+    await flush();
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 0, clientY: 200 }));
+    await flush();
+    await flush();
+  }
+
+  it("shows no grips under a date sort", async () => {
     sortPref.set({ field: "updated", dir: "desc" });
-    const t = await setup();
-    expect(arrangeBtn(t)).toBeUndefined();
-  });
-
-  it("offers it once the sort is Manual", async () => {
-    sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup();
-    expect(arrangeBtn(t)).toBeTruthy();
-  });
-
-  it("shows no grips until arrange mode is on", async () => {
-    sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup();
+    const t = await setup(three);
     expect(grips(t)).toHaveLength(0);
-
-    arrangeBtn(t)!.click();
-    await flush();
-    expect(grips(t).length).toBeGreaterThan(0);
   });
 
-  it("marks the toggle pressed while arranging", async () => {
+  // No mode to find first: choosing Custom is the whole gesture. Requiring a
+  // second toggle meant the grips were never discovered and dragging looked broken.
+  it("shows grips as soon as Custom is the sort", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup();
-    arrangeBtn(t)!.click();
-    await flush();
-    expect(arrangeBtn(t)!.getAttribute("aria-pressed")).toBe("true");
+    const t = await setup(three);
+    expect(grips(t).length).toBe(3);
   });
 
-  // A row you are dragging must not also navigate when you let go.
-  it("does not open a note while arranging", async () => {
+  it("reorders on a drag and saves it without asking", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup();
-    arrangeBtn(t)!.click();
-    await flush();
+    const t = await setup(three);
+    await drag(t, 0, 2);
 
-    vi.mocked(goto).mockClear();
-    t.querySelector<HTMLElement>(".note-card")!.click();
-    await flush();
-    expect(goto).not.toHaveBeenCalled();
+    expect(notesReorder).toHaveBeenCalledTimes(1);
+    expect(notesReorder).toHaveBeenCalledWith(["b", "c", "a"]);
   });
 
-  it("opens a note normally when not arranging", async () => {
+  // The in-flight order is tracked and correct - the save below proves it - but
+  // whether the DOM visibly reorders mid-drag cannot be settled here: happy-dom
+  // does not faithfully reproduce how a keyed {#each} moves existing nodes. So
+  // this asserts the state that drives the paint, not the paint itself, and the
+  // visual follow needs checking in a real window.
+  it("tracks the new order mid-drag, before anything is saved", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup();
+    const t = await setup(three);
+    const rows = [...t.querySelectorAll<HTMLElement>("[data-row-id]")];
+
+    grips(t)[0].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+    await flush();
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(rows[2]);
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, clientY: 200 }));
+    await flush();
+    await flush();
+
+    expect(notesReorder).not.toHaveBeenCalled();
+    // Releasing here must commit exactly what the drag had arranged.
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 0, clientY: 200 }));
+    await flush();
+    await flush();
+    expect(notesReorder).toHaveBeenCalledWith(["b", "c", "a"]);
+  });
+
+  // Rows stay clickable in Custom view, so only a real drag may swallow the
+  // click - otherwise notes could not be opened at all while Custom is active.
+  it("still opens a note on a plain click", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup(three);
     vi.mocked(goto).mockClear();
     t.querySelector<HTMLElement>(".note-card")!.click();
     await flush();
     expect(goto).toHaveBeenCalled();
   });
 
-  it("respects the stored order under the Manual sort", async () => {
+  it("does not open the note that was just dragged", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
-    const t = await setup([
-      note({ id: "c", title: "Third", sort_order: 2 }),
-      note({ id: "a", title: "First", sort_order: 0 }),
-      note({ id: "b", title: "Second", sort_order: 1 }),
-    ]);
-    expect(titles(t)).toEqual(["First", "Second", "Third"]);
+    const t = await setup(three);
+    vi.mocked(goto).mockClear();
+    const rows = [...t.querySelectorAll<HTMLElement>("[data-row-id]")];
+
+    grips(t)[0].dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+    await flush();
+    vi.spyOn(document, "elementFromPoint").mockReturnValue(rows[2]);
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 0, clientY: 200 }));
+    await flush();
+    rows[0].click();
+    await flush();
+
+    expect(goto).not.toHaveBeenCalled();
   });
 
-  // Rows never arranged all sit at 0; falling through to the id tiebreak keeps
-  // the list stable instead of reshuffling on every refresh.
-  it("stays stable when nothing has been arranged yet", async () => {
+  it("keeps a stored arrangement when Custom is chosen again", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
-    const list = [
-      note({ id: "b", title: "Bee" }),
-      note({ id: "a", title: "Ay" }),
-      note({ id: "c", title: "Cee" }),
-    ];
+    const t = await setup([
+      note({ id: "c", title: "Cee", sort_order: 0 }),
+      note({ id: "a", title: "Ay", sort_order: 1 }),
+      note({ id: "b", title: "Bee", sort_order: 2 }),
+    ]);
+    expect(titles(t)).toEqual(["Cee", "Ay", "Bee"]);
+  });
+
+  it("leaves an unarranged list stable rather than reshuffling", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const list = [note({ id: "b", title: "Bee" }), note({ id: "a", title: "Ay" })];
     const first = titles(await setup(list));
     cleanup?.(); cleanup = null; document.body.innerHTML = "";
     expect(titles(await setup(list))).toEqual(first);
