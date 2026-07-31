@@ -224,8 +224,12 @@
     return ids.map(id => by.get(id)).filter((r): r is T => !!r);
   }
 
+  // "manual" is deliberately absent: the drag that makes it usable does not work
+  // on device or desktop, so offering the sort would only strand people in a
+  // list they cannot arrange. Everything behind it - sort_order on notes and
+  // folders, notes_reorder/folders_reorder, the drag itself - is still here and
+  // still tested; only the way in is withdrawn.
   const sortOptions: { field: SortField; label: string }[] = [
-    { field: "manual", label: "Custom" },
     { field: "updated", label: "Date edited" },
     { field: "created", label: "Date created" },
     { field: "title", label: "Title" },
@@ -572,13 +576,15 @@
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goto(`/note/${note.id}`); } }}
           >
             {#if reordering}
-              <button
-                type="button"
+              <span
                 class="drag-grip"
+                role="button"
+                tabindex="0"
                 aria-label={`Reorder ${note.title || "Untitled"}`}
                 onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
                 onpointerdown={(e) => startReorder(e, "note", note.id, orderedNotes.map(x => x.id))}
-              >⠿</button>
+              >⠿</span>
             {/if}
             <span class="badge-wrap">
               <span class="kind-badge {noteColor(note)}">
@@ -692,13 +698,18 @@
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
           >
             {#if reordering}
-              <button
-                type="button"
+              <!-- A span, not a button: on a real touch a button consumes the
+                   gesture and the drag never starts. This mirrors the kanban
+                   board's handle, which works. role+tabindex keep it reachable. -->
+              <span
                 class="drag-grip"
+                role="button"
+                tabindex="0"
                 aria-label={`Reorder ${f.name}`}
                 onclick={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
                 onpointerdown={(e) => startReorder(e, "folder", f.id, orderedFolders.map(x => x.id))}
-              >⠿</button>
+              >⠿</span>
             {/if}
             <span class="badge-wrap">
               <span class="kind-badge folder-badge">

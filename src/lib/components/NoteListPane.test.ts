@@ -347,7 +347,15 @@ describe("browsing folders like a file manager", () => {
 // Hand-arranging the list. Only offered while the Manual sort is active: a drag
 // under a date sort would appear to work and then be undone by the next refresh,
 // which reads as the app losing the change.
-describe("arranging by hand", () => {
+// Custom is withdrawn from the sort menu while its drag does not work on a real
+// device or on desktop. These still run: the ordering logic and persistence are
+// correct and worth keeping green, so re-listing the option is the only step
+// needed to bring the feature back once the drag is fixed.
+//
+// Note what these could NOT catch: they dispatch pointer events straight at the
+// handler, so they prove the reorder maths and say nothing about whether a real
+// pointer ever reaches it. That gap is exactly why this shipped broken twice.
+describe("arranging by hand (withdrawn from the sort menu)", () => {
   const grips = (t: HTMLElement) => t.querySelectorAll<HTMLElement>(".drag-grip");
   const rowIds = (t: HTMLElement) =>
     [...t.querySelectorAll<HTMLElement>("[data-row-id]")].map(r => r.dataset.rowId);

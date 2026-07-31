@@ -36,8 +36,13 @@ const defaultSort: SortPref = { field: "updated", dir: "desc" };
 
 function loadSort(): SortPref {
   if (typeof window === "undefined") return defaultSort;
-  try { return JSON.parse(localStorage.getItem("panote-sort") ?? ""); }
-  catch { return defaultSort; }
+  try {
+    const saved: SortPref = JSON.parse(localStorage.getItem("panote-sort") ?? "");
+    // Custom is withdrawn while its drag does not work. Anyone whose stored
+    // preference is already Custom would otherwise open to a list they cannot
+    // rearrange and cannot switch away from without finding the sort menu.
+    return saved.field === "manual" ? defaultSort : saved;
+  } catch { return defaultSort; }
 }
 
 export const sortPref = writable<SortPref>(loadSort());
