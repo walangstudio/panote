@@ -79,6 +79,11 @@ import { refreshFolders } from "$lib/stores/folders";
 
   onMount(async () => {
     unsubTheme = initTheme();
+    // Opt into the VirtualKeyboard API so `env(keyboard-inset-*)` reports a real
+    // height. Without it those values stay 0 and CSS cannot see the keyboard at
+    // all. Chromium-only, hence the guard; elsewhere the insets simply stay 0.
+    const vk = (navigator as unknown as { virtualKeyboard?: { overlaysContent: boolean } }).virtualKeyboard;
+    if (vk) vk.overlaysContent = true;
     if (!isTauri) return;
     refreshFolders();
     unlistenOffer = await listen("transfer-offer", () => pollOffers());

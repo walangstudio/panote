@@ -1254,17 +1254,19 @@
   .editor-layout.light-ink .tag-input { color: rgba(255,255,255,0.88); }
 
   @media (max-width: 640px) {
-    /* An explicit height rather than `height: 100%`, which needs every ancestor
-       to have a definite height and silently collapses to content when one does
-       not — it did, and the editor sat in a short box with the footer floating
-       mid-screen and dead space beneath it. Measured off the viewport instead, so
-       nothing above it can defeat it, minus the safe-area padding body carries.
-       dvh, not vh, so the mobile browser chrome collapsing does not leave a gap. */
+    /* Measured off the viewport because nothing above it hands down a height:
+       `height: 100%` and a parent flex column were both tried and both collapsed
+       the editor to its content, so the routed page is evidently not a direct
+       child of .app-content.
+       `keyboard-inset-height` is the VirtualKeyboard API (enabled in +layout),
+       and is 0 whenever no keyboard is showing - so this is the full height
+       normally and shrinks by exactly the keyboard when one opens. */
     .editor-layout {
       height: calc(
         100dvh
         - max(env(safe-area-inset-top, 0px), 28px)
         - max(env(safe-area-inset-bottom, 0px), 24px)
+        - env(keyboard-inset-height, 0px)
       );
     }
     .editor-header { padding: 0.5rem 0.6rem; }
