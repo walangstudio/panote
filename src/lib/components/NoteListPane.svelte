@@ -163,9 +163,9 @@
   function startReorder(e: PointerEvent, kind: "note" | "folder", id: string, ids: string[]) {
     e.preventDefault();
     e.stopPropagation();
-    // Keeps the events coming to this element even as the pointer leaves it,
-    // which a mouse drag across rows otherwise loses.
-    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    // No setPointerCapture: reordering moves the grip's DOM node, and a moved
+    // node loses its capture, which killed the drag part-way. Window listeners
+    // are what the kanban board uses for the same job and they survive it.
     didDrag = false;
     dragKind = kind;
     dragId = id;
