@@ -786,6 +786,12 @@
         <input
           class="tag-input"
           placeholder="+ tag"
+          onfocus={(e) => {
+            // Android resizes the layout for the keyboard (see interactive-widget
+            // in app.html), but the row can still end up just below the fold.
+            // Scrolling it into view costs nothing when it is already visible.
+            setTimeout(() => (e.target as HTMLElement).scrollIntoView({ block: "nearest" }), 250);
+          }}
           bind:value={tagInput}
           enterkeyhint="done"
           onkeydown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addTag(); } }}
@@ -1186,8 +1192,9 @@
   /* ── Tags ── */
   .tags-row {
     display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    /* Sits directly under the editor, which now fills the space above it. */
-    margin-top: 10px; flex-shrink: 0;
+    /* Equal air above and below: with only a top margin the row sat against the
+       footer's border and read as overlapping it. */
+    padding-block: 10px; flex-shrink: 0;
   }
   .tag-chip {
     display: inline-flex; align-items: center; gap: 4px;
@@ -1270,8 +1277,6 @@
     .editor-content > .title-input,
     .editor-content > .edited-line,
     .editor-content > .tags-row { padding-left: 0.8rem; padding-right: 0.8rem; }
-    /* Clear of the footer's top border rather than touching it. */
-    .editor-content > .tags-row { padding-bottom: 0.4rem; }
     /* Fills the rest of the screen instead of sitting in a short box with dead
        space beneath it. */
     .editor-body { min-height: 0; }
