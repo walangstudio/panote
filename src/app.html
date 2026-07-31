@@ -105,6 +105,10 @@
           padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
         }
       }
+      /* Keyboard height. Android overwrites this inline from MainActivity, which
+         is the only source that works there. This fallback covers everyone else:
+         a real value where the VirtualKeyboard API exists, 0 otherwise. */
+      :root { --kb: env(keyboard-inset-height, 0px); }
       button { font-family: inherit; }
       a { color: var(--accent); }
       .material-symbols-outlined {

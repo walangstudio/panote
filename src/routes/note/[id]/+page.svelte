@@ -1254,19 +1254,19 @@
   .editor-layout.light-ink .tag-input { color: rgba(255,255,255,0.88); }
 
   @media (max-width: 640px) {
-    /* Measured off the viewport because nothing above it hands down a height:
-       `height: 100%` and a parent flex column were both tried and both collapsed
-       the editor to its content, so the routed page is evidently not a direct
-       child of .app-content.
-       `keyboard-inset-height` is the VirtualKeyboard API (enabled in +layout),
-       and is 0 whenever no keyboard is showing - so this is the full height
-       normally and shrinks by exactly the keyboard when one opens. */
+    /* Measured off the viewport: `height: 100%` and a parent flex column were
+       both tried and both collapsed the editor to its content.
+       `--kb` is the keyboard's height. Android publishes it from MainActivity
+       (see the comment there - nothing in the web layer can see the keyboard on
+       its own), everywhere else it falls back to the 0px default in app.html.
+       So this is the full height normally and shrinks by exactly the keyboard
+       when one opens, keeping the tag row and footer on screen. */
     .editor-layout {
       height: calc(
         100dvh
         - max(env(safe-area-inset-top, 0px), 28px)
         - max(env(safe-area-inset-bottom, 0px), 24px)
-        - env(keyboard-inset-height, 0px)
+        - var(--kb, 0px)
       );
     }
     .editor-header { padding: 0.5rem 0.6rem; }
