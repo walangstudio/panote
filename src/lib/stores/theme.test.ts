@@ -20,6 +20,12 @@ let initTheme: typeof import("./theme")["initTheme"];
 let toggleDarkMode: typeof import("./theme")["toggleDarkMode"];
 let stop: (() => void) | null = null;
 
+// Same reason as layout.test.ts: a fresh module per test means resetModules plus
+// a dynamic import, and that recompile can pass the 5s default while the whole
+// suite runs in parallel. It only ever failed under load, and intermittently,
+// which is what made it hard to pin down. The work is slow, not broken.
+vi.setConfig({ testTimeout: 20_000 });
+
 // The store captures localStorage at module scope, so each test needs a fresh
 // module instance rather than a fresh store value.
 async function load() {
