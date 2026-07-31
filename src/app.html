@@ -3,7 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- interactive-widget=resizes-content is added at runtime for TOUCH devices
+         only (see +layout.svelte) - it is an on-screen-keyboard setting and a
+         desktop window has no on-screen keyboard. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!-- Self-hosted: this app never touches the network. Regenerate with scripts/fetch-fonts.ps1. -->
     <link href="%sveltekit.assets%/fonts/fonts.css" rel="stylesheet" />
     <title>Panote</title>

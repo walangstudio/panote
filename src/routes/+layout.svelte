@@ -80,10 +80,20 @@ import { refreshFolders } from "$lib/stores/folders";
   onMount(async () => {
     unsubTheme = initTheme();
     // Opt into the VirtualKeyboard API so `env(keyboard-inset-*)` reports a real
-    // height. Without it those values stay 0 and CSS cannot see the keyboard at
-    // all. Chromium-only, hence the guard; elsewhere the insets simply stay 0.
+    // height. TOUCH DEVICES ONLY: this and `interactive-widget=resizes-content`
+    // are on-screen-keyboard concerns, and a desktop window has no on-screen
+    // keyboard. Chromium-only API, hence the extra guard.
+    const touch = window.matchMedia("(hover: none)").matches;
     const vk = (navigator as unknown as { virtualKeyboard?: { overlaysContent: boolean } }).virtualKeyboard;
-    if (vk) vk.overlaysContent = true;
+    if (touch && vk) {
+      vk.overlaysContent = true;
+      document
+        .querySelector('meta[name="viewport"]')
+        ?.setAttribute(
+          "content",
+          "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content",
+        );
+    }
     if (!isTauri) return;
     refreshFolders();
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
@@ -132,12 +142,18 @@ import { refreshFolders } from "$lib/stores/folders";
 {/if}
 
 <style>
+  /* Measured off the viewport, not `height: 100%`. The percentage never resolved:
+     SvelteKit's wrapper between body and these sits at `height: auto` (its
+     `display: contents` does not take effect), so a percentage height had no
+     definite basis and froze at its initial content height - which is why
+     maximizing the window left the content its old size. Viewport units need no
+     containing-block chain. Same reason the mobile editor measures off dvh. */
   .app-content {
-    height: 100%; overflow-y: auto;
+    height: 100dvh; overflow-y: auto;
   }
   /* Two independent scrollers — the list keeps its place while the note scrolls. */
   .split {
-    height: 100%;
+    height: 100dvh;
     /* Grows with the window instead of staying a thin strip on a 4K display. */
     display: grid; grid-template-columns: clamp(300px, 22%, 400px) minmax(0, 1fr);
   }
