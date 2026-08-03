@@ -4,6 +4,11 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 15000,
   retries: 0,
+  // One worker on purpose. The default (cores/2) points six browsers at a single
+  // vite dev server that compiles on demand, and pages then miss the timeout
+  // above - which surfaces as "element not found" and reads like a product bug.
+  // Measured: 13 of 43 specs failed on concurrency alone and passed serially.
+  workers: 1,
   use: {
     baseURL: "http://localhost:1420",
     headless: true,
@@ -19,7 +24,9 @@ export default defineConfig({
     command: "npm run dev",
     url: "http://localhost:1420",
     reuseExistingServer: true,
-    timeout: 30000,
+    // A cold vite start measured 17s here; 30s left no margin and the whole run
+    // aborted before a single test began.
+    timeout: 120000,
   },
   reporter: [["list"]],
 });

@@ -10,7 +10,7 @@ test("select button enters select mode", async ({ page }) => {
   await page.click(".select-btn");
   await expect(page.locator(".select-btn")).toHaveClass(/active/);
   // Checkboxes appear
-  await expect(page.locator(".checkbox").first()).toBeVisible();
+  await expect(page.locator(".select-box").first()).toBeVisible();
 });
 
 test("cancel exits select mode and clears selection", async ({ page }) => {
@@ -19,7 +19,7 @@ test("cancel exits select mode and clears selection", async ({ page }) => {
   await page.locator(".note-card").first().click();
   // Exit select mode
   await page.click(".select-btn"); // now says "Cancel"
-  await expect(page.locator(".checkbox")).toHaveCount(0);
+  await expect(page.locator(".select-box")).toHaveCount(0);
   await expect(page.locator(".action-bar")).toHaveCount(0);
 });
 
