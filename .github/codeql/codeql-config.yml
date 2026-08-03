@@ -1,0 +1,16 @@
+name: panote CodeQL config
+
+# Test code only. Excluding it keeps fixtures - deliberately fixed keys, salts
+# and passphrases - from being reported as production weaknesses.
+#
+# This cannot cover the `#[cfg(test)]` modules living inside production files
+# (crypto/vault.rs, crypto/note.rs, state.rs, notes/export.rs,
+# transfer/commands.rs). `paths-ignore` works per file, and excluding those
+# would stop scanning the real crypto alongside the fixtures - the opposite of
+# what we want. Their fixture alerts are dismissed individually instead, which
+# also means a hard-coded salt reaching production code still raises one.
+paths-ignore:
+  - e2e
+  - "**/*.test.ts"
+  - src-tauri/src/folders/tests.rs
+  - src-tauri/src/transfer/e2e_tests.rs
