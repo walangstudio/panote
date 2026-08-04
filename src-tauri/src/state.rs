@@ -106,11 +106,11 @@ pub struct AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{crypto::vault::{derive_key, random_salt}, db::init_pool};
+    use crate::{crypto::vault::derive_key, db::init_pool};
 
     async fn test_state() -> AppState {
         let pool = init_pool(":memory:").await.unwrap();
-        let key = derive_key("key", &random_salt()).unwrap();
+        let key = derive_key("key", &[0u8; 16]).unwrap();
         AppState::new(pool, key, "test-device-uuid".into())
     }
 

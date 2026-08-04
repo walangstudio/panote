@@ -571,7 +571,7 @@ mod tests {
 
     async fn test_state() -> AppState {
         let pool = init_pool(":memory:").await.unwrap();
-        let key = derive_key("export-test-key", &crate::crypto::vault::random_salt()).unwrap();
+        let key = derive_key("export-test-key", &[0u8; 16]).unwrap();
         AppState::new(pool, key, "device-a".into())
     }
 
