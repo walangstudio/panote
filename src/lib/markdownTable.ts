@@ -10,6 +10,20 @@ import type { Node as PMNode } from "@tiptap/pm/model";
 ///
 /// ponytail: covers the marks GFM tables actually carry; extend if a real note
 /// turns up needing more.
+/// A literal pipe would end the cell; a newline would end the row.
+///
+/// Backslashes go first, and the order is the whole point: escaping only the
+/// pipe turns the cell text `a\|b` into `a\\|b`, which reads back as an escaped
+/// backslash followed by a live separator - the row splits and the table is
+/// corrupted on the next load. Exported for the test that pins that order.
+export function escapeCell(text: string): string {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ")
+    .trim();
+}
+
 function inlineToMarkdown(node: PMNode): string {
   let out = "";
   node.descendants((child) => {
@@ -28,8 +42,7 @@ function inlineToMarkdown(node: PMNode): string {
     out += text;
     return false;
   });
-  // A literal pipe would end the cell; a newline would end the row.
-  return out.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim();
+  return escapeCell(out);
 }
 
 function cellsOf(row: PMNode): string[] {
