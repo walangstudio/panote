@@ -716,7 +716,7 @@ mod tests {
 
     async fn test_state() -> AppState {
         let pool = init_pool(":memory:").await.unwrap();
-        let key = derive_key("test-device-key", &[0u8; 16]).unwrap();
+        let key = derive_key("test-device-key", &crate::crypto::vault::random_salt()).unwrap();
         AppState::new(pool, key, "test-local-device".into())
     }
 
@@ -820,7 +820,7 @@ mod tests {
         let blob = sample_blob();
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        let wrong_key = derive_key("different-key", &[0u8; 16]).unwrap();
+        let wrong_key = derive_key("different-key", &crate::crypto::vault::random_salt()).unwrap();
         assert!(
             decrypt_with_vault(&wrong_key, &row.title_nonce, &row.title_ct, row.id.as_bytes()).is_err()
         );

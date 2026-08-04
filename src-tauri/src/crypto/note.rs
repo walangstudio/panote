@@ -90,7 +90,7 @@ mod tests {
     use crate::crypto::vault::{derive_key, derive_key_legacy, encrypt};
 
     fn make_key(pw: &str) -> [u8; 32] {
-        derive_key(pw, &[0u8; 16]).unwrap()
+        derive_key(pw, &random_salt()).unwrap()
     }
 
     #[test]
@@ -98,7 +98,7 @@ mod tests {
         // A note protected before the K2 bump: password layer derived at p=1.
         let vault_key = make_key("vault-pass");
         let (vnonce, vault_ct) = encrypt_with_vault(&vault_key, b"legacy secret", b"note-1").unwrap();
-        let salt = [3u8; 16];
+        let salt = random_salt();
         let legacy_key = derive_key_legacy("pw", &salt).unwrap();
         let (nnonce, double_ct) = encrypt(&legacy_key, &vault_ct, b"").unwrap();
 

@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn derive_key_is_deterministic() {
-        let salt = [0u8; 16];
+        let salt = random_salt();
         let k1 = derive_key("hunter2", &salt).unwrap();
         let k2 = derive_key("hunter2", &salt).unwrap();
         assert_eq!(k1, k2);
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn derive_key_differs_by_passphrase() {
-        let salt = [0u8; 16];
+        let salt = random_salt();
         let k1 = derive_key("password1", &salt).unwrap();
         let k2 = derive_key("password2", &salt).unwrap();
         assert_ne!(k1, k2);
@@ -96,14 +96,14 @@ mod tests {
 
     #[test]
     fn derive_key_differs_by_salt() {
-        let k1 = derive_key("password", &[0u8; 16]).unwrap();
-        let k2 = derive_key("password", &[1u8; 16]).unwrap();
+        let k1 = derive_key("password", &random_salt()).unwrap();
+        let k2 = derive_key("password", &random_salt()).unwrap();
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn encrypt_decrypt_roundtrip() {
-        let key = derive_key("test", &[42u8; 16]).unwrap();
+        let key = derive_key("test", &random_salt()).unwrap();
         let plaintext = b"hello panote";
         let (nonce, ct) = encrypt(&key, plaintext, b"aad").unwrap();
         let recovered = decrypt(&key, &nonce, &ct, b"aad").unwrap();
@@ -112,15 +112,16 @@ mod tests {
 
     #[test]
     fn decrypt_wrong_key_fails() {
-        let key = derive_key("correct", &[0u8; 16]).unwrap();
-        let wrong_key = derive_key("wrong", &[0u8; 16]).unwrap();
+        let salt = random_salt();
+        let key = derive_key("correct", &salt).unwrap();
+        let wrong_key = derive_key("wrong", &salt).unwrap();
         let (nonce, ct) = encrypt(&key, b"secret", b"aad").unwrap();
         assert!(decrypt(&wrong_key, &nonce, &ct, b"aad").is_err());
     }
 
     #[test]
     fn decrypt_tampered_ciphertext_fails() {
-        let key = derive_key("test", &[0u8; 16]).unwrap();
+        let key = derive_key("test", &random_salt()).unwrap();
         let (nonce, mut ct) = encrypt(&key, b"secret", b"aad").unwrap();
         ct[0] ^= 0xff;
         assert!(decrypt(&key, &nonce, &ct, b"aad").is_err());
@@ -130,7 +131,7 @@ mod tests {
     fn decrypt_wrong_aad_fails() {
         // N3: ciphertext produced for one context (e.g. note id) must not
         // decrypt under a different context — prevents ciphertext swapping.
-        let key = derive_key("test", &[0u8; 16]).unwrap();
+        let key = derive_key("test", &random_salt()).unwrap();
         let (nonce, ct) = encrypt(&key, b"secret", b"note-a").unwrap();
         assert!(decrypt(&key, &nonce, &ct, b"note-b").is_err());
     }
@@ -144,7 +145,7 @@ mod tests {
     fn legacy_params_derive_a_different_key() {
         // K2: p=1 (legacy) and p=4 (current) must produce different keys for the
         // same password+salt, so the fallback path is actually exercised.
-        let salt = [7u8; 16];
+        let salt = random_salt();
         assert_ne!(
             derive_key("pw", &salt).unwrap(),
             derive_key_legacy("pw", &salt).unwrap()

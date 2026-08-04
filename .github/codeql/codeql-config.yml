@@ -1,14 +1,11 @@
 name: panote CodeQL config
 
-# Test code only. Excluding it keeps fixtures - deliberately fixed keys, salts
-# and passphrases - from being reported as production weaknesses.
-#
-# This cannot cover the `#[cfg(test)]` modules living inside production files
-# (crypto/vault.rs, crypto/note.rs, state.rs, notes/export.rs,
-# transfer/commands.rs). `paths-ignore` works per file, and excluding those
-# would stop scanning the real crypto alongside the fixtures - the opposite of
-# what we want. Their fixture alerts are dismissed individually instead, which
-# also means a hard-coded salt reaching production code still raises one.
+# Test code only, and only where a whole file is tests. `paths-ignore` works per
+# file, so it deliberately does NOT cover the `#[cfg(test)]` modules inside
+# crypto/vault.rs and friends - excluding those would stop scanning the real
+# crypto alongside the fixtures. Those tests derive their salts with
+# `random_salt()` instead, so nothing needs suppressing and a hard-coded salt
+# reaching production code still raises an alert.
 paths-ignore:
   - e2e
   - "**/*.test.ts"
