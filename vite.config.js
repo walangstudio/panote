@@ -34,6 +34,9 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // Crawl every component at startup. Otherwise a cold dep cache discovers deps
+  // lazily and reloads the page mid-navigation, which timed out E2E specs.
+  optimizeDeps: { entries: ["src/**/*.svelte"] },
   resolve: {
     alias: {
       $lib: fileURLToPath(new URL("./src/lib", import.meta.url)),
