@@ -4,7 +4,7 @@
 
 # Panote
 
-[![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
@@ -21,39 +21,35 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 
 **Note types**
 
-- **Plain text** — simple textarea, no formatting
-- **Markdown** — editor with live preview; preview is the default view when opening an existing note
-- **Checklist** — nested check items with keyboard navigation
-- **Code** — split-pane editor with syntax highlighting (Rust, TypeScript, JavaScript, Python, Go, Bash, SQL, JSON, HTML, CSS)
-- **Kanban** — columns and cards, drag to reorder via handle; works on desktop (mouse) and Android (touch)
+- **Document** - WYSIWYG editor (TipTap): headings, lists, task lists, code blocks with syntax highlighting, links, quotes, text colour and highlight
+- **Checklist** - nested check items with keyboard navigation
+- **Kanban** - columns and cards, drag to reorder via handle; works on desktop (mouse) and Android (touch)
+- **Table** - typed columns; `masked` columns hide values with per-cell reveal and copy (clipboard clears after 30 s). Imports `.env`, INI, browser password CSV, and JSON key/value
 
-**Notes list**
+**Organising**
 
+- Nested folders, browsed like a file manager; create and move notes and folders from the list
+- Tags, pinning, and per-note background colour or image
 - Search by title or tag
-- Tags shown on each card; filter updates instantly as you type
-- Note type shown with an icon
-- Multi-select mode — tap **Select**, check notes, then **Send selected** to transfer multiple notes at once
+- Multi-select to protect, unprotect, or send several notes at once
+- Desktop split view above 900px window width
 
-**Tags**
+**Protection**
 
-- Add multiple tags by separating with commas or pressing Enter
-- Tapping away from the tag input or saving also commits the current text (fixes mobile tag loss)
-- Remove individual tags with ×
+- Per-note passwords (Argon2id + ChaCha20-Poly1305) with recovery codes
+- Unlocked notes re-lock after 15 minutes of inactivity
 
 **Transfer**
 
 - LAN peer discovery via mDNS and UDP broadcast beacon (works across WiFi/Ethernet boundaries where mDNS multicast is filtered)
-- Send from any note using the **···** menu in the note header, or from the notes list in multi-select mode
-- Sender generates a 6-character pairing code; receiver enters it to accept — no shared passphrase to coordinate
-- Incoming transfers appear as toasts in the corner of every screen, with code input and Accept/Reject per transfer
-- Recently-contacted devices remembered across restarts; appear in the peer picker alongside live-discovered devices
-- Note payload is encrypted with a key derived from the pairing code (Argon2id + ChaCha20-Poly1305) before it leaves the sender
+- Send from any note using the **···** menu, or from the notes list in multi-select mode
+- Sender generates a 6-character pairing code; receiver enters it to accept. Pairing uses SPAKE2, so the code never crosses the wire
+- Peers can also be paired by QR code, and recently-contacted devices are remembered
+- Folders and protected notes survive a transfer
 
-**Mobile**
+**Backup**
 
-- Collapsible sidebar with hamburger toggle
-- Touch drag for Kanban
-- Version shown at the bottom of the sidebar
+- Export and import from Settings (format v2; v1 backups are upgraded on import). Protected notes stay encrypted under their own password in the backup
 
 ---
 
@@ -138,16 +134,19 @@ panote/
 │   ├── routes/
 │   │   ├── +layout.svelte      # Root layout; incoming transfer polling and toasts
 │   │   ├── +page.svelte        # Notes list, search, multi-select transfer
+│   │   ├── settings/           # Import/export
 │   │   └── note/[id]/          # Note editor with ··· send menu
 │   └── lib/
 │       ├── tauri.ts            # Tauri command bindings
 │       ├── kanban.ts           # Kanban drag-and-drop logic
+│       ├── tableParsers.ts     # Table importers (.env, INI, CSV, JSON)
 │       ├── stores/             # Svelte stores (notes)
 │       └── components/         # Note type editors + TransferModal + IncomingTransferToast
 └── src-tauri/                  # Rust backend
     └── src/
         ├── crypto/             # Encryption primitives, TLS, TOFU
-        ├── db/                 # SQLite migrations (0001–0006) and queries
+        ├── db/                 # SQLite migrations and queries
+        ├── folders/            # Folder commands
         ├── notes/              # Note CRUD commands
         ├── transfer/           # LAN (mDNS + beacon + TLS) and BLE transport
         └── state.rs            # Shared app state
@@ -157,7 +156,7 @@ panote/
 
 ## Storage
 
-Notes are encrypted at rest with a 32-byte key generated on first launch and stored in the local SQLite database. The database lives in the OS app data directory and is never synced anywhere.
+Notes are encrypted at rest with a 32-byte device key generated on first launch. On desktop the key lives in the OS keychain; on Android it is kept in the app-private database. The database lives in the OS app data directory and is never synced anywhere.
 
 Copying the database to a different device will not work; the key does not travel with the file.
 
@@ -168,10 +167,9 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 ## Security notes
 
 - Transport uses TLS 1.3 with self-signed certificates and TOFU fingerprint pinning. Fingerprints are persisted across restarts. A changed fingerprint on reconnect is rejected.
-- Note payloads are additionally encrypted with a key derived from the pairing code (Argon2id + ChaCha20-Poly1305) before transmission. A wrong code produces a decryption error; the transfer remains pending and the user can retry.
-- Pairing codes are 6 characters from an unambiguous 32-character alphanumeric alphabet (≈30 bits). Each guess requires a full Argon2id KDF round on the receiver, making online brute force infeasible within any realistic transfer window.
+- Inside TLS, both sides run SPAKE2 on the pairing code with HMAC key confirmation, then encrypt the payload under the derived key. The code never crosses the wire, a wrong code aborts the transfer, and each guess needs a live round.
+- Pairing codes are 6 characters from an unambiguous 32-character alphanumeric alphabet (≈30 bits). A peer is locked out after 5 wrong codes.
 - Peer display names and IDs received over the network are capped at 128 characters before storage.
-- Markdown preview output is sanitized with DOMPurify before rendering.
 - BLE transport is stubbed and not yet functional. The btleplug peripheral role is unsupported on Windows, and the feature is deferred to a future release.
 
 ---

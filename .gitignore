@@ -34,3 +34,7 @@ Thumbs.db
 .vscode/
 *.suo
 *.swp
+
+# Signing keys
+*.jks
+*.keystore

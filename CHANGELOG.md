@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] - 2026-09-25
 
 ### Breaking
 
@@ -26,9 +26,17 @@
 - **Unlocked notes now re-lock after 15 minutes of inactivity.** Cached passwords used to be
   held until the app exited. They are now timestamped, zeroized on drop, and swept from
   memory on any access — not merely ignored.
+- **Transfer pairing runs SPAKE2 with key confirmation inside TLS.** The pairing code no
+  longer crosses the wire, and a peer is locked out after 5 wrong codes.
+- **The device key moved to the OS keychain on desktop.** Android keeps it in the
+  app-private database.
 
 ### Added
 
+- Nested folders, browsed like a file manager. Notes and folders are created and moved
+  from the list, and folders are carried across a transfer.
+- Per-note passwords with recovery codes, settable on many notes at once from
+  multi-select.
 - Table columns have a type. `masked` renders the value as fixed-width dots (the mask does
   not reveal length) with per-cell reveal and copy. Copying clears the clipboard after 30
   seconds, and only if the secret is still on it.
