@@ -14,7 +14,8 @@
       // Painted before hydration so a dark user never sees the light theme
       // first. Must agree with localInitial() in src/lib/stores/theme.ts.
       (() => {
-        const stored = localStorage.getItem("panote-theme");
+        let stored = null;
+        try { stored = localStorage.getItem("panote-theme"); } catch {}
         document.documentElement.dataset.theme =
           stored === "candy-light" || stored === "candy-dark" ? stored
           : matchMedia("(prefers-color-scheme: dark)").matches ? "candy-dark" : "candy-light";

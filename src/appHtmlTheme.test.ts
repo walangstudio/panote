@@ -6,8 +6,10 @@
 // between the two fails this instead of showing up as a flash on launch.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
-const script = readFileSync("src/app.html", "utf-8").match(/<script>([\s\S]*?)<\/script>/)?.[1];
+const script = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.html"), "utf-8").match(/<script>([\s\S]*?)<\/script>/)?.[1];
 
 let osDark = false;
 

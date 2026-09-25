@@ -8,6 +8,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount } from "svelte";
 import { readFileSync } from "fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import RichEditor from "./RichEditor.svelte";
 
 let cleanup: (() => void) | null = null;
@@ -76,7 +78,7 @@ describe("RichEditor toolbar accessibility", () => {
   // so the touch-target size is asserted straight off the source rule instead
   // of a mounted element's computed style.
   it("gives toolbar buttons at least a 44px touch target", () => {
-    const src = readFileSync("src/lib/components/RichEditor.svelte", "utf-8");
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "RichEditor.svelte"), "utf-8");
     const rule = src.match(/\.fmt-btn\s*\{([^}]*)\}/)?.[1] ?? "";
     const width = Number(rule.match(/(?:min-)?width:\s*(\d+(?:\.\d+)?)px/)?.[1]);
     const height = Number(rule.match(/(?:min-)?height:\s*(\d+(?:\.\d+)?)px/)?.[1]);

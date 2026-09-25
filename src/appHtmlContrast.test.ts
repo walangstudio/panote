@@ -5,6 +5,8 @@
 // app.html so a future edit that regresses either theme fails here too.
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 function hexToRgb(hex: string) {
   const h = hex.replace("#", "");
@@ -32,7 +34,7 @@ function themeToken(src: string, theme: string, token: string): string {
 }
 
 describe("app.html --muted contrast (WCAG AA, 4.5:1 for normal text)", () => {
-  const src = readFileSync("src/app.html", "utf-8");
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.html"), "utf-8");
 
   for (const theme of ["candy-light", "candy-dark"] as const) {
     const muted = themeToken(src, theme, "muted");
