@@ -1,12 +1,14 @@
-<script lang="ts">
-  interface CheckItem {
+<script lang="ts" module>
+  export interface CheckItem {
     id: string;
     text: string;
     checked: boolean;
     children: CheckItem[];
   }
+</script>
 
-  let { content = $bindable({ items: [] as CheckItem[] }) } = $props<{ content: { items: CheckItem[] } }>();
+<script lang="ts">
+  let { content = $bindable({ items: [] }) }: { content: { items: CheckItem[] } } = $props();
 
   // ponytail: hard depth cap guards against a maliciously/corruptly deep imported checklist
   const MAX_DEPTH = 20;

@@ -2,9 +2,7 @@
   import { moveCard, moveColumn } from "$lib/kanban";
   import type { KanbanColumn, KanbanCard } from "$lib/kanban";
 
-  let { content = $bindable({ columns: [] as KanbanColumn[] }) } = $props<{
-    content: { columns: KanbanColumn[] };
-  }>();
+  let { content = $bindable({ columns: [] }) }: { content: { columns: KanbanColumn[] } } = $props();
 
   function addColumn() {
     content.columns.push({ id: crypto.randomUUID(), name: "New column", cards: [] });

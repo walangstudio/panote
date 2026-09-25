@@ -9,6 +9,9 @@ export default defineConfig({
   // above - which surfaces as "element not found" and reads like a product bug.
   // Measured: 13 of 43 specs failed on concurrency alone and passed serially.
   workers: 1,
+  // Lazily imported modals (TransferModal) are compiled on first request, which
+  // can outlast the 5s default under full-suite load.
+  expect: { timeout: 10000 },
   use: {
     baseURL: "http://localhost:1420",
     headless: true,

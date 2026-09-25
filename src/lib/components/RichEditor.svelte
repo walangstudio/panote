@@ -8,8 +8,7 @@
   const readMarkdown = (ed: Editor) =>
     (ed.storage as unknown as { markdown: MarkdownStorage }).markdown.getMarkdown();
 
-  let { content = $bindable({ body: "" }), editable = true } =
-    $props<{ content: { body: string }; editable?: boolean }>();
+  let { content = $bindable({ body: "" }), editable = true }: { content: { body: string }; editable?: boolean } = $props();
 
   let host: HTMLDivElement | undefined = $state();
   // Deliberately NOT $state: the editor is a mutable third-party instance and

@@ -10,9 +10,7 @@
   import TableImportModal from "$lib/components/TableImportModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
 
-  let { content = $bindable({ columns: [], rows: [] }) } = $props<{
-    content: TableContent;
-  }>();
+  let { content = $bindable({ columns: [], rows: [] }) }: { content: TableContent } = $props();
 
   let showColumnSetup = $state(false);
   let showAddRow = $state(false);

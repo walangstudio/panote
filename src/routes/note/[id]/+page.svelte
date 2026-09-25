@@ -45,7 +45,8 @@
 
   let kind = $state<NoteKind>("document");
   let title = $state("");
-  let content = $state<unknown>({});
+  // Shape depends on `kind`; each editor below binds its own typed view of it.
+  let content = $state<any>({});
   let tags = $state<string[]>([]);
   let tagInput = $state("");
   let menuOpen = $state(false);
