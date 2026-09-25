@@ -19,6 +19,10 @@ vi.mock("$lib/tauri", () => ({
   notesUnprotect: vi.fn(async () => {}),
   folderCreate: vi.fn(), folderMove: vi.fn(), folderRename: vi.fn(), folderDelete: vi.fn(),
   noteSetFolder: vi.fn(), notesReorder: vi.fn(async () => {}), foldersReorder: vi.fn(async () => {}),
+  trashList: vi.fn(async () => []),
+  trashRestore: vi.fn(async () => {}),
+  trashDelete: vi.fn(async () => {}),
+  trashEmpty: vi.fn(async () => {}),
 }));
 
 // The shared stub exports plain functions, so navigation needs a spy to assert on.
@@ -33,9 +37,10 @@ import { goto } from "$app/navigation";
 import { page } from "$app/state";
 (page as unknown as { params: Record<string, string> }).params = { id: "" };
 
-import { noteList, notesUnprotect, notesReorder } from "$lib/tauri";
+import { noteList, notesUnprotect, notesReorder, trashList, trashRestore, trashDelete, trashEmpty } from "$lib/tauri";
+import type { TrashedNote } from "$lib/tauri";
 import { notes, bgImages, sortPref } from "$lib/stores/notes";
-import { resetListState, listFolder } from "$lib/stores/listState";
+import { resetListState, listFolder, listTrash } from "$lib/stores/listState";
 import { folders } from "$lib/stores/folders";
 import NoteListPane from "./NoteListPane.svelte";
 
@@ -631,5 +636,77 @@ describe("batch unprotect", () => {
     await removeProtectionOn(t, 2);
     expect(document.querySelector(".modal")).toBeTruthy();
     expect(document.querySelector(".modal .error")!.textContent).toContain("2 of 3 failed");
+  });
+});
+
+describe("trash", () => {
+  const binned: TrashedNote[] = [
+    { id: "t1", kind: "document", title: "Old draft", has_note_password: false, deleted_at: 1_700_000_000 },
+    { id: "t2", kind: "checklist", title: "Vault", has_note_password: true, deleted_at: 1_700_000_500 },
+  ];
+
+  async function openTrash(list: TrashedNote[] = binned) {
+    vi.mocked(trashList).mockResolvedValue(list);
+    listTrash.set(true);
+    const t = await setup();
+    await flush();
+    return t;
+  }
+
+  const button = (label: string) =>
+    document.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+  const modalButton = (text: string) =>
+    [...document.querySelectorAll<HTMLButtonElement>(".modal button")].find(b => b.textContent?.trim() === text)!;
+
+  it("lists trashed notes with their deleted date instead of the notes", async () => {
+    const t = await openTrash();
+    expect(titles(t)).toEqual(["Old draft", "Vault"]);
+    expect(t.querySelector("input.search")).toBeNull();
+    expect(t.querySelectorAll("time").length).toBe(2);
+    expect(t.querySelector('[aria-label="Password protected"]')).toBeTruthy();
+  });
+
+  it("restores a note and refreshes the list", async () => {
+    await openTrash();
+    vi.mocked(noteList).mockClear();
+    button("Restore Old draft").click();
+    await flush();
+    expect(trashRestore).toHaveBeenCalledWith(["t1"]);
+    expect(noteList).toHaveBeenCalled();
+  });
+
+  it("asks before deleting a note forever", async () => {
+    await openTrash();
+    button("Delete Old draft forever").click();
+    await flush();
+    expect(trashDelete).not.toHaveBeenCalled();
+    modalButton("Delete forever").click();
+    await flush();
+    expect(trashDelete).toHaveBeenCalledWith(["t1"]);
+  });
+
+  it("empties the trash only after confirming", async () => {
+    const t = await openTrash();
+    t.querySelector<HTMLButtonElement>(".empty-trash")!.click();
+    await flush();
+    expect(document.querySelector(".modal")!.textContent).toContain("All 2 notes");
+    modalButton("Empty trash").click();
+    await flush();
+    expect(trashEmpty).toHaveBeenCalled();
+  });
+
+  it("disables Empty trash when there is nothing in it", async () => {
+    const t = await openTrash([]);
+    expect(t.querySelector<HTMLButtonElement>(".empty-trash")!.disabled).toBe(true);
+    expect(t.textContent).toContain("Trash is empty.");
+  });
+
+  it("says a deleted note goes to Trash", async () => {
+    const t = await setup();
+    t.querySelector<HTMLButtonElement>(".card-menu")!.click();
+    await flush();
+    [...t.querySelectorAll<HTMLButtonElement>(".popover-item")].find(b => b.textContent?.includes("Delete"))!.click();
+    await flush();
+    expect(document.querySelector(".modal")!.textContent).toContain("moved to Trash");
   });
 });

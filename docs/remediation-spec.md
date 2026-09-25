@@ -122,7 +122,8 @@ toggling a mark with no selection only sets a stored mark and never fires TipTap
 - **Line length is uncapped** in the editor. The writer persona rates this a top-3
   problem (250+ chars maximised); the owner's call is that macOS Notes does not cap
   either. Standing.
-- **No trash/undo.** Delete is permanent, and the dialog says so.
+- ~~**No trash/undo.** Delete is permanent, and the dialog says so.~~ Resolved: delete
+  moves a note to Trash (migration 0016), restorable for 30 days.
 
 ## Process notes
 

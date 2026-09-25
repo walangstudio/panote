@@ -1,16 +1,19 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { notes, totalNotes, bgImages, refreshNotes, sortPref, sortNotes, type SortField } from "$lib/stores/notes";
   import {
-    noteDelete, notePin,
+    notes, totalNotes, bgImages, refreshNotes, sortPref, sortNotes, type SortField,
+    trashed, refreshTrash,
+  } from "$lib/stores/notes";
+  import {
+    noteDelete, notePin, trashRestore, trashDelete, trashEmpty,
     noteProtect, noteUnprotect, noteChangePassword, notesProtect, notesUnprotect,
   } from "$lib/tauri";
   import type { NoteMetadata } from "$lib/tauri";
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import { listFilter, listSelecting, listSelected, listFolder } from "$lib/stores/listState";
+  import { listFilter, listSelecting, listSelected, listFolder, listTrash } from "$lib/stores/listState";
   import { folders, refreshFolders } from "$lib/stores/folders";
   import {
     folderCreate, folderMove, folderRename, folderDelete, noteSetFolder,
@@ -333,10 +336,43 @@
     const id = deleteTargetId;
     deleteTargetId = null;
     await noteDelete(id);
-    await refreshNotes();
+    await Promise.all([refreshNotes(), refreshFolders()]);
     // The deleted note may be the one open in the detail pane.
     if (desktop && activeId === id) goto("/");
   }
+
+  // ---- Trash ----
+
+  $effect(() => { if ($listTrash) refreshTrash(); });
+
+  /// What the confirm dialog is about to destroy for good.
+  let purgeTarget = $state<{ ids: string[]; title: string } | "all" | null>(null);
+  let trashHeading: HTMLElement | undefined = $state();
+  let trashListEl: HTMLElement | undefined = $state();
+
+  /// The row whose button had focus is gone; land on the next one rather than
+  /// dropping keyboard focus to the page.
+  async function afterTrashChange() {
+    await Promise.all([refreshTrash(), refreshNotes(), refreshFolders()]);
+    await tick();
+    (trashListEl?.querySelector<HTMLElement>("[data-restore]") ?? trashHeading)?.focus();
+  }
+
+  async function restore(id: string) {
+    await trashRestore([id]);
+    await afterTrashChange();
+  }
+
+  async function confirmPurge() {
+    const target = purgeTarget;
+    purgeTarget = null;
+    if (!target) return;
+    if (target === "all") await trashEmpty();
+    else await trashDelete(target.ids);
+    await afterTrashChange();
+  }
+
+  const deletedFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
 
   async function togglePin(id: string, currentPinned: boolean) {
     await notePin(id, !currentPinned);
@@ -503,6 +539,10 @@
         <span class="material-symbols-outlined">menu</span>
       </button>
     {/if}
+    {#if $listTrash}
+      <h2 class="trash-title" tabindex="-1" bind:this={trashHeading}>Trash</h2>
+      <button class="empty-trash" disabled={!$trashed.length} onclick={() => purgeTarget = "all"}>Empty trash</button>
+    {:else}
     <div class="search-wrap">
       <span class="material-symbols-outlined search-icon">search</span>
       <input class="search" placeholder="Search notes" bind:value={filter} />
@@ -538,6 +578,7 @@
     <button class="select-btn" class:active={selecting} onclick={toggleSelect} aria-label={selecting ? "Cancel selection" : "Select notes"}>
       <span class="material-symbols-outlined">{selecting ? "check_box" : "checklist_rtl"}</span>
     </button>
+    {/if}
   </div>
 
   {#snippet noteCard(note: NoteMetadata)}
@@ -664,6 +705,50 @@
       </li>
   {/snippet}
 
+  {#if $listTrash}
+    <ul class="note-list" aria-label="Trash" bind:this={trashListEl}>
+      {#each $trashed as note (note.id)}
+        <li>
+          <div class="note-card trash-card">
+            <span class="badge-wrap">
+              <span class="kind-badge {noteColor(note)}">
+                <span class="material-symbols-outlined" aria-hidden="true">{noteIcon(note)}</span>
+              </span>
+            </span>
+            <div class="note-info">
+              <div class="title-row">
+                <strong>{note.title || "Untitled"}</strong>
+                {#if note.has_note_password}<span class="lock" role="img" aria-label="Password protected"><span class="material-symbols-outlined" style="font-size: 14px;" aria-hidden="true">lock</span></span>{/if}
+              </div>
+              <p class="preview-text">
+                Deleted <time datetime={new Date(note.deleted_at * 1000).toISOString()}>{deletedFormat.format(new Date(note.deleted_at * 1000))}</time>
+              </p>
+              <div class="tags"></div>
+            </div>
+            <div class="trailing">
+              <button class="btn-ghost" data-restore onclick={() => restore(note.id)} aria-label={`Restore ${note.title || "Untitled"}`}>
+                <span class="material-symbols-outlined" aria-hidden="true">history</span>
+              </button>
+              <button class="btn-ghost danger" onclick={() => purgeTarget = { ids: [note.id], title: note.title || "Untitled" }} aria-label={`Delete ${note.title || "Untitled"} forever`}>
+                <span class="material-symbols-outlined" aria-hidden="true">delete</span>
+              </button>
+            </div>
+          </div>
+        </li>
+      {/each}
+      {#if $trashed.length === 0}
+        <li class="empty">
+          <span class="material-symbols-outlined empty-icon" aria-hidden="true">delete</span>
+          <span>Trash is empty.</span>
+        </li>
+      {:else}
+        <li class="locked-hint">
+          <span class="material-symbols-outlined" style="font-size: 14px;" aria-hidden="true">info</span>
+          <span>Notes in Trash are deleted forever after 30 days.</span>
+        </li>
+      {/if}
+    </ul>
+  {:else}
   <!-- Breadcrumb: only meaningful once you are inside something. -->
   {#if trail().length}
     <nav class="crumbs" aria-label="Folder path">
@@ -798,10 +883,11 @@
       </li>
     {/if}
   </ul>
+  {/if}
 </div>
 
 <!-- FAB — touch layout only; desktop composes from the pane header. -->
-{#if !desktop}
+{#if !desktop && !$listTrash}
   {#if fabOpen}
     <div class="fab-backdrop" role="presentation" onclick={() => fabOpen = false}></div>
   {/if}
@@ -827,7 +913,7 @@
   </div>
 {/if}
 
-{#if selecting && selected.size > 0}
+{#if selecting && selected.size > 0 && !$listTrash}
   <div class="action-bar" class:desktop>
     <button class="bar-cancel" onclick={toggleSelect} aria-label="Cancel selection">
       <span class="material-symbols-outlined">close</span>
@@ -902,12 +988,25 @@
 
 {#if deleteTargetId}
   <ConfirmModal
-    title="Delete note?"
-    message="This note will be permanently deleted. This cannot be undone."
-    confirmLabel="Delete"
+    title="Move to Trash?"
+    message="This note will be moved to Trash. You can restore it from there for 30 days."
+    confirmLabel="Move to Trash"
     destructive
     onconfirm={confirmDelete}
     oncancel={() => deleteTargetId = null}
+  />
+{/if}
+
+{#if purgeTarget}
+  <ConfirmModal
+    title={purgeTarget === "all" ? "Empty trash?" : "Delete forever?"}
+    message={purgeTarget === "all"
+      ? `All ${$trashed.length} ${$trashed.length === 1 ? "note" : "notes"} in Trash will be permanently deleted. This cannot be undone.`
+      : `"${purgeTarget.title}" will be permanently deleted. This cannot be undone.`}
+    confirmLabel={purgeTarget === "all" ? "Empty trash" : "Delete forever"}
+    destructive
+    onconfirm={confirmPurge}
+    oncancel={() => purgeTarget = null}
   />
 {/if}
 
@@ -1029,6 +1128,28 @@
     width: 32px; height: 32px; border-radius: var(--radius-full);
   }
   .folder-error button:hover { color: var(--text); background: var(--hover); }
+
+  /* Trash: the same cards, but there is nothing to open, so no pointer or lift. */
+  .trash-title {
+    flex: 1; min-width: 0; margin: 0; padding-left: 0.5rem;
+    font-size: 1rem; font-weight: 800; color: var(--text);
+  }
+  .trash-title:focus { outline: none; }
+  .empty-trash {
+    height: 38px; padding: 0 1rem; flex-shrink: 0;
+    border: 1px solid var(--border); border-radius: var(--radius-full);
+    background: none; color: var(--error); cursor: pointer;
+    font-size: 0.85rem; font-weight: 600;
+    transition: all 0.15s ease;
+  }
+  .empty-trash:hover:not(:disabled) { border-color: var(--error); background: var(--error-surface); }
+  .empty-trash:disabled { opacity: 0.45; cursor: default; }
+  .note-card.trash-card { cursor: default; }
+  .note-card.trash-card:hover { transform: none; }
+  .trash-card .trailing { flex-direction: row; align-items: center; align-self: center; gap: 0.35rem; }
+  .btn-ghost.danger:hover { border-color: var(--error); color: var(--error); background: var(--error-surface); }
+  .page.desktop .trash-card .trailing { flex-direction: row; align-self: center; }
+  .page.desktop .trash-card .btn-ghost { width: 34px; height: 34px; }
 
   /* Grip only appears in arrange mode, so the row is not permanently cluttered
      and a scroll gesture cannot catch it by accident. */

@@ -307,9 +307,10 @@ pub async fn note_update(
     })
 }
 
+/// Moves the note to Trash; `trash_delete` is what removes it for good.
 #[tauri::command]
 pub async fn note_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    queries::note_delete(&state.db, &id)
+    crate::trash::queries::trash(&state.db, &[id], now_secs())
         .await
         .map_err(|e| e.to_string())
 }
@@ -408,14 +409,14 @@ pub async fn note_draft_discard(id: String, state: State<'_, AppState>) -> Resul
         .map_err(|e| e.to_string())
 }
 
-fn migrate_kind(kind: &str) -> &str {
+pub(crate) fn migrate_kind(kind: &str) -> &str {
     match kind {
         "text" | "markdown" | "code" => "document",
         other => other,
     }
 }
 
-fn migrate_hint(kind: &str, hint: Option<String>) -> Option<String> {
+pub(crate) fn migrate_hint(kind: &str, hint: Option<String>) -> Option<String> {
     hint.or_else(|| match kind {
         "text" => Some("plain".to_string()),
         "markdown" => Some("markdown".to_string()),

@@ -16,6 +16,9 @@ export const listSelected = writable(new Set<string>());
 /// same reason as the search text: opening a note on mobile unmounts the list,
 /// and a folder you had drilled into should still be there when you come back.
 export const listFolder = writable<string | null>(null);
+/// Showing Trash instead of a folder. A flag rather than a sentinel folder id,
+/// so no real id can ever collide with it.
+export const listTrash = writable(false);
 
 /// Clear it. Module-level state outlives any single component by design, which
 /// also means it outlives a single test — so tests must reset between cases.
@@ -24,4 +27,5 @@ export function resetListState() {
   listSelecting.set(false);
   listSelected.set(new Set());
   listFolder.set(null);
+  listTrash.set(false);
 }

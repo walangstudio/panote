@@ -7,6 +7,13 @@
 - A **System** theme that follows the OS light/dark setting and switches live when it
   changes. It is the default on a fresh install; an existing Light or Dark choice is kept.
   Pick it from the sidebar or Settings > Appearance.
+- **Trash.** Deleting a note moves it to Trash instead of destroying it. Trash is in the
+  sidebar and lists each note with its deleted date, with Restore and Delete forever per
+  note and Empty trash. A restored note returns to its folder, or to the root if that
+  folder is gone. Notes trashed more than 30 days ago are purged at startup. Protected
+  notes stay encrypted in Trash and keep their password when restored. Trashed notes are
+  left out of the list, counts, search, folder counts, export and folder sends; a note
+  re-sent from another device comes back out of Trash.
 
 ## [0.4.0] - 2026-09-25
 

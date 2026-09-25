@@ -4,7 +4,7 @@
   import { theme, resolvedTheme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { folders, buildTree, refreshFolders, type FolderNode } from "$lib/stores/folders";
-  import { listFolder } from "$lib/stores/listState";
+  import { listFolder, listTrash } from "$lib/stores/listState";
   import { folderCreate, folderDelete, folderRename } from "$lib/tauri";
 
   interface Props {
@@ -30,6 +30,13 @@
 
   function openFolder(id: string | null) {
     listFolder.set(id);
+    listTrash.set(false);
+    sidebarOpen.set(false);
+    if (page.url.pathname !== "/") goto("/");
+  }
+
+  function openTrash() {
+    listTrash.set(true);
     sidebarOpen.set(false);
     if (page.url.pathname !== "/") goto("/");
   }
@@ -91,7 +98,7 @@
   </button>
 
   <nav>
-    <a href="/" class="nav-item" class:active={activeTab === "notes"} onclick={nav}>
+    <a href="/" class="nav-item" class:active={activeTab === "notes"} onclick={() => { listTrash.set(false); nav(); }}>
       <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' {activeTab === 'notes' ? 1 : 0};">sticky_note_2</span>
       <span>Notes</span>
     </a>
@@ -113,7 +120,7 @@
 
     <button
       class="folder-row all"
-      class:selected={$listFolder === null}
+      class:selected={$listFolder === null && !$listTrash}
       onclick={() => openFolder(null)}
     >
       <span class="material-symbols-outlined folder-icon">inbox</span>
@@ -139,7 +146,7 @@
           {/if}
           <button
             class="folder-row"
-            class:selected={$listFolder === f.id}
+            class:selected={$listFolder === f.id && !$listTrash}
             onclick={() => openFolder(f.id)}
           >
             <span class="material-symbols-outlined folder-icon">folder</span>
@@ -169,6 +176,11 @@
     {#if tree.length === 0}
       <p class="folders-empty">No folders yet.</p>
     {/if}
+
+    <button class="folder-row all" class:selected={$listTrash} onclick={openTrash}>
+      <span class="material-symbols-outlined folder-icon" aria-hidden="true">delete</span>
+      <span class="folder-name">Trash</span>
+    </button>
   </div>
 
   <div class="drawer-bottom">

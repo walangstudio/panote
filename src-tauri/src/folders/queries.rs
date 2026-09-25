@@ -135,7 +135,7 @@ pub async fn note_folder(pool: &SqlitePool, note_id: &str) -> anyhow::Result<Opt
 /// Note counts per folder, for the tree. Notes at the root are not counted.
 pub async fn note_counts(pool: &SqlitePool) -> anyhow::Result<Vec<(String, i64)>> {
     let rows = sqlx::query(
-        "SELECT folder_id, COUNT(*) AS n FROM notes WHERE folder_id IS NOT NULL GROUP BY folder_id",
+        "SELECT folder_id, COUNT(*) AS n FROM notes WHERE folder_id IS NOT NULL AND deleted_at IS NULL GROUP BY folder_id",
     )
     .fetch_all(pool)
     .await?;
@@ -157,6 +157,7 @@ pub async fn note_ids_in_subtree(
              SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id
          )
          SELECT n.id FROM notes n JOIN sub ON n.folder_id = sub.id
+         WHERE n.deleted_at IS NULL
          ORDER BY n.updated_at DESC",
     )
     .bind(folder_id)

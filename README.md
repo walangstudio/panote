@@ -32,6 +32,7 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 - Tags, pinning, and per-note background colour or image
 - Search by title or tag
 - Multi-select to protect, unprotect, or send several notes at once
+- Trash: deleted notes can be restored for 30 days, then are purged
 - Desktop split view above 900px window width
 
 **Protection**

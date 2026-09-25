@@ -595,6 +595,9 @@ pub async fn import_blob_detailed(
             rc_ct: None,
         };
         queries::note_update(&state.db, &row).await?;
+        // Accepting a note is asking to see it; updating a copy that sits in
+        // Trash would make the arrival invisible.
+        crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
         return Ok((prev.id, ImportOutcome::Updated));
     }
 

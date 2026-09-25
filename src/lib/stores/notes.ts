@@ -1,6 +1,6 @@
 import { writable } from "svelte/store";
-import type { NoteMetadata } from "$lib/tauri";
-import { noteList, noteCount, noteBgImages } from "$lib/tauri";
+import type { NoteMetadata, TrashedNote } from "$lib/tauri";
+import { noteList, noteCount, noteBgImages, trashList } from "$lib/tauri";
 
 export const notes = writable<NoteMetadata[]>([]);
 /// Total notes in the database. `notes` is capped by the backend page size, so
@@ -26,6 +26,12 @@ export async function refreshNotes(opts: { withBackgrounds?: boolean } = {}) {
   // A failure here must not blank the list; the count is only a disclosure.
   try { totalNotes.set(await noteCount()); } catch { /* leave the last known total */ }
   if (opts.withBackgrounds) await refreshBgImages();
+}
+
+export const trashed = writable<TrashedNote[]>([]);
+
+export async function refreshTrash() {
+  try { trashed.set(await trashList()); } catch { /* keep the last list */ }
 }
 
 export type SortField = "manual" | "updated" | "created" | "title" | "kind";

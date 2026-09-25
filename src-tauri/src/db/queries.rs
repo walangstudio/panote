@@ -306,14 +306,6 @@ pub async fn note_find_by_origin(
     Ok(row.map(row_to_note))
 }
 
-pub async fn note_delete(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM notes WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub async fn note_pin(pool: &SqlitePool, id: &str, pinned: bool) -> anyhow::Result<()> {
     sqlx::query("UPDATE notes SET pinned = ? WHERE id = ?")
         .bind(pinned as i32)
@@ -665,12 +657,12 @@ mod tests {
     }
 }
 
-/// Lists every note, newest-first. Used by export/import, which must see the
+/// Lists every live note, newest-first. Used by export/import, which must see the
 /// full set — do not add pagination here; see `note_list_page` for the
 /// bounded variant used by the frontend list view (K14).
 pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
     let rows = sqlx::query(&format!(
-        "SELECT {SELECT_COLS} FROM notes ORDER BY updated_at DESC"
+        "SELECT {SELECT_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC"
     ))
     .fetch_all(pool)
     .await?;
@@ -688,7 +680,7 @@ pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
 /// Returned rows carry no body ciphertext — see [`row_to_list_note`].
 pub async fn note_list_page(pool: &SqlitePool, limit: i64, offset: i64) -> anyhow::Result<Vec<NoteRow>> {
     let rows = sqlx::query(&format!(
-        "SELECT {LIST_COLS} FROM notes ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+        "SELECT {LIST_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
     ))
     .bind(limit)
     .bind(offset)
@@ -703,7 +695,7 @@ pub async fn note_list_page(pool: &SqlitePool, limit: i64, offset: i64) -> anyho
 /// rarely, so they are fetched once and cached rather than re-serialised through
 /// IPC every time a note is saved, pinned or deleted.
 pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, String)>> {
-    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> ''")
+    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> '' AND deleted_at IS NULL")
         .fetch_all(pool)
         .await?;
     Ok(rows
@@ -715,7 +707,7 @@ pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, St
 /// Total notes, so the list can say how many it is NOT showing. Counting is
 /// cheap — no decryption, no row payload.
 pub async fn note_count(pool: &SqlitePool) -> anyhow::Result<i64> {
-    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes")
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes WHERE deleted_at IS NULL")
         .fetch_one(pool)
         .await?;
     Ok(row.get("n"))

@@ -4,6 +4,7 @@ mod folders;
 mod notes;
 mod state;
 mod transfer;
+mod trash;
 
 use folders::commands::*;
 use notes::commands::*;
@@ -12,6 +13,7 @@ use state::AppState;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use transfer::commands::*;
+use trash::commands::*;
 
 /// Keeps the mDNS ServiceDaemon alive for the lifetime of the app.
 #[allow(dead_code)]
@@ -48,6 +50,11 @@ pub fn run() {
             // Backfill origin fields on any notes that predate migration 0010.
             tauri::async_runtime::block_on(db::queries::backfill_note_origins(&pool, &device_uuid))
                 .expect("note origin backfill failed");
+
+            let cutoff = state::now_secs() - trash::RETENTION_SECS;
+            if let Err(e) = tauri::async_runtime::block_on(trash::queries::purge_before(&pool, cutoff)) {
+                eprintln!("[trash] purge error: {e}");
+            }
 
             let state = AppState::new(pool, device_key, device_uuid);
 
@@ -101,6 +108,11 @@ pub fn run() {
             note_set_folder,
             notes_reorder,
             folders_reorder,
+            // Trash - deleted notes, recoverable for 30 days
+            trash_list,
+            trash_restore,
+            trash_delete,
+            trash_empty,
             // Drafts — unsaved edits, kept apart from the committed note
             note_draft_save,
             note_draft_get,

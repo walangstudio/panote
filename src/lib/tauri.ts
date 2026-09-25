@@ -87,7 +87,22 @@ export const noteCreate = (input: NoteInput) =>
   invoke<NoteMetadata>("note_create", { input });
 export const noteUpdate = (id: string, input: NoteInput) =>
   invoke<NoteMetadata>("note_update", { id, input });
+/// Moves the note to Trash. Only `trashDelete` / `trashEmpty` remove it for good.
 export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
+
+/// A note in Trash: what the list shows, plus when it was deleted (unix secs).
+export interface TrashedNote {
+  id: string;
+  kind: NoteKind;
+  title: string;
+  has_note_password: boolean;
+  content_hint?: string;
+  deleted_at: number;
+}
+export const trashList = () => invoke<TrashedNote[]>("trash_list");
+export const trashRestore = (ids: string[]) => invoke<void>("trash_restore", { ids });
+export const trashDelete = (ids: string[]) => invoke<void>("trash_delete", { ids });
+export const trashEmpty = () => invoke<void>("trash_empty");
 /// A folder as the backend returns it: flat, with its parent. `note_count` is
 /// this folder only; the tree rolls subfolder counts up (see stores/folders.ts).
 export interface Folder {

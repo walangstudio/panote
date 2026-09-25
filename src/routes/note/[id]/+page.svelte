@@ -12,6 +12,7 @@
     LOCKED, type NoteKind, type NoteMetadata,
   } from "$lib/tauri";
   import { refreshNotes } from "$lib/stores/notes";
+  import { refreshFolders } from "$lib/stores/folders";
   import { detectLossyConstructs, type LossyConstruct } from "$lib/markdownCompat";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
@@ -151,7 +152,7 @@
     confirmDelete = false;
     try {
       await noteDelete(id);
-      await refreshNotes();
+      await Promise.all([refreshNotes(), refreshFolders()]);
       justSaved = true; // deleted, so the dirty guard must not fight the exit
       goto("/");
     } catch (e) {
@@ -829,9 +830,9 @@
 
 {#if confirmDelete}
   <ConfirmModal
-    title="Delete note?"
-    message="This note will be permanently deleted. This cannot be undone."
-    confirmLabel="Delete"
+    title="Move to Trash?"
+    message="This note will be moved to Trash. You can restore it from there for 30 days."
+    confirmLabel="Move to Trash"
     destructive
     onconfirm={doDelete}
     oncancel={() => confirmDelete = false}
