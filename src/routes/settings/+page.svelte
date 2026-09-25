@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving, deviceIps, notesExport, notesImport, type ImportResolution, type ImportSummary } from "$lib/tauri";
   import { getVersion } from "@tauri-apps/api/app";
-  import { toggleDarkMode, theme } from "$lib/stores/theme";
+  import { theme, resolvedTheme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
@@ -274,17 +274,18 @@
         <div class="row">
           <span class="row-icon">
             <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">
-              {$theme === "candy-dark" ? "dark_mode" : "light_mode"}
+              {$resolvedTheme === "candy-dark" ? "dark_mode" : "light_mode"}
             </span>
           </span>
           <div class="row-body">
-            <span class="row-title">Theme</span>
-            <span class="row-sub">{$theme === "candy-dark" ? "Candy dark" : "Candy light"}</span>
+            <label class="row-title" for="theme-select">Theme</label>
+            <span class="row-sub">{$resolvedTheme === "candy-dark" ? "Candy dark" : "Candy light"}</span>
           </div>
-          <button class="switch-pill" onclick={toggleDarkMode}>
-            <span class="material-symbols-outlined" style="font-size: 16px;">swap_horiz</span>
-            Switch
-          </button>
+          <select id="theme-select" class="theme-select" bind:value={$theme}>
+            <option value="candy-light">Light</option>
+            <option value="candy-dark">Dark</option>
+            <option value="system">System</option>
+          </select>
         </div>
       </div>
     </div>
@@ -500,11 +501,8 @@
     background: var(--on-accent);
   }
 
-  /* ── Switch pill button (Appearance row) ── */
-  .switch-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  /* ── Theme select (Appearance row) ── */
+  .theme-select {
     padding: 0.35rem 0.8rem;
     border-radius: var(--radius-full);
     border: 1px solid var(--border);
@@ -517,7 +515,7 @@
     flex-shrink: 0;
     transition: background 0.1s ease;
   }
-  .switch-pill:hover { background: var(--accent-muted); }
+  .theme-select:hover { background: var(--accent-muted); }
 
   /* ── Device name inline edit ── */
   .name-input {

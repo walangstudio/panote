@@ -10,6 +10,16 @@
     <!-- Self-hosted: this app never touches the network. Regenerate with scripts/fetch-fonts.ps1. -->
     <link href="%sveltekit.assets%/fonts/fonts.css" rel="stylesheet" />
     <title>Panote</title>
+    <script>
+      // Painted before hydration so a dark user never sees the light theme
+      // first. Must agree with localInitial() in src/lib/stores/theme.ts.
+      (() => {
+        const stored = localStorage.getItem("panote-theme");
+        document.documentElement.dataset.theme =
+          stored === "candy-light" || stored === "candy-dark" ? stored
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "candy-dark" : "candy-light";
+      })();
+    </script>
     <style>
       [data-theme="candy-light"] {
         /* Native controls (select popups, file inputs, scrollbars, date pickers)

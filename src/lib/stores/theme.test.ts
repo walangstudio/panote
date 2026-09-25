@@ -17,7 +17,6 @@ const flush = () => new Promise(r => setTimeout(r, 0));
 
 let theme: typeof import("./theme")["theme"];
 let initTheme: typeof import("./theme")["initTheme"];
-let toggleDarkMode: typeof import("./theme")["toggleDarkMode"];
 let stop: (() => void) | null = null;
 
 // Same reason as layout.test.ts: a fresh module per test means resetModules plus
@@ -33,7 +32,6 @@ async function load() {
   const mod = await import("./theme");
   theme = mod.theme;
   initTheme = mod.initTheme;
-  toggleDarkMode = mod.toggleDarkMode;
 }
 
 const read = () => {
@@ -41,28 +39,53 @@ const read = () => {
   theme.subscribe(x => (v = x))();
   return v;
 };
+const painted = () => document.documentElement.dataset.theme;
+
+// happy-dom never matches prefers-color-scheme, so the OS preference is stubbed
+// and flipped by hand.
+type Listener = (e: { matches: boolean }) => void;
+let osDark = false;
+let listeners = new Set<Listener>();
+function osChange(dark: boolean) {
+  osDark = dark;
+  for (const fn of listeners) fn({ matches: dark });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   delete document.documentElement.dataset.theme;
+  osDark = false;
+  listeners = new Set();
+  vi.stubGlobal("matchMedia", vi.fn(() => ({
+    get matches() { return osDark; },
+    addEventListener: (_: string, fn: Listener) => listeners.add(fn),
+    removeEventListener: (_: string, fn: Listener) => listeners.delete(fn),
+  })));
 });
 
 afterEach(() => {
   stop?.();
   stop = null;
+  vi.unstubAllGlobals();
 });
 
 describe("initial value", () => {
-  it("falls back to candy-light with nothing stored", async () => {
+  it("follows the system with nothing stored", async () => {
     await load();
-    expect(read()).toBe("candy-light");
+    expect(read()).toBe("system");
   });
 
   it("prefers whatever localStorage already holds", async () => {
     localStorage.setItem(STORAGE_KEY, "candy-dark");
     await load();
     expect(read()).toBe("candy-dark");
+  });
+
+  it("ignores a stored value that is not a known preference", async () => {
+    localStorage.setItem(STORAGE_KEY, "something-else");
+    await load();
+    expect(read()).toBe("system");
   });
 });
 
@@ -71,26 +94,35 @@ describe("initTheme", () => {
     localStorage.setItem(STORAGE_KEY, "candy-dark");
     await load();
     stop = initTheme();
-    // synchronously, no await — this is the anti-flash path
-    expect(document.documentElement.dataset.theme).toBe("candy-dark");
+    // synchronously, no await: this is the anti-flash path
+    expect(painted()).toBe("candy-dark");
   });
 
   it("adopts the DB value once it arrives", async () => {
     vi.mocked(getTheme).mockResolvedValue("candy-dark");
     await load();
     stop = initTheme();
-    expect(read()).toBe("candy-light");
+    expect(read()).toBe("system");
     await flush();
     expect(read()).toBe("candy-dark");
-    expect(document.documentElement.dataset.theme).toBe("candy-dark");
+    expect(painted()).toBe("candy-dark");
   });
 
-  it("ignores a DB value that is not a known theme", async () => {
+  it("adopts a system preference from the DB", async () => {
+    vi.mocked(getTheme).mockResolvedValue("system");
+    localStorage.setItem(STORAGE_KEY, "candy-light");
+    await load();
+    stop = initTheme();
+    await flush();
+    expect(read()).toBe("system");
+  });
+
+  it("ignores a DB value that is not a known preference", async () => {
     vi.mocked(getTheme).mockResolvedValue("neon-disco" as unknown as string);
     await load();
     stop = initTheme();
     await flush();
-    expect(read()).toBe("candy-light");
+    expect(read()).toBe("system");
   });
 
   it("survives the DB read failing", async () => {
@@ -127,7 +159,7 @@ describe("initTheme", () => {
     stop = initTheme();
     await flush();
     expect(() => theme.set("candy-dark")).not.toThrow();
-    expect(document.documentElement.dataset.theme).toBe("candy-dark");
+    expect(painted()).toBe("candy-dark");
   });
 
   it("stops painting the document once unsubscribed", async () => {
@@ -136,26 +168,68 @@ describe("initTheme", () => {
     await flush();
     unsub();
     theme.set("candy-dark");
-    expect(document.documentElement.dataset.theme).toBe("candy-light");
+    expect(painted()).toBe("candy-light");
   });
 });
 
-describe("toggleDarkMode", () => {
-  it("goes light to dark and back", async () => {
+describe("system mode", () => {
+  it("paints dark when the OS prefers dark", async () => {
+    osDark = true;
+    await load();
+    stop = initTheme();
+    expect(painted()).toBe("candy-dark");
+  });
+
+  it("paints light when the OS prefers light", async () => {
+    await load();
+    stop = initTheme();
+    expect(painted()).toBe("candy-light");
+  });
+
+  // The preference stays "system"; only the painted theme moves.
+  it("follows the OS when it changes and keeps the preference as system", async () => {
     await load();
     stop = initTheme();
     await flush();
+    vi.mocked(setTheme).mockClear();
 
-    toggleDarkMode();
-    expect(read()).toBe("candy-dark");
-    toggleDarkMode();
-    expect(read()).toBe("candy-light");
+    osChange(true);
+    expect(painted()).toBe("candy-dark");
+    expect(read()).toBe("system");
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("system");
+    expect(setTheme).not.toHaveBeenCalled();
+
+    osChange(false);
+    expect(painted()).toBe("candy-light");
   });
 
-  it("treats any non-dark value as light, so one toggle always reaches dark", async () => {
-    localStorage.setItem(STORAGE_KEY, "something-else");
+  it("ignores the OS once an explicit theme is chosen", async () => {
+    osDark = true;
     await load();
-    toggleDarkMode();
-    expect(read()).toBe("candy-dark");
+    stop = initTheme();
+    theme.set("candy-light");
+    expect(painted()).toBe("candy-light");
+    osChange(false);
+    osChange(true);
+    expect(painted()).toBe("candy-light");
+  });
+
+  it("goes back to following the OS when system is chosen again", async () => {
+    localStorage.setItem(STORAGE_KEY, "candy-light");
+    osDark = true;
+    await load();
+    stop = initTheme();
+    expect(painted()).toBe("candy-light");
+    theme.set("system");
+    expect(painted()).toBe("candy-dark");
+  });
+
+  it("stops listening to the OS once unsubscribed", async () => {
+    await load();
+    const unsub = initTheme();
+    unsub();
+    expect(listeners.size).toBe(0);
+    osChange(true);
+    expect(painted()).toBe("candy-light");
   });
 });

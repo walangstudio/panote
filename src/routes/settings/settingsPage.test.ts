@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.4.0") }
 
 vi.mock("$lib/stores/theme", () => ({
   theme: writable("candy-light"),
-  toggleDarkMode: vi.fn(),
+  resolvedTheme: writable("candy-light"),
 }));
 vi.mock("$lib/stores/sidebar", () => ({ sidebarOpen: writable(false) }));
 
@@ -31,6 +31,7 @@ import {
   getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving,
   notesExport, notesImport,
 } from "$lib/tauri";
+import { theme } from "$lib/stores/theme";
 import SettingsPage from "./+page.svelte";
 
 let cleanup: (() => void) | null = null;
@@ -320,6 +321,22 @@ describe("device name", () => {
 
     expect(status(t)).toContain("Workstation");
     expect(status(t)).not.toContain("keychain locked");
+  });
+});
+
+describe("appearance", () => {
+  // happy-dom's `:checked` never matches an <option>, which is what Svelte's
+  // select binding reads on change, so the DOM-to-store direction is left to
+  // the Playwright theme spec.
+  it("offers light, dark and system and shows the stored preference", async () => {
+    const t = await setup();
+    const pick = t.querySelector<HTMLSelectElement>("#theme-select")!;
+    expect([...pick.options].map(o => o.value)).toEqual(["candy-light", "candy-dark", "system"]);
+
+    theme.set("system");
+    await settle();
+    expect(pick.value).toBe("system");
+    theme.set("candy-light");
   });
 });
 

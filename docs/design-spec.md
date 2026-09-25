@@ -10,10 +10,11 @@ Design intent: friendly, soft, "candy" aesthetic. Glassmorphism over a pink-to-v
 
 ## 2. Themes
 
-Two themes, switched via `data-theme` on `<html>`. Persisted to `localStorage["panote-theme"]`. Default `candy-light`. The in-app toggle only flips between the two candy themes (no system-auto mode yet).
+Two themes, switched via `data-theme` on `<html>`. The preference is persisted to `localStorage["panote-theme"]` (and the device DB) as one of `candy-light`, `candy-dark`, or `system`. Default `system`: it resolves to `candy-dark` when `prefers-color-scheme: dark` matches and follows the OS live. An inline script in `app.html` applies the resolved theme before hydration.
 
-- `candy-light` (default)
+- `candy-light`
 - `candy-dark`
+- `system` (default; resolves to one of the above)
 
 All color, radius, and shadow values are CSS custom properties scoped to the theme selector. Components never hardcode color except two intentional cases: cards with a user-set light background pin text to dark literals (`#2e1a28` / `#604868`).
 
@@ -159,7 +160,7 @@ Solid `--surface`, `--radius`, `0 4px 16px` shadow, hover lifts `-2px` with stro
 `--accent-muted` fill, `--accent` text, `--radius-full`, weight 600, tiny (0.68rem in list). On light user-bg cards, chips fall back to `rgba(0,0,0,0.08)` + dark text.
 
 ### Sidebar drawer
-Off-canvas left drawer, 280px, glass surface, slides in over a blurred dark backdrop (`rgba(0,0,0,0.45)` + `blur(4px)`). Contents top→bottom: wordmark + close, full-width "New Note" primary button, nav items (Notes, Settings), then a bottom group with the Receiving toggle row and the theme toggle. Active nav item is a solid accent pill with `--on-accent` text; inactive items are `--text-secondary` and fill `--hover` on hover. Active icon uses `FILL 1`.
+Off-canvas left drawer, 280px, glass surface, slides in over a blurred dark backdrop (`rgba(0,0,0,0.45)` + `blur(4px)`). Contents top→bottom: wordmark + close, full-width "New Note" primary button, nav items (Notes, Settings), then a bottom group with the Receiving toggle row and the theme picker (Light / Dark / System). Active nav item is a solid accent pill with `--on-accent` text; inactive items are `--text-secondary` and fill `--hover` on hover. Active icon uses `FILL 1`.
 
 ### Toolbar (notes list)
 Glass bar, `--radius`, contains: hamburger (`menu`) · search · sort button · Select toggle. Sticky feel via blur; `z-index: 10`.

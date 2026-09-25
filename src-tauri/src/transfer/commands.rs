@@ -199,7 +199,7 @@ pub async fn get_theme(state: State<'_, AppState>) -> Result<Option<String>, Str
 
 #[tauri::command]
 pub async fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
-    if theme != "candy-light" && theme != "candy-dark" {
+    if theme != "candy-light" && theme != "candy-dark" && theme != "system" {
         return Err("invalid theme".into());
     }
     queries::device_setting_set(&state.db, "theme", &theme)

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- A **System** theme that follows the OS light/dark setting and switches live when it
+  changes. It is the default on a fresh install; an existing Light or Dark choice is kept.
+  Pick it from the sidebar or Settings > Appearance.
+
 ## [0.4.0] - 2026-09-25
 
 ### Breaking

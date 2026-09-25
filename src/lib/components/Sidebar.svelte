@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
-  import { toggleDarkMode, theme } from "$lib/stores/theme";
+  import { theme, resolvedTheme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { folders, buildTree, refreshFolders, type FolderNode } from "$lib/stores/folders";
   import { listFolder } from "$lib/stores/listState";
@@ -180,11 +180,15 @@
       </span>
     </button>
 
-    <button class="theme-toggle" onclick={toggleDarkMode}>
-      <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">{$theme === "candy-dark" ? "light_mode" : "dark_mode"}</span>
-      <span class="theme-label">{$theme === "candy-dark" ? "Light theme" : "Dark theme"}</span>
-      <span class="material-symbols-outlined" style="font-size: 20px; color: var(--muted);">swap_horiz</span>
-    </button>
+    <label class="theme-row">
+      <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">{$resolvedTheme === "candy-dark" ? "dark_mode" : "light_mode"}</span>
+      <span class="theme-label">Theme</span>
+      <select bind:value={$theme}>
+        <option value="candy-light">Light</option>
+        <option value="candy-dark">Dark</option>
+        <option value="system">System</option>
+      </select>
+    </label>
   </div>
 </aside>
 
@@ -330,13 +334,17 @@
     left: 20px; background: var(--on-accent);
   }
 
-  .theme-toggle {
+  .theme-row {
     display: flex; align-items: center; gap: 0.6rem;
     background: none; border: 1px solid var(--border); border-radius: var(--radius-full);
     padding: 0.5rem 0.75rem; cursor: pointer; color: var(--muted);
     font-size: 0.82rem; font-weight: 500; width: 100%;
     transition: all 0.15s ease;
   }
-  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .theme-row:hover, .theme-row:focus-within { border-color: var(--accent); color: var(--accent); }
   .theme-label { flex: 1; text-align: left; }
+  .theme-row select {
+    background: none; border: none; padding: 0; outline: none;
+    color: inherit; font: inherit; cursor: pointer;
+  }
 </style>
