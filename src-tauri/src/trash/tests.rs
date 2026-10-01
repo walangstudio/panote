@@ -179,8 +179,12 @@ async fn a_protected_note_stays_protected_through_trash_and_restore() {
     let before = notes::note_get(&s.db, &id).await.unwrap().unwrap();
 
     trash(&s, &id).await;
+    s.lock_note(&id);
     let listed = list_impl(&s).await.unwrap();
     assert!(listed[0].has_note_password);
+    assert_eq!(listed[0].title, crate::notes::commands::LOCKED_TITLE, "a sealed title must not leak via Trash");
+    s.unlock_note(&id, "hunter22", "Vault");
+    assert_eq!(list_impl(&s).await.unwrap()[0].title, "Vault");
 
     queries::restore(&s.db, std::slice::from_ref(&id)).await.unwrap();
     let after = notes::note_get(&s.db, &id).await.unwrap().unwrap();

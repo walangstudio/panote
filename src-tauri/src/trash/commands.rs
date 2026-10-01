@@ -3,7 +3,7 @@
 
 use super::queries;
 use crate::crypto::note::decrypt_with_vault;
-use crate::notes::commands::{migrate_hint, migrate_kind};
+use crate::notes::commands::{migrate_hint, migrate_kind, LOCKED_TITLE};
 use crate::state::AppState;
 use serde::Serialize;
 use tauri::State;
@@ -24,12 +24,17 @@ pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<TrashedNote>, Stri
     Ok(rows
         .into_iter()
         .map(|r| {
+            // A protected title is sealed at rest; only the unlock cache has it.
             // One unreadable title must not make the rest of Trash unreachable,
             // or the note could never be deleted for good.
-            let title = decrypt_with_vault(&state.device_key, &r.title_nonce, &r.title_ct, r.id.as_bytes())
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_else(|| "(unreadable)".into());
+            let title = if r.note_salt.is_some() {
+                state.note_title(&r.id).unwrap_or_else(|| LOCKED_TITLE.to_string())
+            } else {
+                decrypt_with_vault(&state.device_key, &r.title_nonce, &r.title_ct, r.id.as_bytes())
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_else(|| "(unreadable)".into())
+            };
             TrashedNote {
                 content_hint: migrate_hint(&r.kind, r.content_hint),
                 kind: migrate_kind(&r.kind).to_string(),
