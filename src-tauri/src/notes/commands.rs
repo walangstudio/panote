@@ -1,8 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::{
     crypto::note::{
-        apply_note_password, decrypt_with_vault, encrypt_with_vault, peel_vault_ct,
-        remove_note_password, remove_note_password_detect,
+        apply_note_password, decrypt_with_vault, encrypt_with_vault, open_note,
+        remove_note_password, seal_note, SealedNote,
     },
     db::queries::{self, NoteRow},
     notes::types::{NoteDetail, NoteInput, NoteMetadata},
@@ -127,6 +127,9 @@ pub(crate) fn decrypt_preview(key: &[u8; 32], note_id: &str, stored: &str) -> Op
 /// Returned by `note_get` / `note_update` when a protected note isn't unlocked
 /// this session. The frontend shows the unlock prompt on this.
 pub const LOCKED: &str = "locked";
+/// Listed in place of a protected note's title until it is unlocked this
+/// session. The real title is sealed under the note password.
+pub const LOCKED_TITLE: &str = "Locked note";
 const WRONG_PASSWORD: &str = "wrong password";
 const ALREADY_PROTECTED: &str = "note is already password-protected";
 const NOT_PROTECTED: &str = "note is not password-protected";
@@ -165,6 +168,7 @@ pub async fn note_create(
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
         title_ct,
+        title_note_nonce: None,
         nonce: content_nonce.to_vec(),
         content_ct,
         note_salt: None,
@@ -213,6 +217,14 @@ pub async fn note_update(
     input: NoteInput,
     state: State<'_, AppState>,
 ) -> Result<NoteMetadata, String> {
+    update_impl(&state, id, input).await
+}
+
+pub(crate) async fn update_impl(
+    state: &AppState,
+    id: String,
+    input: NoteInput,
+) -> Result<NoteMetadata, String> {
     validate_bg_image(&input.bg_image)?;
     let key = &state.device_key;
     let ts = now_secs();
@@ -232,13 +244,10 @@ pub async fn note_update(
     // Preserve password protection across saves. A protected note can only be
     // edited after it was unlocked this session, so the password is cached.
     let protected = original.note_salt.is_some();
-    let (content_ct, note_salt, note_nonce) = if protected {
-        let password = state.note_password(&id).ok_or(LOCKED)?;
-        let (salt, nonce, double_ct) =
-            apply_note_password(&password, &vault_ct).map_err(|e| e.to_string())?;
-        (double_ct, Some(salt.to_vec()), Some(nonce.to_vec()))
+    let password = if protected {
+        Some(state.note_password(&id).ok_or(LOCKED)?)
     } else {
-        (vault_ct, None, None)
+        None
     };
 
     let tags_stored = encrypt_tags(key, &id, &input.tags)?;
@@ -250,17 +259,18 @@ pub async fn note_update(
             .transpose()?
     };
 
-    let row = NoteRow {
+    let mut row = NoteRow {
         folder_id: None, // owned by note_set_folder; note_insert/update never write it
         sort_order: 0,   // owned by notes_set_order, likewise
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
         title_ct,
+        title_note_nonce: None,
         nonce: content_nonce.to_vec(),
-        content_ct,
-        note_salt,
-        note_nonce,
+        content_ct: vault_ct,
+        note_salt: None,
+        note_nonce: None,
         created_at: original.created_at,
         updated_at: ts,
         tags: tags_stored,
@@ -277,10 +287,17 @@ pub async fn note_update(
         rc_nonce: original.rc_nonce.clone(),
         rc_ct: original.rc_ct.clone(),
     };
+    if let Some(pw) = &password {
+        let sealed = seal_note(pw, &row.content_ct, &row.title_ct).map_err(|e| e.to_string())?;
+        apply_sealed(&mut row, sealed);
+    }
 
     queries::note_update(&state.db, &row)
         .await
         .map_err(|e| e.to_string())?;
+    if let Some(pw) = &password {
+        state.unlock_note(&id, pw, &input.title);
+    }
 
     // Saving IS the commit: the draft has served its purpose and must go, or the
     // editor would keep offering to restore edits the user already saved.
@@ -459,6 +476,14 @@ pub async fn note_list(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<NoteMetadata>, String> {
+    list_impl(&state, limit, offset).await
+}
+
+pub(crate) async fn list_impl(
+    state: &AppState,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<NoteMetadata>, String> {
     let key = &state.device_key;
     let rows = queries::note_list_page(
         &state.db,
@@ -470,9 +495,12 @@ pub async fn note_list(
 
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
-        let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-            .map_err(|e| e.to_string())?;
-        let title = String::from_utf8(title_bytes).map_err(|e| e.to_string())?;
+        // A protected title is sealed at rest; only the unlock cache has it.
+        let title = if row.note_salt.is_some() {
+            state.note_title(&row.id).unwrap_or_else(|| LOCKED_TITLE.to_string())
+        } else {
+            vault_title(key, &row, &row.title_ct)?
+        };
         let tags = decrypt_tags(key, &row.id, &row.tags).map_err(|e| e.to_string())?;
         let content_hint = migrate_hint(&row.kind, row.content_hint);
         let preview_text = row
@@ -516,11 +544,9 @@ pub async fn note_get(
         .map_err(|e| e.to_string())?
         .ok_or("note not found")?;
 
-    let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let title = String::from_utf8(title_bytes).map_err(|e| e.to_string())?;
-
-    let content = decrypt_content(&state, &row)?;
+    let (title, content_bytes) = open_row(&state, &row)?;
+    let content: serde_json::Value =
+        serde_json::from_slice(&content_bytes).map_err(|e| e.to_string())?;
 
     let tags = decrypt_tags(key, &row.id, &row.tags).map_err(|e| e.to_string())?;
 
@@ -647,38 +673,56 @@ pub async fn note_pin(id: String, pinned: bool, state: State<'_, AppState>) -> R
 
 // ----- Per-note password protection -----
 
-/// Decrypt a row's content, peeling the per-note password layer for protected
-/// notes using the session-cached password. Returns the LOCKED sentinel if a
-/// protected note hasn't been unlocked this session.
-fn decrypt_content(state: &AppState, row: &NoteRow) -> Result<serde_json::Value, String> {
-    let password = state.note_password(&row.id);
-    let vault_ct = peel_vault_ct(
-        row.note_salt.as_deref(),
-        row.note_nonce.as_deref(),
-        &row.content_ct,
-        password.as_deref(),
-    )
-    .map_err(|_| LOCKED.to_string())?;
-    let content_bytes = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())
+/// Open a row to (title, content JSON bytes), peeling a protected note's
+/// password layer with the session-cached password. Returns the LOCKED sentinel
+/// if it hasn't been unlocked this session. Shared by note_get, transfer send,
+/// and export so the peel logic lives once.
+pub(crate) fn open_row(state: &AppState, row: &NoteRow) -> Result<(String, Vec<u8>), String> {
+    let (vault_ct, vault_title_ct) = match (&row.note_salt, &row.note_nonce) {
+        (Some(salt), Some(nonce)) => {
+            let password = state.note_password(&row.id).ok_or(LOCKED)?;
+            let (vault_ct, title, _) =
+                open_note(&password, salt, nonce, &row.content_ct, sealed_title(row))
+                    .map_err(|_| LOCKED.to_string())?;
+            (vault_ct, title.unwrap_or_else(|| row.title_ct.clone()))
+        }
+        _ => (row.content_ct.clone(), row.title_ct.clone()),
+    };
+    let title = vault_title(&state.device_key, row, &vault_title_ct)?;
+    let content = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())
         .map_err(|e| e.to_string())?;
-    serde_json::from_slice(&content_bytes).map_err(|e| e.to_string())
+    Ok((title, content))
 }
 
-/// Persist a row whose content protection (content_ct + salt + nonce + preview)
-/// has been changed in place. Leaves updated_at untouched so protecting/unlocking
-/// a note doesn't reorder a list sorted by "date modified".
-async fn persist_protection(
-    state: &AppState,
-    mut row: NoteRow,
-    content_ct: Vec<u8>,
-    note_salt: Option<Vec<u8>>,
-    note_nonce: Option<Vec<u8>>,
-    preview_text: Option<String>,
-) -> Result<(), String> {
-    row.content_ct = content_ct;
-    row.note_salt = note_salt;
-    row.note_nonce = note_nonce;
-    row.preview_text = preview_text;
+/// The title's password layer, if sealed. `None` for unprotected notes and for
+/// notes protected before titles were sealed (migrated on their next unlock).
+fn sealed_title(row: &NoteRow) -> Option<(&[u8], &[u8])> {
+    row.title_note_nonce.as_deref().map(|n| (n, row.title_ct.as_slice()))
+}
+
+/// Decrypt a title's device-key layer.
+fn vault_title(key: &[u8; 32], row: &NoteRow, vault_title_ct: &[u8]) -> Result<String, String> {
+    let bytes = decrypt_with_vault(key, &row.title_nonce, vault_title_ct, row.id.as_bytes())
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Put a note's sealed body and title on the row, replacing the vault-only form.
+pub(crate) fn apply_sealed(row: &mut NoteRow, sealed: SealedNote) {
+    row.content_ct = sealed.content_ct;
+    row.note_salt = Some(sealed.salt.to_vec());
+    row.note_nonce = Some(sealed.nonce.to_vec());
+    row.title_ct = sealed.title_ct;
+    row.title_note_nonce = Some(sealed.title_nonce.to_vec());
+}
+
+/// Persist a row re-sealed under a note password (protect, re-key, upgrade).
+/// Drops the list preview, which would sit outside the password layer. Leaves
+/// updated_at untouched so protecting/unlocking a note doesn't reorder a list
+/// sorted by "date modified".
+async fn persist_sealed(state: &AppState, mut row: NoteRow, sealed: SealedNote) -> Result<(), String> {
+    apply_sealed(&mut row, sealed);
+    row.preview_text = None;
     queries::note_update(&state.db, &row)
         .await
         .map_err(|e| e.to_string())
@@ -695,11 +739,10 @@ pub(crate) async fn protect_impl(state: &AppState, id: &str, password: &str) -> 
     if row.note_salt.is_some() {
         return Err(ALREADY_PROTECTED.into());
     }
-    let (salt, nonce, double_ct) =
-        apply_note_password(password, &row.content_ct).map_err(|e| e.to_string())?;
-    persist_protection(state, row, double_ct, Some(salt.to_vec()), Some(nonce.to_vec()), None)
-        .await?;
-    state.unlock_note(id, password);
+    let title = vault_title(&state.device_key, &row, &row.title_ct)?;
+    let sealed = seal_note(password, &row.content_ct, &row.title_ct).map_err(|e| e.to_string())?;
+    persist_sealed(state, row, sealed).await?;
+    state.unlock_note(id, password, &title);
     Ok(())
 }
 
@@ -750,10 +793,10 @@ async fn unprotect_impl(state: &AppState, id: &str, password: &str) -> Result<()
         (Some(s), Some(n)) => (s.clone(), n.clone()),
         _ => return Err(NOT_PROTECTED.into()),
     };
-    let vault_ct = record_password_attempt(
+    let (vault_ct, vault_title_ct, _) = record_password_attempt(
         state,
         id,
-        remove_note_password(password, &salt, &nonce, &row.content_ct)
+        open_note(password, &salt, &nonce, &row.content_ct, sealed_title(&row))
             .map_err(|_| WRONG_PASSWORD.to_string()),
     )?;
 
@@ -766,7 +809,18 @@ async fn unprotect_impl(state: &AppState, id: &str, password: &str) -> Result<()
         .map(|p| encrypt_preview(&state.device_key, id, &p))
         .transpose()?;
 
-    persist_protection(state, row, vault_ct, None, None, preview_text).await?;
+    row.content_ct = vault_ct;
+    row.note_salt = None;
+    row.note_nonce = None;
+    // Back under the device key alone, like any unprotected title.
+    if let Some(t) = vault_title_ct {
+        row.title_ct = t;
+    }
+    row.title_note_nonce = None;
+    row.preview_text = preview_text;
+    queries::note_update(&state.db, &row)
+        .await
+        .map_err(|e| e.to_string())?;
     state.lock_note(id);
     Ok(())
 }
@@ -789,29 +843,22 @@ async fn change_password_impl(
         (Some(s), Some(n)) => (s.clone(), n.clone()),
         _ => return Err(NOT_PROTECTED.into()),
     };
-    let vault_ct = record_password_attempt(
+    let (vault_ct, vault_title_ct, _) = record_password_attempt(
         state,
         id,
-        remove_note_password(old_password, &salt, &nonce, &row.content_ct)
+        open_note(old_password, &salt, &nonce, &row.content_ct, sealed_title(&row))
             .map_err(|_| WRONG_PASSWORD.to_string()),
     )?;
+    let vault_title_ct = vault_title_ct.unwrap_or_else(|| row.title_ct.clone());
+    let title = vault_title(&state.device_key, &row, &vault_title_ct)?;
     // Recovery wraps the old password, so a password change resets it. The user
     // can re-add a recovery code afterward.
     row.rc_salt = None;
     row.rc_nonce = None;
     row.rc_ct = None;
-    let (new_salt, new_nonce, double_ct) =
-        apply_note_password(new_password, &vault_ct).map_err(|e| e.to_string())?;
-    persist_protection(
-        state,
-        row,
-        double_ct,
-        Some(new_salt.to_vec()),
-        Some(new_nonce.to_vec()),
-        None,
-    )
-    .await?;
-    state.unlock_note(id, new_password);
+    let sealed = seal_note(new_password, &vault_ct, &vault_title_ct).map_err(|e| e.to_string())?;
+    persist_sealed(state, row, sealed).await?;
+    state.unlock_note(id, new_password, &title);
     Ok(())
 }
 
@@ -823,27 +870,24 @@ async fn unlock_impl(state: &AppState, id: &str, password: &str) -> Result<(), S
         .ok_or("note not found")?;
     match (row.note_salt.clone(), row.note_nonce.clone()) {
         (Some(salt), Some(nonce)) => {
-            let (vault_ct, was_legacy) = record_password_attempt(
+            let (vault_ct, vault_title_ct, was_legacy) = record_password_attempt(
                 state,
                 id,
-                remove_note_password_detect(password, &salt, &nonce, &row.content_ct)
+                open_note(password, &salt, &nonce, &row.content_ct, sealed_title(&row))
                     .map_err(|_| WRONG_PASSWORD.to_string()),
             )?;
-            state.unlock_note(id, password);
+            let title_sealed = vault_title_ct.is_some();
+            let vault_title_ct = vault_title_ct.unwrap_or_else(|| row.title_ct.clone());
+            let title = vault_title(&state.device_key, &row, &vault_title_ct)?;
+            state.unlock_note(id, password, &title);
             // K2: transparently re-wrap a pre-bump (p=1) note at the current
-            // Argon2 params on unlock, so it's hardened after first open.
-            if was_legacy {
-                let (new_salt, new_nonce, double_ct) =
-                    apply_note_password(password, &vault_ct).map_err(|e| e.to_string())?;
-                persist_protection(
-                    state,
-                    row,
-                    double_ct,
-                    Some(new_salt.to_vec()),
-                    Some(new_nonce.to_vec()),
-                    None,
-                )
-                .await?;
+            // Argon2 params on unlock, so it's hardened after first open. The
+            // same pass seals the title of a note protected before titles were,
+            // dropping its device-key-only copy.
+            if was_legacy || !title_sealed {
+                let sealed =
+                    seal_note(password, &vault_ct, &vault_title_ct).map_err(|e| e.to_string())?;
+                persist_sealed(state, row, sealed).await?;
             }
             Ok(())
         }
@@ -996,23 +1040,23 @@ async fn recover_impl(
     };
     state.reset_passphrase_failures(id);
     let old_password = String::from_utf8(password_bytes).map_err(|_| WRONG_RECOVERY.to_string())?;
-    let vault_ct = remove_note_password(&old_password, &note_salt, &note_nonce, &row.content_ct)
-        .map_err(|_| WRONG_RECOVERY.to_string())?;
-    let (new_salt, new_nonce, double_ct) =
-        apply_note_password(new_password, &vault_ct).map_err(|e| e.to_string())?;
+    let (vault_ct, vault_title_ct, _) =
+        open_note(&old_password, &note_salt, &note_nonce, &row.content_ct, sealed_title(&row))
+            .map_err(|_| WRONG_RECOVERY.to_string())?;
+    let vault_title_ct = vault_title_ct.unwrap_or_else(|| row.title_ct.clone());
+    let title = vault_title(&state.device_key, &row, &vault_title_ct)?;
+    let sealed = seal_note(new_password, &vault_ct, &vault_title_ct).map_err(|e| e.to_string())?;
     // Keep the same recovery code valid by re-wrapping it around the new password.
     let (rs, rn, rc) =
         apply_note_password(&norm, new_password.as_bytes()).map_err(|e| e.to_string())?;
-    row.content_ct = double_ct;
-    row.note_salt = Some(new_salt.to_vec());
-    row.note_nonce = Some(new_nonce.to_vec());
+    apply_sealed(&mut row, sealed);
     row.rc_salt = Some(rs.to_vec());
     row.rc_nonce = Some(rn.to_vec());
     row.rc_ct = Some(rc);
     queries::note_update(&state.db, &row)
         .await
         .map_err(|e| e.to_string())?;
-    state.unlock_note(id, new_password);
+    state.unlock_note(id, new_password, &title);
     Ok(())
 }
 
@@ -1126,6 +1170,39 @@ mod tests {
 
     async fn fetch(state: &AppState, id: &str) -> NoteRow {
         queries::note_get(&state.db, id).await.unwrap().unwrap()
+    }
+
+    fn decrypt_content(state: &AppState, row: &NoteRow) -> Result<serde_json::Value, String> {
+        open_row(state, row).map(|(_, bytes)| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// What the list shows for a note right now.
+    async fn listed_title(state: &AppState, id: &str) -> String {
+        list_impl(state, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == id)
+            .unwrap()
+            .title
+    }
+
+    /// Whether the stored title opens with the device key alone, which is what
+    /// anyone holding the DB plus the OS keychain has.
+    fn title_readable_with_device_key(state: &AppState, row: &NoteRow) -> bool {
+        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
+            .is_ok()
+    }
+
+    /// A note protected before titles were sealed: body under the password, title
+    /// still under the device key only.
+    async fn protect_legacy(state: &AppState, id: &str, password: &str) {
+        let mut row = fetch(state, id).await;
+        let (salt, nonce, ct) = apply_note_password(password, &row.content_ct).unwrap();
+        row.content_ct = ct;
+        row.note_salt = Some(salt.to_vec());
+        row.note_nonce = Some(nonce.to_vec());
+        queries::note_update(&state.db, &row).await.unwrap();
     }
 
     async fn seed_tagged(state: &AppState, title: &str, tags: &[&str]) -> String {
@@ -1481,24 +1558,148 @@ mod tests {
         assert!(row.content_ct.is_empty());
     }
 
-    /// A protected note must still be listable — the list shows its title and a
-    /// lock, and derives that lock from note_salt.
+    /// A protected note must still be listable, with a lock derived from
+    /// note_salt, but its title is sealed and the list shows a placeholder.
     #[tokio::test]
     async fn list_page_reports_protected_notes() {
         let state = test_state().await;
         let id = seed_tagged(&state, "Diary", &[]).await;
         protect_impl(&state, &id, "pw").await.unwrap();
+        state.lock_note(&id);
 
-        let rows = queries::note_list_page(&state.db, 500, 0).await.unwrap();
-        assert!(rows[0].note_salt.is_some());
-        let title = decrypt_with_vault(
-            &state.device_key,
-            &rows[0].title_nonce,
-            &rows[0].title_ct,
-            rows[0].id.as_bytes(),
-        )
-        .unwrap();
-        assert_eq!(String::from_utf8(title).unwrap(), "Diary");
+        let listed = list_impl(&state, None, None).await.unwrap();
+        assert!(listed[0].has_note_password);
+        assert_eq!(listed[0].title, LOCKED_TITLE);
+    }
+
+    // ---- Sealed titles ----
+
+    #[tokio::test]
+    async fn protecting_seals_the_title_away_from_the_device_key() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Swiss bank account", &[]).await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+
+        let row = fetch(&state, &id).await;
+        assert!(row.title_note_nonce.is_some(), "title should carry a password layer");
+        assert!(
+            !title_readable_with_device_key(&state, &row),
+            "the device key alone must not open a protected title"
+        );
+        assert_eq!(open_row(&state, &row).unwrap().0, "Swiss bank account");
+    }
+
+    #[tokio::test]
+    async fn the_list_shows_the_real_title_only_while_unlocked() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Diary", &[]).await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        assert_eq!(listed_title(&state, &id).await, "Diary", "protect leaves it unlocked");
+
+        state.lock_note(&id);
+        assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE);
+        unlock_impl(&state, &id, "pw").await.unwrap();
+        assert_eq!(listed_title(&state, &id).await, "Diary");
+        state.lock_note(&id);
+        assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE);
+    }
+
+    #[tokio::test]
+    async fn a_locked_note_get_leaks_no_title() {
+        let state = test_state().await;
+        let id = seed_note(&state, "body").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        state.lock_note(&id);
+        assert_eq!(open_row(&state, &fetch(&state, &id).await).unwrap_err(), LOCKED);
+    }
+
+    #[tokio::test]
+    async fn unprotect_restores_a_device_key_title() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Diary", &[]).await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        unprotect_impl(&state, &id, "pw").await.unwrap();
+
+        let row = fetch(&state, &id).await;
+        assert!(row.title_note_nonce.is_none());
+        assert!(title_readable_with_device_key(&state, &row));
+        assert_eq!(listed_title(&state, &id).await, "Diary");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_protected_note_seals_its_title_on_unlock() {
+        let state = test_state().await;
+        let id = seed_note(&state, "old secret").await;
+        protect_legacy(&state, &id, "pw").await;
+        let before = fetch(&state, &id).await;
+        assert!(title_readable_with_device_key(&state, &before), "precondition: legacy row");
+        assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE, "locked shows the placeholder");
+
+        unlock_impl(&state, &id, "pw").await.unwrap();
+        let after = fetch(&state, &id).await;
+        assert!(after.title_note_nonce.is_some());
+        assert!(
+            !title_readable_with_device_key(&state, &after),
+            "the device-key copy must be gone after the first unlock"
+        );
+        assert_eq!(listed_title(&state, &id).await, "Secret");
+        assert_eq!(decrypt_content(&state, &after).unwrap()["body"], "old secret");
+
+        state.lock_note(&id);
+        unlock_impl(&state, &id, "pw").await.unwrap();
+        assert_eq!(open_row(&state, &fetch(&state, &id).await).unwrap().0, "Secret");
+    }
+
+    /// Both need the title before they re-seal it, including a legacy row whose
+    /// title was never sealed.
+    #[tokio::test]
+    async fn change_password_and_recovery_keep_the_title() {
+        let state = test_state().await;
+        let id = seed_note(&state, "x").await;
+        protect_legacy(&state, &id, "pw").await;
+        change_password_impl(&state, &id, "pw", "pw2").await.unwrap();
+        let row = fetch(&state, &id).await;
+        assert!(!title_readable_with_device_key(&state, &row));
+        state.lock_note(&id);
+        unlock_impl(&state, &id, "pw2").await.unwrap();
+        assert_eq!(listed_title(&state, &id).await, "Secret");
+
+        let code = add_recovery_impl(&state, &id, "pw2").await.unwrap();
+        state.lock_note(&id);
+        recover_impl(&state, &id, &code, "pw3").await.unwrap();
+        assert_eq!(listed_title(&state, &id).await, "Secret");
+        state.lock_note(&id);
+        unlock_impl(&state, &id, "pw3").await.unwrap();
+        let row = fetch(&state, &id).await;
+        assert!(!title_readable_with_device_key(&state, &row));
+        assert_eq!(open_row(&state, &row).unwrap().0, "Secret");
+    }
+
+    /// Saving a protected note writes a fresh title, which must go straight
+    /// under the password too.
+    #[tokio::test]
+    async fn editing_a_protected_note_keeps_the_new_title_sealed() {
+        let state = test_state().await;
+        let id = seed_note(&state, "x").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        let input = NoteInput {
+            kind: "document".into(),
+            title: "Renamed".into(),
+            content: json!({ "body": "y" }),
+            tags: vec![],
+            content_hint: None,
+            pinned: None,
+            bg_color: None,
+            bg_image: None,
+            show_preview: None,
+        };
+        update_impl(&state, id.clone(), input).await.unwrap();
+
+        let row = fetch(&state, &id).await;
+        assert!(!title_readable_with_device_key(&state, &row));
+        assert_eq!(listed_title(&state, &id).await, "Renamed");
+        state.lock_note(&id);
+        assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE);
     }
 
     #[tokio::test]

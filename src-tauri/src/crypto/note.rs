@@ -36,23 +36,44 @@ pub fn apply_note_password(
     Ok((salt, nonce, ct))
 }
 
-/// Recover the vault ciphertext from a (possibly) protected note row.
-/// If the note has no password layer, returns the content as-is. If it does,
-/// `password` must be supplied (`None` → `Err`), and a wrong password also errors.
-/// Shared by note_get, transfer send, and export so the peel logic lives once.
-pub fn peel_vault_ct(
-    note_salt: Option<&[u8]>,
-    note_nonce: Option<&[u8]>,
-    content_ct: &[u8],
-    password: Option<&str>,
-) -> anyhow::Result<Vec<u8>> {
-    match (note_salt, note_nonce) {
-        (Some(salt), Some(nonce)) => {
-            let pw = password.ok_or_else(|| anyhow::anyhow!("locked"))?;
-            remove_note_password(pw, salt, nonce, content_ct)
-        }
-        _ => Ok(content_ct.to_vec()),
-    }
+/// AAD for the title's password layer. The body's layer binds none, so this
+/// keeps a note's two sealed blobs from being swapped for each other.
+const TITLE_AAD: &[u8] = b"panote-note-title";
+
+/// A protected note's body and title, sealed under one key (one salt) so a
+/// single Argon2 derivation opens both.
+pub struct SealedNote {
+    pub salt: [u8; 32],
+    pub nonce: [u8; 12],
+    pub content_ct: Vec<u8>,
+    pub title_nonce: [u8; 12],
+    pub title_ct: Vec<u8>,
+}
+
+/// Seal already-vault-encrypted body and title under a fresh note-password key.
+pub fn seal_note(password: &str, vault_ct: &[u8], vault_title_ct: &[u8]) -> anyhow::Result<SealedNote> {
+    let salt = random_salt();
+    let key = derive_key(password, &salt)?;
+    let (nonce, content_ct) = encrypt(&key, vault_ct, b"")?;
+    let (title_nonce, title_ct) = encrypt(&key, vault_title_ct, TITLE_AAD)?;
+    Ok(SealedNote { salt, nonce, content_ct, title_nonce, title_ct })
+}
+
+/// Reverse of [`seal_note`]: returns (vault_ct, vault title ct, was_legacy).
+/// `sealed_title` is (title nonce, title ct), or `None` for a note protected
+/// before titles were sealed, whose title is still under the device key only.
+pub fn open_note(
+    password: &str,
+    note_salt: &[u8],
+    note_nonce: &[u8],
+    double_ct: &[u8],
+    sealed_title: Option<(&[u8], &[u8])>,
+) -> anyhow::Result<(Vec<u8>, Option<Vec<u8>>, bool)> {
+    let (key, vault_ct, was_legacy) = open_body(password, note_salt, note_nonce, double_ct)?;
+    let title = sealed_title
+        .map(|(nonce, ct)| decrypt(&key, nonce, ct, TITLE_AAD))
+        .transpose()?;
+    Ok((vault_ct, title, was_legacy))
 }
 
 /// Strip the per-note encryption layer. Returns the vault-encrypted bytes.
@@ -74,14 +95,26 @@ pub fn remove_note_password_detect(
     note_nonce: &[u8],
     double_ct: &[u8],
 ) -> anyhow::Result<(Vec<u8>, bool)> {
+    let (_, pt, was_legacy) = open_body(password, note_salt, note_nonce, double_ct)?;
+    Ok((pt, was_legacy))
+}
+
+/// Peel the body's password layer, returning the key that opened it too.
+fn open_body(
+    password: &str,
+    note_salt: &[u8],
+    note_nonce: &[u8],
+    double_ct: &[u8],
+) -> anyhow::Result<([u8; 32], Vec<u8>, bool)> {
     let key = derive_key(password, note_salt)?;
     if let Ok(pt) = decrypt(&key, note_nonce, double_ct, b"") {
-        return Ok((pt, false));
+        return Ok((key, pt, false));
     }
     // ponytail: notes protected before the K2 p=1→p=4 bump were derived at p=1.
     // Retry so they still unlock; the caller re-wraps them at p=4 on next unlock.
     let legacy = derive_key_legacy(password, note_salt)?;
-    Ok((decrypt(&legacy, note_nonce, double_ct, b"")?, true))
+    let pt = decrypt(&legacy, note_nonce, double_ct, b"")?;
+    Ok((legacy, pt, true))
 }
 
 #[cfg(test)]
@@ -141,6 +174,24 @@ mod tests {
         let (_, vault_ct) = encrypt_with_vault(&vault_key, b"data", b"note-1").unwrap();
         let (salt, note_nonce, double_ct) = apply_note_password("correct", &vault_ct).unwrap();
         assert!(remove_note_password("wrong", &salt, &note_nonce, &double_ct).is_err());
+    }
+
+    #[test]
+    fn sealed_note_opens_body_and_title_under_one_password() {
+        let s = seal_note("pw", b"body-ct", b"title-ct").unwrap();
+        let (body, title, legacy) =
+            open_note("pw", &s.salt, &s.nonce, &s.content_ct, Some((&s.title_nonce, &s.title_ct)))
+                .unwrap();
+        assert_eq!((body.as_slice(), title.as_deref(), legacy), (&b"body-ct"[..], Some(&b"title-ct"[..]), false));
+        assert!(open_note("wrong", &s.salt, &s.nonce, &s.content_ct, None).is_err());
+    }
+
+    /// Distinct AAD: the sealed title can't be passed off as the body or back.
+    #[test]
+    fn sealed_title_and_body_cannot_be_swapped() {
+        let s = seal_note("pw", b"body-ct", b"title-ct").unwrap();
+        assert!(open_note("pw", &s.salt, &s.title_nonce, &s.title_ct, None).is_err());
+        assert!(open_note("pw", &s.salt, &s.nonce, &s.content_ct, Some((&s.nonce, &s.content_ct))).is_err());
     }
 
     #[test]

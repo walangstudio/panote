@@ -15,6 +15,21 @@
   left out of the list, counts, search, folder counts, export and folder sends; a note
   re-sent from another device comes back out of Trash.
 
+### Security
+
+- **Protected note titles are sealed under the note password, like the body.** Titles used
+  to sit under the device key alone, so anyone with the unlocked app, or the database plus
+  the OS keychain, could read them. The list, search and sorting now see "Locked note" until
+  the note is unlocked this session, and again after it re-locks. Removing the password puts
+  the title back under the device key.
+- **Existing protected notes migrate lazily.** Their title is sealed, and the device-key copy
+  dropped, the next time each one is unlocked. Until then the old copy stays on disk, so
+  unlock every protected note once to finish the migration.
+- Export seals a protected note's title in its encrypted blob and writes "Locked note" as the
+  entry title. Older backups (title on the entry) still import; older builds import a new
+  backup with the title "Locked note". Transfer is unchanged on the wire: the title travels
+  with the body and is re-sealed on a receiver that protects the note.
+
 ## [0.4.0] - 2026-09-25
 
 ### Breaking

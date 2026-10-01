@@ -100,6 +100,11 @@ const DEFAULT_HANDLERS: HandlerMap = {
   "plugin:event|unlisten": null,
 };
 
+/// Returned by a function handler to reject the invoke with this exact value, the
+/// way the backend rejects with a bare error string (e.g. "locked"). A thrown
+/// error cannot do this: it crosses exposeFunction as an Error object.
+export const reject = (error: string) => ({ __reject: error });
+
 // Counter ensures unique function names across calls on the same page.
 let _fnSeq = 0;
 
@@ -127,7 +132,9 @@ export async function setupTauriMock(page: Page, overrides: HandlerMap = {}) {
         }
         if (typeof handler === "string" && handler.startsWith("__fn__")) {
           const fnName = handler.slice("__fn__".length);
-          return (window as any)[fnName](_args);
+          return (window as any)[fnName](_args).then((r: any) =>
+            r && typeof r === "object" && "__reject" in r ? Promise.reject(r.__reject) : r,
+          );
         }
         return Promise.resolve(handler);
       },

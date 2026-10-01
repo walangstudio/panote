@@ -505,21 +505,6 @@ pub async fn import_blob(
 ///
 /// Older senders may omit origin_device_id/origin_note_id — in that case we
 /// treat the blob as having no stable identity and always insert fresh.
-/// Wrap vault ciphertext in the per-note password layer when a password is
-/// given; otherwise pass it through unprotected. Returns (content_ct, salt, nonce).
-fn seal_content(
-    vault_ct: Vec<u8>,
-    password: Option<&str>,
-) -> anyhow::Result<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> {
-    match password {
-        Some(pw) if !pw.is_empty() => {
-            let (salt, nonce, double_ct) = crate::crypto::note::apply_note_password(pw, &vault_ct)?;
-            Ok((double_ct, Some(salt.to_vec()), Some(nonce.to_vec())))
-        }
-        _ => Ok((vault_ct, None, None)),
-    }
-}
-
 pub async fn import_blob_detailed(
     state: &AppState,
     device_key: &[u8; 32],
@@ -566,8 +551,7 @@ pub async fn import_blob_detailed(
             // content with — refuse to overwrite rather than silently expose it.
             return Ok((prev.id, ImportOutcome::Updated));
         }
-        let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, effective_pw.as_deref())?;
-        let row = NoteRow {
+        let mut row = NoteRow {
             // Preserve where the recipient filed it; a re-send must not move it.
             folder_id: prev.folder_id.clone(),
             sort_order: prev.sort_order,
@@ -575,10 +559,11 @@ pub async fn import_blob_detailed(
             kind: blob.kind,
             title_nonce: title_nonce.to_vec(),
             title_ct,
+            title_note_nonce: None,
             nonce: content_nonce.to_vec(),
-            content_ct,
-            note_salt,
-            note_nonce,
+            content_ct: vault_ct,
+            note_salt: None,
+            note_nonce: None,
             created_at: prev.created_at,
             updated_at: ts,
             tags: tags_stored,
@@ -594,10 +579,18 @@ pub async fn import_blob_detailed(
             rc_nonce: None,
             rc_ct: None,
         };
+        // Title and body are re-sealed together, so neither lands in the clear.
+        if let Some(pw) = &effective_pw {
+            let sealed = crate::crypto::note::seal_note(pw, &row.content_ct, &row.title_ct)?;
+            crate::notes::commands::apply_sealed(&mut row, sealed);
+        }
         queries::note_update(&state.db, &row).await?;
         // Accepting a note is asking to see it; updating a copy that sits in
         // Trash would make the arrival invisible.
         crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
+        if let Some(pw) = &effective_pw {
+            state.unlock_note(&prev.id, pw, &blob.title);
+        }
         return Ok((prev.id, ImportOutcome::Updated));
     }
 
@@ -611,7 +604,6 @@ pub async fn import_blob_detailed(
     };
 
     // Model B: new notes arrive unprotected; the receiver opts into protecting.
-    let (content_ct, note_salt, note_nonce) = seal_content(vault_ct, None)?;
     let row = NoteRow {
         folder_id: None,
         sort_order: 0,
@@ -619,10 +611,11 @@ pub async fn import_blob_detailed(
         kind: blob.kind,
         title_nonce: title_nonce.to_vec(),
         title_ct,
+        title_note_nonce: None,
         nonce: content_nonce.to_vec(),
-        content_ct,
-        note_salt,
-        note_nonce,
+        content_ct: vault_ct,
+        note_salt: None,
+        note_nonce: None,
         created_at: blob.created_at,
         updated_at: ts,
         tags: tags_stored,

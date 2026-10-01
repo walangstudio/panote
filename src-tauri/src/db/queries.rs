@@ -123,6 +123,9 @@ pub struct NoteRow {
     pub kind: String,
     pub title_nonce: Vec<u8>,
     pub title_ct: Vec<u8>,
+    /// Nonce of the title's password layer (migration 0016); `None` when the
+    /// title is under the device key only.
+    pub title_note_nonce: Option<Vec<u8>>,
     pub nonce: Vec<u8>,
     pub content_ct: Vec<u8>,
     pub note_salt: Option<Vec<u8>>,
@@ -154,6 +157,7 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         kind: r.get("kind"),
         title_nonce: r.get("title_nonce"),
         title_ct: r.get("title_ct"),
+        title_note_nonce: r.get("title_note_nonce"),
         nonce: r.get("nonce"),
         content_ct: r.get("content_ct"),
         note_salt: r.get("note_salt"),
@@ -179,7 +183,7 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id, sort_order";
+    "id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id, sort_order";
 
 /// The list view decrypts only the title and tags, so the body ciphertext and
 /// the recovery wrap are pure read amplification — they scale with note size
@@ -201,6 +205,8 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         kind: r.get("kind"),
         title_nonce: r.get("title_nonce"),
         title_ct: r.get("title_ct"),
+        // Not selected: the list never opens a protected title.
+        title_note_nonce: None,
         nonce: Vec::new(),
         content_ct: Vec::new(),
         note_salt: r.get("note_salt"),
@@ -229,13 +235,14 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
 
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
     .bind(&row.title_nonce)
     .bind(&row.title_ct)
+    .bind(&row.title_note_nonce)
     .bind(&row.nonce)
     .bind(&row.content_ct)
     .bind(&row.note_salt)
@@ -261,11 +268,12 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=?, rc_salt=?, rc_nonce=?, rc_ct=? WHERE id=?",
+        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, title_note_nonce=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=?, rc_salt=?, rc_nonce=?, rc_ct=? WHERE id=?",
     )
     .bind(&row.kind)
     .bind(&row.title_nonce)
     .bind(&row.title_ct)
+    .bind(&row.title_note_nonce)
     .bind(&row.nonce)
     .bind(&row.content_ct)
     .bind(&row.note_salt)

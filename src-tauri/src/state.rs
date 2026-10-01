@@ -23,11 +23,13 @@ pub fn now_secs() -> i64 {
 /// interrupt an editing session.
 pub const UNLOCK_TIMEOUT_SECS: i64 = 15 * 60;
 
-/// A cached note password. The `Zeroizing` wrapper scrubs the string when the
-/// entry is dropped, so expiring an entry actually clears it from memory.
+/// A cached note password, and the note's title, which is sealed under that
+/// password at rest. The `Zeroizing` wrappers scrub both when the entry is
+/// dropped, so expiring an entry actually clears it from memory.
 #[derive(Debug)]
 pub struct UnlockEntry {
     pub password: Zeroizing<String>,
+    pub title: Zeroizing<String>,
     pub touched_at: i64,
 }
 
@@ -128,14 +130,14 @@ mod tests {
     #[tokio::test]
     async fn unlocked_note_password_is_readable() {
         let state = test_state().await;
-        state.unlock_note("n1", "hunter2");
+        state.unlock_note("n1", "hunter2", "title");
         assert_eq!(state.note_password("n1").as_deref(), Some("hunter2"));
     }
 
     #[tokio::test]
     async fn unlock_expires_after_the_timeout() {
         let state = test_state().await;
-        state.unlock_note("n1", "hunter2");
+        state.unlock_note("n1", "hunter2", "title");
         age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS + 1);
         assert!(
             state.note_password("n1").is_none(),
@@ -148,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn using_a_note_extends_its_unlock() {
         let state = test_state().await;
-        state.unlock_note("n1", "hunter2");
+        state.unlock_note("n1", "hunter2", "title");
         age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
         assert!(state.note_password("n1").is_some());
         // The read above should have reset the clock.
@@ -161,8 +163,8 @@ mod tests {
     #[tokio::test]
     async fn any_access_sweeps_other_expired_entries() {
         let state = test_state().await;
-        state.unlock_note("stale", "old-secret");
-        state.unlock_note("fresh", "new-secret");
+        state.unlock_note("stale", "old-secret", "title");
+        state.unlock_note("fresh", "new-secret", "title");
         age_unlock(&state, "stale", UNLOCK_TIMEOUT_SECS + 1);
 
         assert!(state.note_password("fresh").is_some());
@@ -173,9 +175,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reading_the_cached_title_does_not_extend_the_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "Bank");
+        assert_eq!(state.note_title("n1").as_deref(), Some("Bank"));
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        state.note_title("n1");
+        age_unlock(&state, "n1", 10);
+        assert!(state.note_title("n1").is_none(), "reading the title must not extend the unlock");
+    }
+
+    #[tokio::test]
     async fn locking_forgets_the_password() {
         let state = test_state().await;
-        state.unlock_note("n1", "hunter2");
+        state.unlock_note("n1", "hunter2", "title");
         state.lock_note("n1");
         assert!(state.note_password("n1").is_none());
     }
@@ -323,13 +336,14 @@ impl AppState {
         self.passphrase_failures.lock().unwrap().remove(peer_addr);
     }
 
-    /// Record the password that unlocked a note. Expires after
-    /// [`UNLOCK_TIMEOUT_SECS`] of inactivity.
-    pub fn unlock_note(&self, note_id: &str, password: &str) {
+    /// Record the password that unlocked a note, and its title for the list.
+    /// Expires after [`UNLOCK_TIMEOUT_SECS`] of inactivity.
+    pub fn unlock_note(&self, note_id: &str, password: &str, title: &str) {
         self.unlocked.lock().unwrap().insert(
             note_id.to_string(),
             UnlockEntry {
                 password: Zeroizing::new(password.to_string()),
+                title: Zeroizing::new(title.to_string()),
                 touched_at: now_secs(),
             },
         );
@@ -347,6 +361,15 @@ impl AppState {
         // Inactivity timeout, so using a note keeps it open.
         entry.touched_at = now_secs();
         Some(entry.password.to_string())
+    }
+
+    /// The cached title of an unlocked note. Sweeps like [`Self::note_password`]
+    /// but does not count as use: the list refreshing must not keep a note open.
+    pub fn note_title(&self, note_id: &str) -> Option<String> {
+        let mut map = self.unlocked.lock().unwrap();
+        let cutoff = now_secs() - UNLOCK_TIMEOUT_SECS;
+        map.retain(|_, e| e.touched_at > cutoff);
+        map.get(note_id).map(|e| e.title.to_string())
     }
 
     /// Forget a note's cached password (re-locks it for this session).

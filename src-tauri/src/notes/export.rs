@@ -22,7 +22,6 @@
 // past version gets a permanent fixture test in the test module below.
 
 use crate::{
-    crypto::note::decrypt_with_vault,
     db::queries::{self, NoteRow},
     state::{now_secs, AppState},
     transfer::commands::{import_blob_detailed, ImportOutcome},
@@ -49,6 +48,13 @@ pub struct SecretBlobV1 {
     pub nonce: String,
     /// base64 ciphertext of the note's content JSON.
     pub ct: String,
+    /// base64 nonce and ciphertext of the note's title, under the same key.
+    /// Absent in files written before titles were sealed, which carry the real
+    /// title on the entry instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_ct: Option<String>,
 }
 
 /// Bound as AAD so a blob cannot be swapped between entries in the file.
@@ -56,6 +62,13 @@ const SECRET_AAD_PREFIX: &[u8] = b"panote-export-secret-v1:";
 
 fn secret_aad(note_id: &str) -> Vec<u8> {
     [SECRET_AAD_PREFIX, note_id.as_bytes()].concat()
+}
+
+/// Distinct from the content's, so the title and content blobs can't be swapped.
+const SECRET_TITLE_AAD_PREFIX: &[u8] = b"panote-export-secret-title-v1:";
+
+fn secret_title_aad(note_id: &str) -> Vec<u8> {
+    [SECRET_TITLE_AAD_PREFIX, note_id.as_bytes()].concat()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -282,6 +295,10 @@ pub async fn notes_export(
     app_version: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    export_impl(&state, app_version).await
+}
+
+async fn export_impl(state: &AppState, app_version: String) -> Result<String, String> {
     let key = &state.device_key;
     let rows = queries::note_list(&state.db)
         .await
@@ -289,35 +306,31 @@ pub async fn notes_export(
 
     let mut entries = Vec::with_capacity(rows.len());
     let mut locked = 0usize;
-    for mut row in rows {
-        // Protected notes carry a password layer over the vault ciphertext. Peel
-        // it with the session-cached password so the content can be re-sealed
-        // under that same password for the file — a backup must never contain a
-        // protected note in the clear. A note that can't be peeled (not unlocked
-        // this session) is counted, not silently dropped, and fails loudly below.
-        let mut note_password: Option<String> = None;
-        if row.note_salt.is_some() {
-            let password = state.note_password(&row.id);
-            match crate::crypto::note::peel_vault_ct(
-                row.note_salt.as_deref(),
-                row.note_nonce.as_deref(),
-                &row.content_ct,
-                password.as_deref(),
-            ) {
-                Ok(vault_ct) => {
-                    row.content_ct = vault_ct;
-                    row.note_salt = None;
-                    row.note_nonce = None;
-                    note_password = password;
-                }
-                Err(_) => {
-                    locked += 1;
-                    continue;
-                }
+    for row in rows {
+        // Protected notes carry a password layer over the vault ciphertext. Open
+        // it with the session-cached password so content and title can be
+        // re-sealed under that same password for the file: a backup must never
+        // contain a protected note in the clear. A note that can't be opened (not
+        // unlocked this session) is counted, not silently dropped, and fails
+        // loudly below.
+        let note_password = match (&row.note_salt, state.note_password(&row.id)) {
+            (Some(_), None) => {
+                locked += 1;
+                continue;
             }
-        }
-        let entry =
-            row_to_entry(key, &row, note_password.as_deref()).map_err(|e| e.to_string())?;
+            (Some(_), pw) => pw,
+            (None, _) => None,
+        };
+        let (title, content_bytes) = match crate::notes::commands::open_row(state, &row) {
+            Ok(opened) => opened,
+            Err(e) if e == crate::notes::commands::LOCKED => {
+                locked += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let entry = row_to_entry(key, &row, title, &content_bytes, note_password.as_deref())
+            .map_err(|e| e.to_string())?;
         entries.push(entry);
     }
     if locked > 0 {
@@ -354,6 +367,15 @@ pub async fn notes_import(
     secret_password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ImportSummary, String> {
+    import_impl(&state, &contents, resolution, secret_password.as_deref()).await
+}
+
+async fn import_impl(
+    state: &AppState,
+    contents: &str,
+    resolution: ImportResolution,
+    secret_password: Option<&str>,
+) -> Result<ImportSummary, String> {
     let file = parse_export(contents.as_bytes()).map_err(|e| e.to_string())?;
 
     let mut summary = ImportSummary {
@@ -367,7 +389,7 @@ pub async fn notes_import(
         // A sealed note needs its password before anything else can happen; a
         // failure here is reported, never swallowed into a half-imported note.
         if let Some(blob) = entry.secret.take() {
-            let Some(pw) = secret_password.as_deref() else {
+            let Some(pw) = secret_password else {
                 summary.errors.push(format!(
                     "\"{}\" is password-protected — supply its password to import it",
                     entry.title
@@ -375,7 +397,13 @@ pub async fn notes_import(
                 continue;
             };
             match open_secret(&entry.id, &blob, pw) {
-                Ok(content) => entry.content = content,
+                Ok((content, title)) => {
+                    entry.content = content;
+                    // Older files carry the real title on the entry instead.
+                    if let Some(title) = title {
+                        entry.title = title;
+                    }
+                }
                 Err(_) => {
                     summary.errors.push(format!(
                         "\"{}\" could not be decrypted — wrong password?",
@@ -385,7 +413,7 @@ pub async fn notes_import(
                 }
             }
         }
-        match import_entry(&state, entry, resolution).await {
+        match import_entry(state, entry, resolution).await {
             Ok(ImportEntryResult::Inserted) => summary.imported += 1,
             Ok(ImportEntryResult::Updated) => summary.updated += 1,
             Ok(ImportEntryResult::Skipped) => summary.skipped += 1,
@@ -398,52 +426,71 @@ pub async fn notes_import(
 
 // ----- Helpers -----
 
-/// Re-encrypt a protected note's content under its own password so the backup
-/// never carries it in the clear.
-fn seal_secret(note_id: &str, content_json: &[u8], password: &str) -> anyhow::Result<SecretBlobV1> {
+/// Re-encrypt a protected note's content and title under its own password so
+/// the backup never carries either in the clear.
+fn seal_secret(
+    note_id: &str,
+    content_json: &[u8],
+    title: &str,
+    password: &str,
+) -> anyhow::Result<SecretBlobV1> {
     let salt = crate::crypto::vault::random_salt();
     let key = crate::crypto::vault::derive_key(password, &salt)?;
     let (nonce, ct) = crate::crypto::vault::encrypt(&key, content_json, &secret_aad(note_id))?;
+    let (title_nonce, title_ct) =
+        crate::crypto::vault::encrypt(&key, title.as_bytes(), &secret_title_aad(note_id))?;
     Ok(SecretBlobV1 {
         salt: STANDARD.encode(salt),
         nonce: STANDARD.encode(nonce),
         ct: STANDARD.encode(ct),
+        title_nonce: Some(STANDARD.encode(title_nonce)),
+        title_ct: Some(STANDARD.encode(title_ct)),
     })
 }
 
-/// Reverse of [`seal_secret`]. Wrong password surfaces as an error, never as
-/// silently dropped content.
+/// Reverse of [`seal_secret`]: (content, title). The title is `None` for a file
+/// written before titles were sealed. Wrong password surfaces as an error,
+/// never as silently dropped content.
 fn open_secret(
     note_id: &str,
     blob: &SecretBlobV1,
     password: &str,
-) -> anyhow::Result<serde_json::Value> {
+) -> anyhow::Result<(serde_json::Value, Option<String>)> {
     let salt = STANDARD.decode(&blob.salt)?;
     let nonce = STANDARD.decode(&blob.nonce)?;
     let ct = STANDARD.decode(&blob.ct)?;
     let key = crate::crypto::vault::derive_key(password, &salt)?;
     let plain = crate::crypto::vault::decrypt(&key, &nonce, &ct, &secret_aad(note_id))?;
-    Ok(serde_json::from_slice(&plain)?)
+    let title = match (&blob.title_nonce, &blob.title_ct) {
+        (Some(n), Some(t)) => {
+            let (n, t) = (STANDARD.decode(n)?, STANDARD.decode(t)?);
+            let bytes = crate::crypto::vault::decrypt(&key, &n, &t, &secret_title_aad(note_id))?;
+            Some(String::from_utf8(bytes)?)
+        }
+        _ => None,
+    };
+    Ok((serde_json::from_slice(&plain)?, title))
 }
 
-/// `password` is `Some` for protected notes: their content is sealed under it
-/// rather than written out in the clear.
+/// `password` is `Some` for protected notes: their content and title are sealed
+/// under it rather than written out in the clear, and the entry's own title is
+/// the locked placeholder.
 fn row_to_entry(
     key: &[u8; 32],
     row: &NoteRow,
+    title: String,
+    content_bytes: &[u8],
     password: Option<&str>,
 ) -> anyhow::Result<NoteExportEntryV1> {
-    let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct, row.id.as_bytes())?;
-    let title = String::from_utf8(title_bytes)?;
-    let content_bytes = decrypt_with_vault(key, &row.nonce, &row.content_ct, row.id.as_bytes())?;
     let tags = crate::notes::commands::decrypt_tags(key, &row.id, &row.tags)?;
 
-    let (content, secret) = match password {
+    let (title, content, secret) = match password {
         Some(pw) => (
+            crate::notes::commands::LOCKED_TITLE.to_string(),
             serde_json::Value::Null,
-            Some(seal_secret(&row.id, &content_bytes, pw)?),
+            Some(seal_secret(&row.id, content_bytes, &title, pw)?),
         ),
-        None => (serde_json::from_slice(&content_bytes)?, None),
+        None => (title, serde_json::from_slice(content_bytes)?, None),
     };
 
     Ok(NoteExportEntryV1 {
@@ -671,15 +718,16 @@ mod tests {
     // ---- Protected notes must never appear in the clear in a backup ----
 
     const SECRET_BODY: &str = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI";
+    const SECRET_TITLE: &str = "Prod AWS root";
 
     fn sealed_entry(password: &str) -> NoteExportEntryV1 {
         let content = json!({ "body": SECRET_BODY });
         let bytes = serde_json::to_vec(&content).unwrap();
         let mut e = sample_v1().notes.remove(0);
         e.id = "secret-note".into();
-        e.title = "Credentials".into();
+        e.title = crate::notes::commands::LOCKED_TITLE.into();
         e.content = serde_json::Value::Null;
-        e.secret = Some(seal_secret(&e.id, &bytes, password).unwrap());
+        e.secret = Some(seal_secret(&e.id, &bytes, SECRET_TITLE, password).unwrap());
         e
     }
 
@@ -701,7 +749,81 @@ mod tests {
         let entry = sealed_entry("correct horse");
         let opened = open_secret("secret-note", entry.secret.as_ref().unwrap(), "correct horse")
             .unwrap();
-        assert_eq!(opened["body"], SECRET_BODY);
+        assert_eq!(opened.0["body"], SECRET_BODY);
+    }
+
+    /// The title is as sensitive as the body: sealed with it, placeholder on
+    /// the entry.
+    #[test]
+    fn the_sealed_title_is_not_in_the_file_and_round_trips() {
+        let entry = sealed_entry("correct horse");
+        assert_eq!(entry.title, crate::notes::commands::LOCKED_TITLE);
+        let mut f = sample_v1();
+        f.notes = vec![entry.clone()];
+        assert!(!serde_json::to_string(&f).unwrap().contains(SECRET_TITLE));
+        let (_, title) =
+            open_secret("secret-note", entry.secret.as_ref().unwrap(), "correct horse").unwrap();
+        assert_eq!(title.as_deref(), Some(SECRET_TITLE));
+    }
+
+    /// Files written before titles were sealed carry no title in the blob; the
+    /// entry's own title is the real one and must still be used.
+    #[tokio::test]
+    async fn a_secret_blob_without_a_title_still_imports_the_entry_title() {
+        let state = test_state().await;
+        let mut entry = sealed_entry("pw");
+        entry.title = "Old backup title".into();
+        let blob = entry.secret.as_mut().unwrap();
+        blob.title_nonce = None;
+        blob.title_ct = None;
+        let mut f = sample_v1();
+        f.format_version = 2;
+        f.notes = vec![entry];
+        let contents = serde_json::to_string(&f).unwrap();
+
+        let summary = import_impl(&state, &contents, ImportResolution::Overwrite, Some("pw"))
+            .await
+            .unwrap();
+        assert_eq!((summary.imported, summary.errors.len()), (1, 0));
+        let listed = crate::notes::commands::list_impl(&state, None, None).await.unwrap();
+        assert_eq!(listed[0].title, "Old backup title");
+    }
+
+    /// Export a protected note from one device and import it on another: the
+    /// file never shows the title, and the importer gets it back with the password.
+    #[tokio::test]
+    async fn a_protected_title_survives_export_and_import_sealed() {
+        let alice = test_state().await;
+        let bytes = serde_json::to_vec(&sample_v1()).unwrap();
+        let contents = String::from_utf8(bytes).unwrap();
+        let mut entry = parse_export(contents.as_bytes()).unwrap().notes.remove(0);
+        entry.title = SECRET_TITLE.into();
+        entry.content = json!({ "body": SECRET_BODY });
+        insert_as_blob(&alice, entry).await.unwrap();
+        let id = queries::note_list(&alice.db).await.unwrap()[0].id.clone();
+        crate::notes::commands::protect_impl(&alice, &id, "pw").await.unwrap();
+
+        let file = export_impl(&alice, "test".into()).await.unwrap();
+        assert!(!file.contains(SECRET_TITLE), "the title must not be in the backup");
+        assert!(!file.contains(SECRET_BODY));
+
+        alice.lock_note(&id);
+        assert!(export_impl(&alice, "test".into()).await.is_err(), "locked notes block export");
+
+        let bob = AppState::new(init_pool(":memory:").await.unwrap(), derive_key("bob", &[0u8; 16]).unwrap(), "device-b".into());
+        let summary = import_impl(&bob, &file, ImportResolution::Overwrite, Some("pw"))
+            .await
+            .unwrap();
+        assert_eq!((summary.imported, summary.errors.len()), (1, 0));
+        let listed = crate::notes::commands::list_impl(&bob, None, None).await.unwrap();
+        assert_eq!(listed[0].title, SECRET_TITLE);
+
+        let wrong = test_state().await;
+        let summary = import_impl(&wrong, &file, ImportResolution::Overwrite, Some("nope"))
+            .await
+            .unwrap();
+        assert_eq!(summary.imported, 0);
+        assert!(!summary.errors[0].contains(SECRET_TITLE), "errors must not leak it either");
     }
 
     #[test]

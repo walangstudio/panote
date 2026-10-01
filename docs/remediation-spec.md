@@ -116,8 +116,9 @@ toggling a mark with no selection only sets a stored mark and never fires TipTap
 
 ## Accepted, not fixed
 
-- Protected note **titles** are decrypted with the device key and visible in the list
-  without the password. Larger change; deliberate.
+- Resolved: protected note **titles** were decrypted with the device key and visible in
+  the list without the password. They are now sealed under the note password with the body
+  and show as "Locked note" until unlocked; older notes migrate on their next unlock.
 - On **Android** the device key lives in the app-private DB, not the Keystore.
 - **Line length is uncapped** in the editor. The writer persona rates this a top-3
   problem (250+ chars maximised); the owner's call is that macOS Notes does not cap

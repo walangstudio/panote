@@ -713,35 +713,16 @@ pub async fn send_notes(
 /// password layer; sending a locked note errors until it's unlocked. The blob
 /// carries plaintext (Model B) — the receiver chooses whether to protect it.
 async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> {
-    use crate::crypto::note::{decrypt_with_vault, peel_vault_ct};
-
     let row = queries::note_get(&state.db, note_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("note not found"))?;
 
-    let title_bytes =
-        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())?;
-    let title = String::from_utf8(title_bytes)?;
-
     // A protected note must be unlocked this session to be sent.
-    let password = if row.note_salt.is_some() {
-        Some(
-            state
-                .note_password(note_id)
-                .ok_or_else(|| anyhow::anyhow!("unlock the note before sending"))?,
-        )
-    } else {
-        None
-    };
-    let vault_ct = peel_vault_ct(
-        row.note_salt.as_deref(),
-        row.note_nonce.as_deref(),
-        &row.content_ct,
-        password.as_deref(),
-    )?;
-
-    let content_bytes =
-        decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())?;
+    let (title, content_bytes) =
+        crate::notes::commands::open_row(state, &row).map_err(|e| match e.as_str() {
+            crate::notes::commands::LOCKED => anyhow::anyhow!("unlock the note before sending"),
+            _ => anyhow::anyhow!(e),
+        })?;
     let content: serde_json::Value = serde_json::from_slice(&content_bytes)?;
 
     let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags)?;

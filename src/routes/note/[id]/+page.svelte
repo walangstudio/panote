@@ -350,7 +350,7 @@
   async function handleRecover(v: { password: string; recoveryCode?: string }) {
     await noteRecover(id, v.recoveryCode ?? "", v.password);
     recoverOpen = false;
-    await loadNote();
+    await Promise.all([loadNote(), refreshNotes()]);
   }
 
   async function generateRecovery() {
@@ -556,7 +556,8 @@
       await noteUnlock(id, lockPw);
       lockPw = "";
       lockPwErr = false;
-      await loadNote();
+      // The list only knows a protected note's title while it is unlocked.
+      await Promise.all([loadNote(), refreshNotes()]);
     } catch {
       lockPwErr = true;
     }

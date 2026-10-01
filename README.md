@@ -37,7 +37,7 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 
 **Protection**
 
-- Per-note passwords (Argon2id + ChaCha20-Poly1305) with recovery codes
+- Per-note passwords (Argon2id + ChaCha20-Poly1305) with recovery codes. The title is sealed with the body and listed as "Locked note" until unlocked
 - Unlocked notes re-lock after 15 minutes of inactivity
 
 **Transfer**

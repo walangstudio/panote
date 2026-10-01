@@ -539,7 +539,7 @@ async fn an_unlocked_protected_note_sends_its_real_content() {
     let bob = device("bob").await;
     let note_id = seed(&alice, "Bank", "account 12345", &["finance"]).await;
     protect(&alice, &note_id, "s3cret").await;
-    alice.unlock_note(&note_id, "s3cret");
+    alice.unlock_note(&note_id, "s3cret", "Bank");
 
     let port = listen(bob.clone()).await;
     send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
@@ -561,7 +561,7 @@ async fn a_protected_note_arrives_unprotected() {
     let bob = device("bob").await;
     let note_id = seed(&alice, "Bank", "account 12345", &[]).await;
     protect(&alice, &note_id, "s3cret").await;
-    alice.unlock_note(&note_id, "s3cret");
+    alice.unlock_note(&note_id, "s3cret", "Bank");
 
     let port = listen(bob.clone()).await;
     send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
@@ -570,6 +570,8 @@ async fn a_protected_note_arrives_unprotected() {
 
     let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
     assert!(row.note_salt.is_none(), "protection does not travel with the note");
+    // The sender's sealed title travels in the clear blob, like the body.
+    assert_eq!(open(&bob, &new_id).await.0, "Bank");
     // And the sender's copy keeps its protection.
     let src = queries::note_get(&alice.db, &note_id).await.unwrap().unwrap();
     assert!(src.note_salt.is_some(), "the sender's copy must stay protected");
@@ -583,7 +585,7 @@ async fn the_receiver_can_protect_what_arrived_with_a_different_password() {
     let bob = device("bob").await;
     let note_id = seed(&alice, "Bank", "account 12345", &[]).await;
     protect(&alice, &note_id, "alice-password").await;
-    alice.unlock_note(&note_id, "alice-password");
+    alice.unlock_note(&note_id, "alice-password", "Bank");
 
     let port = listen(bob.clone()).await;
     send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
@@ -684,7 +686,7 @@ async fn a_protected_credential_table_survives_the_whole_round_trip() {
         .await
         .unwrap();
     protect(&alice, &note_id, "vault-password").await;
-    alice.unlock_note(&note_id, "vault-password");
+    alice.unlock_note(&note_id, "vault-password", "Production env");
 
     let port = listen(bob.clone()).await;
     send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
@@ -739,6 +741,54 @@ async fn a_mismatched_code_aborts_the_batch_before_any_note_moves() {
 
     assert!(result.is_err(), "a mismatched pairing code must fail the transfer");
     assert!(received(&bob).await.is_empty(), "nothing may land on a failed pairing");
+}
+
+/// A re-send onto a note the receiver protected re-seals the title with the
+/// body, so the new title never lands under the receiver's device key alone.
+#[tokio::test]
+async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
+    use crate::notes::commands::{list_impl, open_row, update_impl, LOCKED_TITLE};
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let ids = vec![seed(&alice, "Bank", "account 12345", &[]).await];
+    let port = listen(bob.clone()).await;
+
+    let responder = answer_with(bob.clone(), CODE);
+    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    responder.await.unwrap();
+    let bob_id = received(&bob).await[0].id.clone();
+    protect(&bob, &bob_id, "bob-password").await;
+
+    let renamed = crate::notes::types::NoteInput {
+        kind: "document".into(),
+        title: "Bank, renamed".into(),
+        content: json!({ "body": "account 67890" }),
+        tags: vec![],
+        content_hint: None,
+        pinned: None,
+        bg_color: None,
+        bg_image: None,
+        show_preview: None,
+    };
+    update_impl(&alice, ids[0].clone(), renamed).await.unwrap();
+    let responder = answer_with(bob.clone(), CODE);
+    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    responder.await.unwrap();
+
+    let row = queries::note_get(&bob.db, &bob_id).await.unwrap().unwrap();
+    assert!(row.note_salt.is_some() && row.title_note_nonce.is_some());
+    assert!(
+        decrypt_with_vault(&bob.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
+            .is_err(),
+        "the re-sent title must not be readable with the device key alone"
+    );
+    assert_eq!(list_impl(&bob, None, None).await.unwrap()[0].title, "Bank, renamed");
+    bob.lock_note(&bob_id);
+    assert_eq!(list_impl(&bob, None, None).await.unwrap()[0].title, LOCKED_TITLE);
+    bob.unlock_note(&bob_id, "bob-password", "");
+    let (title, body) = open_row(&bob, &row).unwrap();
+    assert_eq!(title, "Bank, renamed");
+    assert!(String::from_utf8(body).unwrap().contains("account 67890"));
 }
 
 /// Re-sending after an edit is ordinary. It must update the copy already there
