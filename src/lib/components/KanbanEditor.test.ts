@@ -231,3 +231,42 @@ describe("drag ghost", () => {
     expect(document.querySelector(".ghost")!.textContent!.trim()).toBe("Backlog");
   });
 });
+
+describe("moving with the keyboard", () => {
+  const key = (el: Element, k: string) =>
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+
+  it("moves a column left and right from its handle", async () => {
+    const { target, content } = setup([col("a", "To do"), col("b", "Doing"), col("c", "Done")]);
+    key(target.querySelectorAll(".col-header .handle")[0], "ArrowRight");
+    await flush();
+    expect(content.columns.map(c => c.id)).toEqual(["b", "a", "c"]);
+    expect(colNames(target)).toEqual(["Doing", "To do", "Done"]);
+    key(target.querySelector('.column[data-col-id="a"] .col-header .handle')!, "ArrowLeft");
+    await flush();
+    expect(colNames(target)).toEqual(["To do", "Doing", "Done"]);
+  });
+
+  it("moves a card up, down and across columns", async () => {
+    const { target, content } = setup([
+      col("a", "To do", [{ id: "x", title: "X" }, { id: "y", title: "Y" }]),
+      col("b", "Doing"),
+    ]);
+    key(target.querySelector('[data-card-id="y"] .handle')!, "ArrowUp");
+    await flush();
+    expect(content.columns[0].cards.map(c => c.id)).toEqual(["y", "x"]);
+    expect(cardTitles(target, "a")).toEqual(["Y", "X"]);
+    key(target.querySelector('[data-card-id="y"] .handle')!, "ArrowRight");
+    await flush();
+    expect([cardTitles(target, "a"), cardTitles(target, "b")]).toEqual([["X"], ["Y"]]);
+  });
+
+  it("does nothing at either end", async () => {
+    const { target, content } = setup([col("a", "To do", [{ id: "x", title: "X" }])]);
+    key(target.querySelector(".col-header .handle")!, "ArrowLeft");
+    key(target.querySelector('[data-card-id="x"] .handle')!, "ArrowDown");
+    key(target.querySelector('[data-card-id="x"] .handle')!, "ArrowRight");
+    await flush();
+    expect(content.columns.map(c => c.cards.map(k => k.id))).toEqual([["x"]]);
+  });
+});

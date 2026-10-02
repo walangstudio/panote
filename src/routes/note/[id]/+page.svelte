@@ -726,6 +726,9 @@
       lockPwErr = true;
     }
   }
+
+  // The password field is the only thing to do on a locked note.
+  const focusOnMount = (node: HTMLElement) => node.focus();
 </script>
 
 {#if loading}
@@ -745,7 +748,7 @@
       class:error={lockPwErr}
       placeholder="Password"
       bind:value={lockPw}
-      autofocus
+      use:focusOnMount
       oninput={() => lockPwErr = false}
       onkeydown={(e) => { if (e.key === "Enter") inlineUnlock(); }}
     />

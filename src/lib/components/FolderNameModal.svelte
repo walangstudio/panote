@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { trapFocus } from "$lib/trapFocus";
 
   interface Props {
@@ -20,7 +20,8 @@
     onclose,
   }: Props = $props();
 
-  let name = $state(initial);
+  // Seeded once; the field is the user's to edit after that.
+  let name = $state(untrack(() => initial));
   let input: HTMLInputElement | undefined = $state();
   let previouslyFocused: HTMLElement | null = null;
 

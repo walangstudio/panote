@@ -35,6 +35,8 @@
   itself a second after the last edit, when the window loses focus, when you navigate
   away and before the window closes; an empty new note is not created. Off, closing the
   window with unsaved changes now asks to Save, Discard or Cancel, as leaving a note does.
+- Kanban columns and cards move with the keyboard: focus a drag handle and use the arrow
+  keys. Handles used to be mouse- and touch-only.
 
 ### Fixed
 
@@ -47,7 +49,6 @@
 - **A new note is created in the folder you are viewing**, from +, the speed-dial, the
   sidebar and Ctrl+N. It used to land at the root. A folder deleted meanwhile falls back to
   the root.
-
 - **Custom sort is back, and its drag works.** Rows now follow the pointer while dragging
   (the note list painted its pre-drag order), a drop lands where it was let go (Custom took
   the Descending direction and showed every saved order upside down), and folders keep

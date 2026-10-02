@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { moveCard, moveColumn } from "$lib/kanban";
   import type { KanbanColumn, KanbanCard } from "$lib/kanban";
 
@@ -19,6 +20,49 @@
   function removeCard(col: KanbanColumn, cardId: string) {
     col.cards = col.cards.filter(c => c.id !== cardId);
     content = { ...content };
+  }
+
+  // ---- Keyboard moves: the accessible route for what the drag does ----
+
+  /// `items` with index `i` moved by `step`, or null if that leaves the list.
+  function shifted<T>(items: T[], i: number, step: number): T[] | null {
+    const j = i + step;
+    if (i < 0 || j < 0 || j >= items.length) return null;
+    const next = [...items];
+    next.splice(j, 0, ...next.splice(i, 1));
+    return next;
+  }
+
+  async function refocus(selector: string) {
+    await tick();
+    document.querySelector<HTMLElement>(selector)?.focus();
+  }
+
+  function onColumnKey(e: KeyboardEvent, colId: string) {
+    const step = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+    const next = step && shifted(content.columns, content.columns.findIndex(c => c.id === colId), step);
+    if (!next) return;
+    e.preventDefault();
+    content.columns = next;
+    content = { ...content };
+    refocus(`.column[data-col-id="${CSS.escape(colId)}"] .col-header .handle`);
+  }
+
+  function onCardKey(e: KeyboardEvent, col: KanbanColumn, cardId: string) {
+    const vertical = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+    const across = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+    if (vertical) {
+      const cards = shifted(col.cards, col.cards.findIndex(c => c.id === cardId), vertical);
+      if (!cards) return;
+      col.cards = cards;
+    } else if (across) {
+      const to = content.columns[content.columns.findIndex(c => c.id === col.id) + across];
+      if (!to) return;
+      content.columns = moveCard(content.columns, cardId, col.id, to.id, null);
+    } else return;
+    e.preventDefault();
+    content = { ...content };
+    refocus(`.card[data-card-id="${CSS.escape(cardId)}"] .handle`);
   }
 
   // ---- Pointer-based drag (works on both mouse and touch) ----
@@ -113,8 +157,12 @@
       <div class="col-header" role="presentation">
         <span
           class="handle"
-          aria-label="Drag column"
+          role="button"
+          tabindex="0"
+          aria-label="Move column {col.name}"
+          title="Drag, or press the left and right arrow keys, to move"
           onpointerdown={(e) => startColDrag(e, col.id)}
+          onkeydown={(e) => onColumnKey(e, col.id)}
         >⠿</span>
         <input
           class="col-name"
@@ -133,8 +181,12 @@
         >
           <span
             class="handle"
-            aria-label="Drag card"
+            role="button"
+            tabindex="0"
+            aria-label="Move card {card.title || 'Untitled'}"
+            title="Drag, or press the arrow keys, to move"
             onpointerdown={(e) => startCardDrag(e, card, col.id)}
+            onkeydown={(e) => onCardKey(e, col, card.id)}
           >⠿</span>
           <textarea
             class="card-text"
