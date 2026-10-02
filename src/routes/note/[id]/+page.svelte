@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { untrack, onMount, onDestroy } from "svelte";
+  import { untrack, onMount, onDestroy, tick } from "svelte";
   import { goto, beforeNavigate } from "$app/navigation";
   import { isDesktop } from "$lib/stores/layout";
   import {
@@ -22,6 +22,12 @@
   import TableEditor from "$lib/components/TableEditor.svelte";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { detectFormat } from "$lib/detectFormat";
+  import { autosave } from "$lib/stores/autosave";
+  import { findBelongsToNote } from "$lib/shortcuts";
+  import {
+    collectMatches, showMatches, clearMatches, stepMatch, matchLabel, type Match,
+  } from "$lib/findInNote";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
   const id = $derived(page.params.id ?? "");
   const isNew = $derived(id === "new");
@@ -133,10 +139,19 @@
     )
   );
 
-  beforeNavigate(({ cancel, to }) => {
+  /// Leaving with autosave on: the prompt stays hidden unless the save fails.
+  let leaving = $state(false);
+
+  beforeNavigate(({ cancel, to, type }) => {
     if (!dirty || pendingNavUrl !== null) return;
+    // Autosave binding a new note to its real id is not leaving it.
+    if (adoptedId && to?.url.pathname === `/note/${adoptedId}`) return;
+    // An unload cannot wait for a save; the window close handler below covers it.
+    if (type === "leave" && $autosave) return;
     cancel();
     pendingNavUrl = to?.url?.toString() ?? "";
+    leaving = $autosave;
+    if (leaving) void saveAndNavigate();
   });
 
   // ---- Drafts ----
@@ -191,13 +206,131 @@
     }, DRAFT_DEBOUNCE_MS);
   }
 
-  // Autosave tracks the same values the dirty check does.
+  // ---- Autosave ----
+  //
+  // With the setting on, the note itself is saved shortly after the last edit,
+  // when the window loses focus, on navigation and on close. A new note is only
+  // created once there is something in it.
+
+  const AUTOSAVE_DEBOUNCE_MS = 1000;
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Saves run one after another, so a new note can never be created twice.
+  let autosaveChain: Promise<boolean> = Promise.resolve(true);
+  /// The id autosave just gave a new note. Moving to it keeps the editor as is.
+  let adoptedId: string | null = null;
+
+  function queueAutosave() {
+    if (loading || locked || lossyLocked || modeParam === "view") return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => void flushAutosave(false), AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  /// `commitTag` folds a half-typed tag in; a timer firing mid-word must not.
+  function flushAutosave(commitTag = true): Promise<boolean> {
+    if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+    return (autosaveChain = autosaveChain.then(async () => {
+      if (!dirty || locked) return true;
+      if (isNew && !title.trim() && !tags.length && !tagInput.trim() && JSON.stringify(content) === savedContent) return true;
+      const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
+      const { ok, created } = await persist(commitTag);
+      if (!ok) return false;
+      [savedTitle, savedContent, savedTags] = snapshot;
+      if (created) {
+        adoptedId = created.id;
+        await goto(`/note/${created.id}`, { replaceState: true, keepFocus: true, noScroll: true });
+      }
+      return true;
+    }));
+  }
+
+  function flushOnHide() {
+    if ($autosave && dirty && (document.visibilityState === "hidden" || !document.hasFocus())) void flushAutosave();
+  }
+
+  // Autosave and drafts track the same values the dirty check does.
   $effect(() => {
     if (!dirty) return;
     // Read the edited state so this re-runs as it changes.
     void title; void JSON.stringify(content); void JSON.stringify(tags);
-    untrack(() => queueDraft());
+    untrack(() => ($autosave ? queueAutosave() : queueDraft()));
   });
+
+  // ---- Closing the window ----
+
+  let closePrompt = $state(false);
+  let unlistenClose: (() => void) | null = null;
+  let destroyed = false;
+
+  function closeWindow() {
+    justSaved = true;
+    void getCurrentWindow().destroy();
+  }
+
+  async function saveAndClose() {
+    const { ok } = await persist();
+    if (ok) closeWindow();
+  }
+
+  // ---- Find in note ----
+
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findIndex = $state(0);
+  let findMatches = $state.raw<Match[]>([]);
+  let findInput: HTMLInputElement | undefined = $state();
+  let editorContent: HTMLElement | undefined = $state();
+  /// The field the current match was selected in. Enter there keeps stepping
+  /// through matches until the user types into it.
+  let findField: HTMLElement | null = null;
+
+  async function openFind() {
+    findOpen = true;
+    await tick();
+    findInput?.focus();
+    findInput?.select();
+  }
+
+  function closeFind() {
+    findOpen = false;
+    findQuery = "";
+    findMatches = [];
+    findField = null;
+    clearMatches();
+  }
+
+  /// Re-collected on every step, so edits made since the last one are found.
+  function runFind(dir: 0 | 1 | -1) {
+    if (!editorContent) return;
+    findMatches = collectMatches(editorContent, findQuery);
+    const count = findMatches.length;
+    findIndex = dir ? stepMatch(Math.min(findIndex, count - 1), count, dir) : 0;
+    showMatches(findMatches, findIndex);
+    const m = findMatches[findIndex];
+    const leftField = findField;
+    findField = null;
+    if (m?.kind === "field") {
+      m.el.setSelectionRange(m.start, m.end);
+      // Only when stepping: focus taken while typing the query would send the
+      // next keystroke into the note.
+      if (dir) { m.el.focus(); findField = m.el; }
+      else m.el.scrollIntoView({ block: "nearest" });
+    } else if (leftField) {
+      // Back from a field match: Enter must step again, not type into the field.
+      findInput?.focus({ preventScroll: true });
+    }
+  }
+
+  function onFindKey(e: KeyboardEvent) {
+    if (e.key === "Enter") { e.preventDefault(); runFind(e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); closeFind(); }
+  }
+
+  function onFieldKey(e: KeyboardEvent) {
+    if (findOpen && findField && document.activeElement === findField) {
+      if (e.key === "Enter" || e.key === "Escape") { e.stopPropagation(); onFindKey(e); }
+    }
+  }
+  const onFieldInput = () => { findField = null; };
 
   function applyDraft() {
     if (!pendingDraft) return;
@@ -217,17 +350,43 @@
   /// Ctrl/Cmd+S commits. Writers hit it reflexively; before this it did nothing
   /// at all, which is worse than not existing because it feels like it worked.
   function onKey(e: KeyboardEvent) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === "s") {
       e.preventDefault();
       if (!saving && !locked) void save();
+    } else if (mod && !e.shiftKey && e.key.toLowerCase() === "f"
+      && findBelongsToNote(e.target) && !document.querySelector('[aria-modal="true"]')) {
+      e.preventDefault();
+      void openFind();
     }
   }
 
-  onMount(() => window.addEventListener("keydown", onKey));
+  onMount(() => {
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onFieldKey, true);
+    window.addEventListener("input", onFieldInput, true);
+    window.addEventListener("blur", flushOnHide);
+    document.addEventListener("visibilitychange", flushOnHide);
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    getCurrentWindow().onCloseRequested(async (event) => {
+      if (!dirty) return;
+      if ($autosave && await flushAutosave()) return;
+      event.preventDefault();
+      closePrompt = true;
+    }).then((unlisten) => { if (destroyed) unlisten(); else unlistenClose = unlisten; });
+  });
 
   onDestroy(() => {
+    destroyed = true;
     window.removeEventListener("keydown", onKey);
+    window.removeEventListener("keydown", onFieldKey, true);
+    window.removeEventListener("input", onFieldInput, true);
+    window.removeEventListener("blur", flushOnHide);
+    document.removeEventListener("visibilitychange", flushOnHide);
+    unlistenClose?.();
     if (draftTimer) clearTimeout(draftTimer);
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    clearMatches();
   });
 
   function discardAndNavigate() {
@@ -246,7 +405,10 @@
   $effect(() => {
     const target = id;
     const targetKind = kindParam;
-    untrack(() => { void openNote(target, targetKind); });
+    untrack(() => {
+      if (target === adoptedId) { adoptedId = null; return; }
+      void openNote(target, targetKind);
+    });
   });
 
   async function openNote(noteId: string, newKind: NoteKind) {
@@ -266,6 +428,7 @@
     bgColor = undefined;
     bgImage = undefined;
     updatedAt = undefined;
+    closeFind();
     if (noteId === "new") {
       kind = newKind;
       title = "";
@@ -384,8 +547,8 @@
   /// Writes the note. Returns the created row when it was new, and whether the
   /// write succeeded — navigation is the caller's business, because leaving is
   /// only safe once the bytes are actually down.
-  async function persist(): Promise<{ ok: boolean; created: NoteMetadata | null }> {
-    addTag();
+  async function persist(commitTag = true): Promise<{ ok: boolean; created: NoteMetadata | null }> {
+    if (commitTag) addTag();
     saving = true;
     error = "";
     let created: NoteMetadata | null = null;
@@ -437,7 +600,7 @@
   async function saveAndNavigate() {
     const target = pendingNavUrl;
     const { ok } = await persist();
-    if (!ok) return;
+    if (!ok) { leaving = false; return; }
     rebaseline();
     pendingNavUrl = null;
     justSaved = true;
@@ -595,6 +758,7 @@
 {:else}
   <div
     class="editor-layout"
+    data-find-root
     class:desktop={$isDesktop}
     class:dark-ink={editorInk() === "dark"}
     class:light-ink={editorInk() === "light"}
@@ -611,12 +775,38 @@
           <span class="material-symbols-outlined" style="font-size: 20px;">arrow_back</span>
         </a>
       {/if}
-      <div class="header-spacer"></div>
-      <!-- Kind chip -->
-      <div class="kind-chip {kindChannel[kind] ?? 'accent'}">
-        <span class="material-symbols-outlined" style="font-size: 16px; font-variation-settings: 'FILL' 1;">{kindIconName[kind] ?? "edit_note"}</span>
-        {kindLabel[kind] ?? kind}
-      </div>
+      {#if findOpen}
+        <div class="find-bar" role="search">
+          <span class="material-symbols-outlined find-icon" aria-hidden="true">search</span>
+          <input
+            type="search"
+            class="find-input"
+            placeholder="Find in note"
+            aria-label="Find in note"
+            bind:this={findInput}
+            bind:value={findQuery}
+            oninput={() => runFind(0)}
+            onkeydown={onFindKey}
+          />
+          <span class="find-count" aria-live="polite">{matchLabel(findIndex, findMatches.length, findQuery)}</span>
+          <button class="bare-icon small" aria-label="Previous match" disabled={!findMatches.length} onclick={() => runFind(-1)}>
+            <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">keyboard_arrow_up</span>
+          </button>
+          <button class="bare-icon small" aria-label="Next match" disabled={!findMatches.length} onclick={() => runFind(1)}>
+            <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">keyboard_arrow_down</span>
+          </button>
+          <button class="bare-icon small" aria-label="Close find" onclick={closeFind}>
+            <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">close</span>
+          </button>
+        </div>
+      {:else}
+        <div class="header-spacer"></div>
+        <!-- Kind chip -->
+        <div class="kind-chip {kindChannel[kind] ?? 'accent'}">
+          <span class="material-symbols-outlined" style="font-size: 16px; font-variation-settings: 'FILL' 1;">{kindIconName[kind] ?? "edit_note"}</span>
+          {kindLabel[kind] ?? kind}
+        </div>
+      {/if}
       <!-- more_vert overflow trigger -->
       {#if !isNew}
         <button
@@ -692,7 +882,7 @@
       </div>
     {/if}
 
-    <div class="editor-content">
+    <div class="editor-content" bind:this={editorContent}>
       <!-- Title -->
       <textarea
         class="title-input"
@@ -841,7 +1031,19 @@
   />
 {/if}
 
-{#if pendingNavUrl !== null}
+{#if closePrompt}
+  <ConfirmModal
+    title="Unsaved changes"
+    message="Save this note before closing?"
+    confirmLabel={saving ? "Saving…" : "Save"}
+    altLabel="Discard"
+    onalt={closeWindow}
+    onconfirm={saveAndClose}
+    oncancel={() => closePrompt = false}
+  />
+{/if}
+
+{#if pendingNavUrl !== null && !leaving}
   <ConfirmModal
     title="Unsaved changes"
     message="Save this note before leaving?"
@@ -1022,6 +1224,29 @@
     backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   }
   .header-spacer { flex: 1; }
+
+  /* Find in note: takes the kind chip's place in the header while open. */
+  .find-bar {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px;
+    height: 38px; padding: 0 0.25rem 0 0.7rem;
+    background: var(--surface-container); border-radius: var(--radius-full);
+  }
+  .find-bar:focus-within { box-shadow: 0 0 0 2px var(--accent-muted); }
+  .find-icon { color: var(--muted); font-size: 18px; flex-shrink: 0; margin-right: 4px; }
+  .find-input {
+    flex: 1; min-width: 0; height: 100%; padding: 0;
+    border: none; outline: none; background: transparent; color: var(--text);
+    font-family: inherit; font-size: 0.9rem;
+  }
+  .find-input::placeholder { color: var(--muted); }
+  .find-input::-webkit-search-cancel-button { display: none; }
+  .find-count {
+    font-size: 0.75rem; font-weight: 600; color: var(--muted);
+    white-space: nowrap; padding: 0 0.35rem; font-variant-numeric: tabular-nums;
+  }
+  .find-bar .bare-icon:disabled { opacity: 0.4; cursor: default; background: transparent; color: var(--text-secondary); }
+  :global(::highlight(find-match)) { background-color: rgba(255, 196, 0, 0.4); color: inherit; }
+  :global(::highlight(find-current)) { background-color: var(--accent); color: var(--on-accent); }
 
   /* RoundIcon — 36px circle, accent-muted bg, accent color */
   .round-icon {

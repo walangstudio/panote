@@ -13,11 +13,11 @@
   import type { NoteMetadata } from "$lib/tauri";
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import { listFilter, listSelecting, listSelected, listFolder, listTrash, newNoteHref } from "$lib/stores/listState";
+  import { listFilter, listSelecting, listSelected, listFolder, listTrash, listClipboard, newNoteHref } from "$lib/stores/listState";
   import { folders, refreshFolders } from "$lib/stores/folders";
   import {
     folderCreate, folderMove, folderRename, folderDelete, noteSetFolder,
-    notesReorder, foldersReorder,
+    notesReorder, foldersReorder, notesCopy, folderCopy,
   } from "$lib/tauri";
   import FolderPickerModal from "$lib/components/FolderPickerModal.svelte";
   import FolderNameModal from "$lib/components/FolderNameModal.svelte";
@@ -25,7 +25,7 @@
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
   import { showMenu, anchorMenu, type MenuAction, type Rect } from "$lib/contextMenu";
-  import { shortcutFor } from "$lib/shortcuts";
+  import { shortcutFor, findBelongsToNote } from "$lib/shortcuts";
 
   interface Props { desktop?: boolean; }
   let { desktop = false }: Props = $props();
@@ -102,6 +102,41 @@
       if ($listFolder === id) listFolder.set(null);
     } catch (e) { moveError = folderMessage(e); }
   }
+
+  // ---- Clipboard ----
+  //
+  // Paste always lands in the folder on screen, or in the folder whose menu
+  // says "Paste into". Cut moves with the same commands as "Move to"; copy
+  // duplicates in the backend, which re-seals protected notes for their new ids.
+
+  function clip(mode: "copy" | "cut", kind: "note" | "folder", ids: string[]) {
+    listClipboard.set({ mode, kind, ids });
+    if (selecting) { selecting = false; selected = new Set(); }
+  }
+
+  async function paste(dest: string | null) {
+    const c = $listClipboard;
+    if (!c) return;
+    moveError = "";
+    try {
+      if (c.mode === "cut") {
+        for (const id of c.ids) await (c.kind === "note" ? noteSetFolder(id, dest) : folderMove(id, dest));
+        listClipboard.set(null);
+      } else {
+        let skipped = 0;
+        if (c.kind === "note") skipped = (await notesCopy(c.ids, dest)).skipped_locked;
+        else for (const id of c.ids) skipped += (await folderCopy(id, dest)).skipped_locked;
+        if (skipped) moveError = skipped === 1
+          ? "A locked note was skipped. Unlock it first to copy."
+          : `${skipped} locked notes were skipped. Unlock them first to copy.`;
+      }
+    } catch (e) {
+      moveError = folderMessage(e);
+    }
+    await Promise.all([refreshFolders(), refreshNotes()]);
+  }
+
+  const isCut = (id: string) => $listClipboard?.mode === "cut" && $listClipboard.ids.includes(id);
 
   const activeId = $derived(page.params.id ?? "");
 
@@ -385,6 +420,9 @@
       { label: note.pinned ? "Unpin" : "Pin", icon: "push_pin", run: () => togglePin(note.id, note.pinned) },
       { label: "View", icon: "visibility", run: () => goto(`/note/${note.id}?mode=view`) },
       { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "note", id: note.id, from: note.folder_id ?? null }; } },
+      { label: "Copy", icon: "content_copy", run: () => clip("copy", "note", [note.id]) },
+      { label: "Cut", icon: "content_cut", run: () => clip("cut", "note", [note.id]) },
+      ...($listClipboard ? [{ label: "Paste here", icon: "content_paste", run: () => paste($listFolder) }] : []),
       { label: "Edit", icon: "edit", run: () => goto(`/note/${note.id}?mode=edit`) },
       ...(note.has_note_password
         ? [
@@ -402,6 +440,9 @@
       { label: "New folder inside", icon: "create_new_folder", run: () => { listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; } },
       { label: "Rename", icon: "edit", run: () => { nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; } },
       { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; } },
+      { label: "Copy", icon: "content_copy", run: () => clip("copy", "folder", [f.id]) },
+      { label: "Cut", icon: "content_cut", run: () => clip("cut", "folder", [f.id]) },
+      ...($listClipboard ? [{ label: "Paste into", icon: "content_paste", run: () => paste(f.id) }] : []),
       { label: "Delete", icon: "delete", danger: true, run: () => removeFolder(f.id) },
     ];
   }
@@ -426,19 +467,23 @@
     if (!s) return;
     if (s === "escape") {
       if (menu || sortOpen || fabOpen) { e.preventDefault(); menu = null; sortOpen = false; fabOpen = false; }
+      else if ($listClipboard && !e.defaultPrevented && !document.querySelector('[aria-modal="true"]')) listClipboard.set(null);
       return;
     }
     // An open dialog owns the keyboard, and Trash has nothing to create or search.
     if ($listTrash || document.querySelector('[aria-modal="true"]')) return;
+    // The open note's find bar takes it instead.
+    if (s === "find" && findBelongsToNote(e.target)) return;
     e.preventDefault();
+    // The selection, else the note open beside the list.
+    const ids = selecting && selected.size ? [...selected]
+      : desktop && activeId && activeId !== "new" ? [activeId] : [];
     if (s === "new-note") showNewNote = true;
     else if (s === "new-folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
     else if (s === "find") searchInput?.focus();
-    else {
-      const ids = selecting && selected.size ? [...selected]
-        : desktop && activeId && activeId !== "new" ? [activeId] : [];
-      if (ids.length) deleteTargets = ids;
-    }
+    else if (s === "copy" || s === "cut") { if (ids.length) clip(s, "note", ids); }
+    else if (s === "paste") paste($listFolder);
+    else if (ids.length) deleteTargets = ids;
   }
 
   // ---- Trash ----
@@ -529,6 +574,9 @@
     if (diff < 7 * DAY) return Math.round(diff / DAY) + "d";
     return dateFormat.format(new Date(unixSecs * 1000));
   }
+
+  const selectionBar = $derived(selecting && selected.size > 0 && !$listTrash);
+  const clipboardBar = $derived(!!$listClipboard && !$listTrash);
 
   const pinnedNotes = $derived(filtered.filter(n => n.pinned));
   const otherNotes = $derived(filtered.filter(n => !n.pinned));
@@ -715,6 +763,7 @@
             data-row-id={note.id}
             role="button" tabindex="0"
             class:active={desktop && note.id === activeId}
+            class:cut={isCut(note.id)}
             class:dark-ink={cardInk(note) === "dark"}
             class:light-ink={cardInk(note) === "light"}
             class:has-bg-image={bgOf(note.id)}
@@ -847,6 +896,7 @@
           <div
             class="note-card folder-card"
             class:reordering
+            class:cut={isCut(f.id)}
             data-row-id={f.id}
             role="button" tabindex="0"
             onclick={() => { if (!didDrag) listFolder.set(f.id); }}
@@ -881,6 +931,7 @@
               <div class="tags"></div>
             </div>
             <div class="trailing">
+              <span class="material-symbols-outlined chevron" style="font-size: 20px;" aria-hidden="true">chevron_right</span>
               <button
                 class="card-menu"
                 aria-label={`Actions for ${f.name}`}
@@ -888,7 +939,6 @@
               >
                 <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
               </button>
-              <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">chevron_right</span>
             </div>
           </div>
         </li>
@@ -937,8 +987,9 @@
   {/if}
 </div>
 
-<!-- FAB — touch layout only; desktop composes from the pane header. -->
-{#if !desktop && !$listTrash}
+<!-- FAB - touch layout only; desktop composes from the pane header. A bottom
+     bar takes its corner while one is up. -->
+{#if !desktop && !$listTrash && !selectionBar && !clipboardBar}
   {#if fabOpen}
     <div class="fab-backdrop" role="presentation" onclick={() => fabOpen = false}></div>
   {/if}
@@ -978,7 +1029,7 @@
   </div>
 {/if}
 
-{#if selecting && selected.size > 0 && !$listTrash}
+{#if selectionBar}
   <div class="action-bar" class:desktop>
     <button class="bar-cancel" onclick={toggleSelect} aria-label="Cancel selection">
       <span class="material-symbols-outlined">close</span>
@@ -992,6 +1043,18 @@
       <span class="material-symbols-outlined">lock_open</span>
     </button>
     <button class="btn-send" onclick={sendSelected}>Send</button>
+  </div>
+{:else if clipboardBar && $listClipboard}
+  {@const n = $listClipboard.ids.length}
+  <div class="action-bar" class:desktop>
+    <button class="bar-cancel" onclick={() => listClipboard.set(null)} aria-label="Clear clipboard">
+      <span class="material-symbols-outlined">close</span>
+    </button>
+    <span class="sel-count">
+      {n} {$listClipboard.kind}{n === 1 ? "" : "s"} {$listClipboard.mode === "cut" ? "cut" : "copied"}
+    </span>
+    <div class="bar-spacer"></div>
+    <button class="btn-send" onclick={() => paste($listFolder)}>Paste here</button>
   </div>
 {/if}
 
@@ -1178,13 +1241,8 @@
   /* A folder reads as a card like any other row, but with its own badge tint so
      it is obvious at a glance that opening it goes somewhere. */
   .folder-card .folder-badge { background: var(--secondary-surface); color: var(--secondary); }
-  /* A note stacks its date above its menu, so `.trailing` is a column. A folder
-     has a menu and a chevron, which belong side by side — stacked, they made the
-     folder card taller than every note card and broke the uniform height. */
-  .folder-card .trailing {
-    flex-direction: row; align-items: center; align-self: center;
-    justify-content: flex-end; color: var(--muted); gap: 0;
-  }
+  /* A folder's chevron and menu sit mid-row, where its arrow reads as "opens". */
+  .folder-card .trailing { color: var(--muted); gap: 0; }
 
   /* Surfaced backend refusals — a cycle, or too deep. */
   .folder-error {
@@ -1223,9 +1281,8 @@
   .empty-trash:disabled { opacity: 0.45; cursor: default; }
   .note-card.trash-card { cursor: default; }
   .note-card.trash-card:hover { transform: none; }
-  .trash-card .trailing { flex-direction: row; align-items: center; align-self: center; gap: 0.35rem; }
+  .trash-card .trailing { align-self: center; gap: 0.35rem; }
   .btn-ghost.danger:hover { border-color: var(--error); color: var(--error); background: var(--error-surface); }
-  .page.desktop .trash-card .trailing { flex-direction: row; align-self: center; }
   .page.desktop .trash-card .btn-ghost { width: 34px; height: 34px; }
 
   /* Grip only appears in arrange mode, so the row is not permanently cluttered
@@ -1271,10 +1328,13 @@
     box-shadow: 0 0 0 2px var(--accent), 0 4px 16px var(--shadow-color);
   }
   .note-card.checked { border-color: var(--accent); background-color: var(--accent-muted); }
+  /* Waiting to be pasted somewhere else. */
+  .note-card.cut { opacity: 0.5; }
 
+  /* The menu is always the last thing on a row, at its right edge. */
   .trailing {
-    display: flex; flex-direction: column; align-items: flex-end; justify-content: space-between;
-    align-self: stretch; flex-shrink: 0; gap: 0.4rem;
+    display: flex; align-items: center; align-self: flex-start;
+    flex-shrink: 0; gap: 0.15rem;
   }
   .title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
@@ -1562,7 +1622,6 @@
   .page.desktop .kind-badge .material-symbols-outlined { font-size: 19px; }
   .page.desktop .note-info strong { font-size: 0.88rem; }
   .page.desktop .preview-text { font-size: 0.75rem; -webkit-line-clamp: 1; line-clamp: 1; }
-  .page.desktop .trailing { flex-direction: row-reverse; align-items: center; align-self: flex-start; }
   .page.desktop .empty { padding: 2rem 1rem; font-size: 0.85rem; }
 
   /* Scoped to the list column instead of spanning the whole window. */

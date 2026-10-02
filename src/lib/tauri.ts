@@ -129,6 +129,13 @@ export const noteSetFolder = (noteId: string, folderId: string | null) =>
 export const notesReorder = (ids: string[]) => invoke<void>("notes_reorder", { ids });
 export const foldersReorder = (ids: string[]) => invoke<void>("folders_reorder", { ids });
 
+/// What a copy made, and how many locked notes it had to leave out.
+export interface CopyReport { copied: string[]; skipped_locked: number; }
+export const notesCopy = (ids: string[], folderId: string | null) =>
+  invoke<CopyReport>("notes_copy", { ids, folderId });
+export const folderCopy = (id: string, parentId: string | null) =>
+  invoke<CopyReport>("folder_copy", { id, parentId });
+
 export const noteList = () => invoke<NoteMetadata[]>("note_list");
 /// Total notes in the database. The list is capped (K14), so this is how the UI
 /// knows when it is showing a partial view instead of silently omitting notes.
@@ -205,6 +212,8 @@ export const setDeviceName = (name: string) =>
   invoke<void>("set_device_name", { name });
 export const getTheme = () => invoke<string | null>("get_theme");
 export const setTheme = (theme: string) => invoke<void>("set_theme", { theme });
+export const getAutosave = () => invoke<boolean>("get_autosave");
+export const setAutosave = (enabled: boolean) => invoke<void>("set_autosave", { enabled });
 export const startReceiving = () => invoke<void>("start_receiving");
 export const stopReceiving = () => invoke<void>("stop_receiving");
 export const isReceiving = () => invoke<boolean>("is_receiving");

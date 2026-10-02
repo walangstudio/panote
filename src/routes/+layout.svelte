@@ -9,6 +9,7 @@
   import { refreshNotes } from "$lib/stores/notes";
 import { refreshFolders } from "$lib/stores/folders";
   import { initTheme } from "$lib/stores/theme";
+  import { loadAutosave } from "$lib/stores/autosave";
   import IncomingTransferToast from "$lib/components/IncomingTransferToast.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
@@ -96,6 +97,7 @@ import { refreshFolders } from "$lib/stores/folders";
     }
     if (!isTauri) return;
     refreshFolders();
+    loadAutosave();
     unlistenOffer = await listen("transfer-offer", () => pollOffers());
     // Nothing listened for this, so a note delivered by the single-note
     // protocol — what older senders still use — sat unreachable in memory and
@@ -125,7 +127,7 @@ import { refreshFolders } from "$lib/stores/folders";
   <Sidebar {receiving} ontogglereceive={toggleReceive} onnewnote={() => showNewNote = true} />
   {#if $isDesktop}
     <div class="split">
-      <aside class="list-pane"><NoteListPane desktop /></aside>
+      <aside class="list-pane" data-list-pane><NoteListPane desktop /></aside>
       <main class="detail-pane">{@render children()}</main>
     </div>
   {:else}

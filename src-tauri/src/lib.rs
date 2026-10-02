@@ -99,6 +99,7 @@ pub fn run() {
             note_count,
             note_bg_images,
             note_pin,
+            notes_copy,
             // Folders — nested, one folder per note
             folder_create,
             folder_rename,
@@ -108,6 +109,7 @@ pub fn run() {
             note_set_folder,
             notes_reorder,
             folders_reorder,
+            folder_copy,
             // Trash - deleted notes, recoverable for 30 days
             trash_list,
             trash_restore,
@@ -147,6 +149,8 @@ pub fn run() {
             set_device_name,
             get_theme,
             set_theme,
+            get_autosave,
+            set_autosave,
             // Export / Import
             notes_export,
             notes_import,

@@ -19,6 +19,9 @@ export const listFolder = writable<string | null>(null);
 /// Showing Trash instead of a folder. A flag rather than a sentinel folder id,
 /// so no real id can ever collide with it.
 export const listTrash = writable(false);
+/// Copy / Cut / Paste. Ids and a mode, never content and never the OS
+/// clipboard; in-memory only like the rest of this file.
+export const listClipboard = writable<{ mode: "copy" | "cut"; kind: "note" | "folder"; ids: string[] } | null>(null);
 
 /// Where a new note of `kind` is composed: filed into the folder on screen.
 export const newNoteHref = (kind: string) => {
@@ -34,4 +37,5 @@ export function resetListState() {
   listSelected.set(new Set());
   listFolder.set(null);
   listTrash.set(false);
+  listClipboard.set(null);
 }

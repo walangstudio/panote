@@ -233,7 +233,10 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
     }
 }
 
-pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
+pub async fn note_insert<'e>(
+    pool: impl sqlx::SqliteExecutor<'e>,
+    row: &NoteRow,
+) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO notes (id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

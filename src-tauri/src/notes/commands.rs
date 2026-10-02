@@ -686,6 +686,130 @@ pub async fn note_pin(id: String, pinned: bool, state: State<'_, AppState>) -> R
         .map_err(|e| e.to_string())
 }
 
+// ----- Copy -----
+
+#[derive(Debug, Default, Serialize)]
+pub struct CopyReport {
+    /// Ids of the new notes.
+    pub copied: Vec<String>,
+    /// Protected notes left out because they are locked.
+    pub skipped_locked: usize,
+}
+
+/// `row`'s note as a new row under a fresh id in `folder_id`. Title, body and
+/// tags are AAD-bound to the note id, so they are decrypted and re-encrypted
+/// rather than copied. A protected note is re-sealed under its own password,
+/// which is why it has to be unlocked (LOCKED otherwise). Recovery codes stay
+/// with the original.
+pub(crate) fn copy_row(
+    state: &AppState,
+    row: &NoteRow,
+    folder_id: Option<&str>,
+    mark_copy: bool,
+) -> Result<NoteRow, String> {
+    let password = match row.note_salt {
+        Some(_) => Some(Zeroizing::new(state.note_password(&row.id).ok_or(LOCKED)?)),
+        None => None,
+    };
+    let (title, content) = open_row(state, row)?;
+    let title = if mark_copy { format!("{title} (copy)") } else { title };
+    let key = &state.device_key;
+    let id = Uuid::new_v4().to_string();
+    let ts = now_secs();
+
+    let (title_nonce, title_ct) =
+        encrypt_with_vault(key, title.as_bytes(), id.as_bytes()).map_err(|e| e.to_string())?;
+    let (nonce, content_ct) =
+        encrypt_with_vault(key, &content, id.as_bytes()).map_err(|e| e.to_string())?;
+    let tags = decrypt_tags(key, &row.id, &row.tags).map_err(|e| e.to_string())?;
+    let preview_text = match (&password, row.preview_text.as_deref()) {
+        (None, Some(p)) => decrypt_preview(key, &row.id, p)
+            .map(|p| encrypt_preview(key, &id, &p))
+            .transpose()?,
+        _ => None,
+    };
+
+    let mut copy = NoteRow {
+        id: id.clone(),
+        kind: row.kind.clone(),
+        title_nonce: title_nonce.to_vec(),
+        title_ct,
+        title_note_nonce: None,
+        nonce: nonce.to_vec(),
+        content_ct,
+        note_salt: None,
+        note_nonce: None,
+        created_at: ts,
+        updated_at: ts,
+        tags: encrypt_tags(key, &id, &tags)?,
+        content_hint: row.content_hint.clone(),
+        pinned: false,
+        bg_color: row.bg_color.clone(),
+        bg_image: row.bg_image.clone(),
+        show_preview: row.show_preview,
+        preview_text,
+        // A new note, not another copy of the original: transfers dedup on this.
+        origin_device_id: state.device_uuid.clone(),
+        origin_note_id: id.clone(),
+        folder_id: folder_id.map(String::from),
+        sort_order: 0,
+        rc_salt: None,
+        rc_nonce: None,
+        rc_ct: None,
+    };
+    if let Some(pw) = &password {
+        let sealed = seal_note(pw, &copy.content_ct, &copy.title_ct).map_err(|e| e.to_string())?;
+        apply_sealed(&mut copy, sealed);
+        state.unlock_note(&id, pw, &title);
+    }
+    Ok(copy)
+}
+
+/// Copies `ids` into `folder_id`. Trashed notes are left out; locked protected
+/// ones are counted in `skipped_locked`. All rows land in one transaction.
+pub(crate) async fn copy_impl(
+    state: &AppState,
+    ids: &[String],
+    folder_id: Option<&str>,
+) -> Result<CopyReport, String> {
+    if let Some(f) = folder_id {
+        if crate::folders::queries::get(&state.db, f).await.map_err(|e| e.to_string())?.is_none() {
+            return Err("folder not found".into());
+        }
+    }
+    let mut report = CopyReport::default();
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        if crate::folders::queries::is_trashed(&state.db, id).await.map_err(|e| e.to_string())? {
+            continue;
+        }
+        let Some(row) = queries::note_get(&state.db, id).await.map_err(|e| e.to_string())? else {
+            continue;
+        };
+        match copy_row(state, &row, folder_id, row.folder_id.as_deref() == folder_id) {
+            Ok(copy) => rows.push(copy),
+            Err(e) if e == LOCKED => report.skipped_locked += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
+    for row in &rows {
+        queries::note_insert(&mut *tx, row).await.map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    report.copied = rows.into_iter().map(|r| r.id).collect();
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn notes_copy(
+    ids: Vec<String>,
+    folder_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CopyReport, String> {
+    copy_impl(&state, &ids, folder_id.as_deref()).await
+}
+
 // ----- Per-note password protection -----
 
 /// Open a row to (title, content JSON bytes), peeling a protected note's
@@ -1911,6 +2035,99 @@ mod tests {
         for id in ids {
             protect_impl(state, id, password).await.unwrap();
         }
+    }
+
+    // ---- Copy ----
+
+    async fn copy(state: &AppState, ids: &[&String], folder: Option<&str>) -> CopyReport {
+        let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        copy_impl(state, &ids, folder).await.unwrap()
+    }
+
+    fn listed<'a>(list: &'a [NoteMetadata], id: &str) -> &'a NoteMetadata {
+        list.iter().find(|m| m.id == id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_copied_note_carries_everything_but_its_id() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Groceries", &["home"]).await;
+        let mut row = fetch(&state, &id).await;
+        row.bg_color = Some("#ffe3f1".into());
+        row.show_preview = false;
+        queries::note_update(&state.db, &row).await.unwrap();
+        let dest = crate::folders::commands::create_impl(&state, "Dest", None).await.unwrap();
+
+        let report = copy(&state, &[&id], Some(&dest)).await;
+        assert_eq!(report.skipped_locked, 0);
+        let new_id = &report.copied[0];
+        assert_ne!(new_id, &id);
+
+        let list = list_impl(&state, None, None).await.unwrap();
+        let (orig, dup) = (listed(&list, &id), listed(&list, new_id));
+        assert_eq!(dup.title, "Groceries", "another folder needs no suffix");
+        assert_eq!(dup.kind, orig.kind);
+        assert_eq!(dup.tags, vec!["home"]);
+        assert_eq!(dup.bg_color.as_deref(), Some("#ffe3f1"));
+        assert!(!dup.show_preview);
+        assert_eq!(dup.folder_id.as_deref(), Some(dest.as_str()));
+        assert_eq!(orig.folder_id, None, "the original stays where it was");
+        let copied = fetch(&state, new_id).await;
+        assert_eq!(decrypt_content(&state, &copied), decrypt_content(&state, &row));
+        // A transfer dedups on origin, so a copy must not claim the original's.
+        assert_eq!(copied.origin_note_id, *new_id);
+    }
+
+    #[tokio::test]
+    async fn a_copy_beside_the_original_is_marked_as_a_copy() {
+        let state = test_state().await;
+        let id = seed_tagged(&state, "Groceries", &[]).await;
+        let report = copy(&state, &[&id], None).await;
+        assert_eq!(listed_title(&state, &report.copied[0]).await, "Groceries (copy)");
+    }
+
+    #[tokio::test]
+    async fn an_unlocked_protected_note_copies_under_the_same_password() {
+        let state = test_state().await;
+        let id = seed_note(&state, "secret body").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+        add_recovery_impl(&state, &id, "pw").await.unwrap();
+
+        let report = copy(&state, &[&id], None).await;
+        let new_id = report.copied[0].clone();
+        let copied = fetch(&state, &new_id).await;
+        assert!(copied.note_salt.is_some());
+        assert!(copied.rc_salt.is_none(), "a recovery code belongs to the original only");
+        assert!(!title_readable_with_device_key(&state, &copied));
+
+        state.lock_note(&new_id);
+        assert_eq!(decrypt_content(&state, &copied).unwrap_err(), LOCKED);
+        assert!(unlock_impl(&state, &new_id, "other").await.is_err());
+        unlock_impl(&state, &new_id, "pw").await.unwrap();
+        assert_eq!(decrypt_content(&state, &copied).unwrap()["body"], "secret body");
+        assert_eq!(listed_title(&state, &new_id).await, "Secret (copy)");
+    }
+
+    #[tokio::test]
+    async fn a_locked_protected_note_is_skipped_and_the_rest_copied() {
+        let state = test_state().await;
+        let open = seed_note(&state, "a").await;
+        let shut = seed_note(&state, "b").await;
+        protect_impl(&state, &shut, "pw").await.unwrap();
+        state.lock_note(&shut);
+
+        let report = copy(&state, &[&open, &shut], None).await;
+        assert_eq!(report.copied.len(), 1);
+        assert_eq!(report.skipped_locked, 1);
+        assert_eq!(list_impl(&state, None, None).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn trashed_notes_are_not_copied() {
+        let state = test_state().await;
+        let id = seed_note(&state, "a").await;
+        crate::trash::queries::trash(&state.db, &[id.clone()], now_secs()).await.unwrap();
+        assert!(copy(&state, &[&id], None).await.copied.is_empty());
     }
 }
 

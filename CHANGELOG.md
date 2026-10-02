@@ -20,9 +20,26 @@
   Ctrl/Cmd+F search, Delete moves the open note (split view) or the selected notes to Trash
   after a confirm, Esc closes a menu or dialog. Ignored while typing in a field.
 - **New note inside** in a folder's menu, next to New folder inside.
+- **Copy, cut and paste** notes and folders. Copy / Cut in every row menu, Ctrl/Cmd+C and
+  Ctrl/Cmd+X on the selection or the open note, then Paste here (row menu, the bar at the
+  bottom of the list, or Ctrl/Cmd+V) into the folder you are viewing, or Paste into from a
+  folder's menu. Cut moves; copy duplicates kind, content, tags, colours, background and
+  preview setting, adding " (copy)" to the title only beside the original. Folders copy
+  with everything inside except Trash. A protected note's copy keeps its password; a
+  locked one is skipped with a message to unlock it first. Recovery codes are not copied.
+  Cut rows look dimmed until pasted; Esc clears. Ctrl+C/X/V while typing are untouched.
+- **Find in note.** Ctrl/Cmd+F inside a note opens a find bar with a match count,
+  Enter / Shift+Enter or arrows to step, Esc to close. Works in documents, checklists,
+  kanban boards and tables. Outside a note Ctrl/Cmd+F still searches the list.
+- **Autosave** setting in Settings > Editing, off by default. On, the open note saves
+  itself a second after the last edit, when the window loses focus, when you navigate
+  away and before the window closes; an empty new note is not created. Off, closing the
+  window with unsaved changes now asks to Save, Discard or Cancel, as leaving a note does.
 
 ### Fixed
 
+- **The row menu is always the last thing on a row.** Note rows showed the menu before
+  the date and folder rows after the chevron on desktop; every row now ends with it.
 - **Row menus are never cut off.** Where the native menu is not available, the in-app menu
   opens at the button or cursor and flips up or left to stay inside the window.
 - **The list header stays put.** Menu, search, sort, select and + stay pinned at the top

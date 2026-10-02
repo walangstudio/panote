@@ -207,6 +207,32 @@ pub async fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+const AUTOSAVE_KEY: &str = "autosave";
+
+/// Off unless explicitly turned on; anything but "on" in the table reads as off.
+pub(crate) async fn get_autosave_impl(state: &AppState) -> Result<bool, String> {
+    let value = queries::device_setting_get(&state.db, AUTOSAVE_KEY)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(value.as_deref() == Some("on"))
+}
+
+pub(crate) async fn set_autosave_impl(state: &AppState, enabled: bool) -> Result<(), String> {
+    queries::device_setting_set(&state.db, AUTOSAVE_KEY, if enabled { "on" } else { "off" })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_autosave(state: State<'_, AppState>) -> Result<bool, String> {
+    get_autosave_impl(&state).await
+}
+
+#[tauri::command]
+pub async fn set_autosave(enabled: bool, state: State<'_, AppState>) -> Result<(), String> {
+    set_autosave_impl(&state, enabled).await
+}
+
 /// Resolve the device name: user-set > env var > cert-hash fallback.
 pub async fn resolve_device_name(pool: &sqlx::SqlitePool) -> anyhow::Result<String> {
     if let Some(name) = queries::device_setting_get(pool, "device_name").await? {
@@ -1055,5 +1081,21 @@ mod tests {
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
         let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
         assert_eq!(row.content_hint.as_deref(), Some("code"));
+    }
+    #[tokio::test]
+    async fn autosave_is_off_until_turned_on() {
+        let state = test_state().await;
+        assert!(!get_autosave_impl(&state).await.unwrap());
+        set_autosave_impl(&state, true).await.unwrap();
+        assert!(get_autosave_impl(&state).await.unwrap());
+        set_autosave_impl(&state, false).await.unwrap();
+        assert!(!get_autosave_impl(&state).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_autosave_value_reads_as_off() {
+        let state = test_state().await;
+        queries::device_setting_set(&state.db, AUTOSAVE_KEY, "yes please").await.unwrap();
+        assert!(!get_autosave_impl(&state).await.unwrap());
     }
 }

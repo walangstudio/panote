@@ -36,7 +36,10 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 - Trash: deleted notes can be restored for 30 days, then are purged
 - Desktop split view above 900px window width
 - Desktop: right-click a note or folder for a native context menu
-- Shortcuts: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder, Ctrl/Cmd+F search, Delete move to Trash, Ctrl/Cmd+S save, Esc close a menu or dialog
+- Copy, cut and paste notes and folders, file-manager style: from the row menu or Ctrl/Cmd+C, X, V. Paste lands in the folder you are viewing (or "Paste into" a folder); a copied protected note keeps its password
+- Shortcuts: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder, Ctrl/Cmd+F search (find in note inside the editor), Ctrl/Cmd+C/X/V copy, cut and paste, Delete move to Trash, Ctrl/Cmd+S save, Esc close a menu or dialog
+- Find in note (Ctrl/Cmd+F in the editor) for every note kind, with a match count and next/previous
+- Optional autosave (Settings > Editing): the open note saves itself as you edit and before the window closes. Off by default; then leaving or closing with unsaved changes asks first
 
 **Protection**
 

@@ -3,7 +3,7 @@
 //! impossible, because the tree is walked recursively when rendering.
 
 use super::commands::{
-    create_impl, list_impl, move_impl, rename_impl, CYCLE, NAME_EMPTY, TOO_DEEP,
+    copy_impl, create_impl, list_impl, move_impl, rename_impl, CYCLE, NAME_EMPTY, TOO_DEEP,
 };
 use super::{queries, MAX_DEPTH};
 use crate::crypto::vault::derive_key;
@@ -275,4 +275,73 @@ async fn the_folder_list_reports_the_order_a_reorder_saved() {
     let listed = list_impl(&s).await.unwrap();
     let order = |id: &str| listed.iter().find(|f| f.id == id).unwrap().sort_order;
     assert_eq!((order(&b), order(&a)), (0, 1));
+}
+
+// ---- Copy ----
+
+fn titles_in(notes: &[crate::notes::types::NoteMetadata], folder: &str) -> Vec<String> {
+    let mut t: Vec<String> = notes
+        .iter()
+        .filter(|n| n.folder_id.as_deref() == Some(folder))
+        .map(|n| n.title.clone())
+        .collect();
+    t.sort();
+    t
+}
+
+#[tokio::test]
+async fn copying_a_folder_copies_its_subtree_but_not_its_trash() {
+    let s = state().await;
+    let top = create_impl(&s, "Top", None).await.unwrap();
+    let sub = create_impl(&s, "Sub", Some(&top)).await.unwrap();
+    let dest = create_impl(&s, "Dest", None).await.unwrap();
+    note_in(&s, Some(&top), "a").await;
+    note_in(&s, Some(&sub), "b").await;
+    let gone = note_in(&s, Some(&sub), "c").await;
+    crate::trash::queries::trash(&s.db, &[gone], now_secs()).await.unwrap();
+
+    let report = copy_impl(&s, &top, Some(&dest)).await.unwrap();
+    assert_eq!(report.copied.len(), 2);
+    assert_eq!(report.skipped_locked, 0);
+
+    let folders = list_impl(&s).await.unwrap();
+    let top2 = folders
+        .iter()
+        .find(|f| f.name == "Top" && f.parent_id.as_deref() == Some(dest.as_str()))
+        .expect("a copy of Top inside Dest");
+    let sub2 = folders
+        .iter()
+        .find(|f| f.name == "Sub" && f.parent_id.as_deref() == Some(top2.id.as_str()))
+        .expect("a copy of Sub inside the copy of Top");
+    let notes = crate::notes::commands::list_impl(&s, None, None).await.unwrap();
+    assert_eq!(titles_in(&notes, &top2.id), vec!["a"]);
+    assert_eq!(titles_in(&notes, &sub2.id), vec!["b"]);
+    assert_eq!(titles_in(&notes, &sub), vec!["b"], "the original keeps its notes");
+}
+
+#[tokio::test]
+async fn a_folder_copied_beside_itself_is_marked_as_a_copy() {
+    let s = state().await;
+    let top = create_impl(&s, "Top", None).await.unwrap();
+    note_in(&s, Some(&top), "a").await;
+    copy_impl(&s, &top, None).await.unwrap();
+    let folders = list_impl(&s).await.unwrap();
+    let dup = folders.iter().find(|f| f.name == "Top (copy)").expect("suffixed copy");
+    assert_eq!(dup.parent_id, None);
+    let notes = crate::notes::commands::list_impl(&s, None, None).await.unwrap();
+    assert_eq!(titles_in(&notes, &dup.id), vec!["a"], "notes inside keep their titles");
+}
+
+#[tokio::test]
+async fn a_folder_copy_that_would_exceed_the_cap_is_refused() {
+    let s = state().await;
+    let mut deep = create_impl(&s, "d0", None).await.unwrap();
+    for i in 1..(MAX_DEPTH - 1) {
+        deep = create_impl(&s, &format!("d{i}"), Some(&deep)).await.unwrap();
+    }
+    let x = create_impl(&s, "x", None).await.unwrap();
+    let y = create_impl(&s, "y", Some(&x)).await.unwrap();
+    create_impl(&s, "z", Some(&y)).await.unwrap();
+
+    assert_eq!(copy_impl(&s, &x, Some(&deep)).await.unwrap_err(), TOO_DEEP);
 }

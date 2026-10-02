@@ -3,6 +3,7 @@
   import { getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving, deviceIps, notesExport, notesImport, type ImportResolution, type ImportSummary } from "$lib/tauri";
   import { getVersion } from "@tauri-apps/api/app";
   import { theme, resolvedTheme } from "$lib/stores/theme";
+  import { autosave, setAutosave } from "$lib/stores/autosave";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
@@ -264,6 +265,30 @@
           style="display:none"
           onchange={onFilePicked}
         />
+      </div>
+    </div>
+
+    <!-- Editing -->
+    <div class="settings-group">
+      <div class="group-label">Editing</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon"><span class="material-symbols-outlined">save</span></span>
+          <div class="row-body">
+            <span class="row-title">Autosave</span>
+            <span class="row-sub">{$autosave ? "Notes save as you edit" : "Save with Ctrl+S or the Save button"}</span>
+          </div>
+          <button
+            class="toggle-pill"
+            class:on={$autosave}
+            role="switch"
+            aria-checked={$autosave}
+            aria-label="Autosave"
+            onclick={() => setAutosave(!$autosave)}
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
       </div>
     </div>
 

@@ -3,6 +3,8 @@
 
 use super::{queries, MAX_DEPTH};
 use crate::crypto::note::{decrypt_with_vault, encrypt_with_vault};
+use crate::db::queries::{note_get, note_insert};
+use crate::notes::commands::{copy_row, CopyReport, LOCKED};
 use crate::state::{now_secs, AppState};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
@@ -160,6 +162,71 @@ pub(crate) async fn move_impl(
         .map_err(|e| e.to_string())
 }
 
+/// Copies folder `id`, its subfolders and their notes under `new_parent`, in one
+/// transaction. Trashed notes are left out, locked protected ones counted in
+/// `skipped_locked`.
+pub(crate) async fn copy_impl(
+    state: &AppState,
+    id: &str,
+    new_parent: Option<&str>,
+) -> Result<CopyReport, String> {
+    let err = |e: anyhow::Error| e.to_string();
+    // A snapshot, so copying a folder into its own subtree never walks its copies.
+    let all = queries::list(&state.db).await.map_err(err)?;
+    let source = all.iter().find(|f| f.id == id).ok_or("folder not found")?;
+    let parent_depth = match new_parent {
+        Some(p) if !all.iter().any(|f| f.id == p) => return Err("parent folder not found".into()),
+        Some(p) => depth_of(&state.db, p).await.map_err(err)?,
+        None => 0,
+    };
+    if parent_depth + subtree_height(&state.db, id).await.map_err(err)? > MAX_DEPTH {
+        return Err(TOO_DEEP.into());
+    }
+
+    let key = &state.device_key;
+    let mut report = CopyReport::default();
+    let mut folders = Vec::new();
+    let mut notes = Vec::new();
+    let mut stack = vec![(source, new_parent.map(String::from), 1)];
+    while let Some((folder, parent, depth)) = stack.pop() {
+        let name = decrypt_name(key, &folder.id, &folder.name_ct)
+            .unwrap_or_else(|_| "(unreadable)".into());
+        let name = if depth == 1 && folder.parent_id.as_deref() == new_parent {
+            format!("{name} (copy)")
+        } else {
+            name
+        };
+        let copy_id = Uuid::new_v4().to_string();
+        for note_id in queries::live_note_ids_in(&state.db, &folder.id).await.map_err(err)? {
+            let Some(row) = note_get(&state.db, &note_id).await.map_err(err)? else { continue };
+            match copy_row(state, &row, Some(&copy_id), false) {
+                Ok(copy) => notes.push(copy),
+                Err(e) if e == LOCKED => report.skipped_locked += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        if depth < MAX_DEPTH {
+            for child in all.iter().filter(|f| f.parent_id.as_deref() == Some(folder.id.as_str())) {
+                stack.push((child, Some(copy_id.clone()), depth + 1));
+            }
+        }
+        folders.push((encrypt_name(key, &copy_id, &name)?, copy_id, parent));
+    }
+
+    let now = now_secs();
+    let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
+    // Parents were pushed before their children, which the foreign key needs.
+    for (name_ct, copy_id, parent) in &folders {
+        queries::insert(&mut *tx, copy_id, parent.as_deref(), name_ct, now).await.map_err(err)?;
+    }
+    for row in &notes {
+        note_insert(&mut *tx, row).await.map_err(err)?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    report.copied = notes.into_iter().map(|r| r.id).collect();
+    Ok(report)
+}
+
 pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, String> {
     let rows = queries::list(&state.db).await.map_err(|e| e.to_string())?;
     let counts = queries::note_counts(&state.db).await.map_err(|e| e.to_string())?;
@@ -247,6 +314,15 @@ pub async fn folder_move(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     move_impl(&state, &id, parent_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn folder_copy(
+    id: String,
+    parent_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CopyReport, String> {
+    copy_impl(&state, &id, parent_id.as_deref()).await
 }
 
 #[tauri::command]
