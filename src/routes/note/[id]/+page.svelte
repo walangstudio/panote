@@ -27,6 +27,7 @@
   const isNew = $derived(id === "new");
   const kindParam = $derived((page.url.searchParams.get("kind") ?? "document") as NoteKind);
   const modeParam = $derived(page.url.searchParams.get("mode"));
+  const folderParam = $derived(page.url.searchParams.get("folder"));
 
   let loading = $state(true);
   let saving = $state(false);
@@ -392,7 +393,7 @@
     try {
       const content_hint = kind === "document" ? detectFormat((content as { body: string }).body ?? "") : undefined;
       const input = { kind, title, content, tags, content_hint, show_preview: showPreview, bg_color: bgColor, bg_image: bgImage };
-      if (isNew) created = await noteCreate(input);
+      if (isNew) created = await noteCreate({ ...input, folder_id: folderParam });
       else await noteUpdate(id, input);
       // Saving is the one place the editor can change a background, so it is the
       // one place that needs the cached image map refreshed.

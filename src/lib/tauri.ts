@@ -53,6 +53,8 @@ export interface NoteInput {
   bg_color?: string;
   bg_image?: string;
   show_preview?: boolean;
+  /// Read on create only.
+  folder_id?: string | null;
 }
 
 export interface Peer {

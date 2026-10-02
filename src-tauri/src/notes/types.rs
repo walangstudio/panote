@@ -147,4 +147,7 @@ pub struct NoteInput {
     pub bg_image: Option<String>,
     #[serde(default)]
     pub show_preview: Option<bool>,
+    /// Only read on create; a save never moves a note.
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }

@@ -235,8 +235,8 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
 
 pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
@@ -261,6 +261,7 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.rc_salt)
     .bind(&row.rc_nonce)
     .bind(&row.rc_ct)
+    .bind(&row.folder_id)
     .execute(pool)
     .await?;
     Ok(())

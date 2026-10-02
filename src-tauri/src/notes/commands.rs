@@ -144,7 +144,19 @@ pub async fn note_create(
     input: NoteInput,
     state: State<'_, AppState>,
 ) -> Result<NoteMetadata, String> {
+    create_impl(&state, input).await
+}
+
+pub(crate) async fn create_impl(state: &AppState, input: NoteInput) -> Result<NoteMetadata, String> {
     validate_bg_image(&input.bg_image)?;
+    // A folder deleted since the list was drawn must not lose the note.
+    let folder_id = match input.folder_id.as_deref() {
+        Some(f) => crate::folders::queries::get(&state.db, f)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|_| f.to_string()),
+        None => None,
+    };
     let key = &state.device_key;
     let id = Uuid::new_v4().to_string();
     let ts = now_secs();
@@ -162,8 +174,8 @@ pub async fn note_create(
         .transpose()?;
 
     let row = NoteRow {
-        folder_id: None, // owned by note_set_folder; note_insert/update never write it
-        sort_order: 0,   // owned by notes_set_order, likewise
+        folder_id: folder_id.clone(),
+        sort_order: 0, // owned by notes_set_order; note_insert/update never write it
         id: id.clone(),
         kind: input.kind.clone(),
         title_nonce: title_nonce.to_vec(),
@@ -194,7 +206,7 @@ pub async fn note_create(
         .map_err(|e| e.to_string())?;
 
     Ok(NoteMetadata {
-        folder_id: None,
+        folder_id,
         id,
         kind: input.kind,
         title: input.title,
@@ -261,7 +273,7 @@ pub(crate) async fn update_impl(
     };
 
     let mut row = NoteRow {
-        folder_id: None, // owned by note_set_folder; note_insert/update never write it
+        folder_id: None, // owned by note_set_folder; note_update never writes it
         sort_order: 0,   // owned by notes_set_order, likewise
         id: id.clone(),
         kind: input.kind.clone(),
@@ -1709,6 +1721,7 @@ mod tests {
             bg_color: None,
             bg_image: None,
             show_preview: None,
+            folder_id: None,
         };
         update_impl(&state, id.clone(), input).await.unwrap();
 
@@ -1717,6 +1730,38 @@ mod tests {
         assert_eq!(listed_title(&state, &id).await, "Renamed");
         state.lock_note(&id);
         assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE);
+    }
+
+    fn new_note_in(folder_id: Option<String>) -> NoteInput {
+        NoteInput {
+            kind: "document".into(),
+            title: "New".into(),
+            content: json!({ "body": "b" }),
+            tags: vec![],
+            content_hint: None,
+            pinned: None,
+            bg_color: None,
+            bg_image: None,
+            show_preview: None,
+            folder_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_note_lands_in_the_folder_it_was_created_in() {
+        let state = test_state().await;
+        let folder = crate::folders::commands::create_impl(&state, "Work", None).await.unwrap();
+        let meta = create_impl(&state, new_note_in(Some(folder.clone()))).await.unwrap();
+        assert_eq!(meta.folder_id.as_deref(), Some(folder.as_str()));
+        assert_eq!(fetch(&state, &meta.id).await.folder_id.as_deref(), Some(folder.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_new_note_for_a_missing_folder_lands_at_the_root() {
+        let state = test_state().await;
+        let meta = create_impl(&state, new_note_in(Some("gone".into()))).await.unwrap();
+        assert_eq!(meta.folder_id, None);
+        assert_eq!(fetch(&state, &meta.id).await.folder_id, None);
     }
 
     #[tokio::test]

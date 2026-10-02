@@ -769,6 +769,7 @@ async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
         bg_color: None,
         bg_image: None,
         show_preview: None,
+        folder_id: None,
     };
     update_impl(&alice, ids[0].clone(), renamed).await.unwrap();
     let responder = answer_with(bob.clone(), CODE);

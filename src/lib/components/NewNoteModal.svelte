@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import { trapFocus } from "$lib/trapFocus";
+  import { newNoteHref } from "$lib/stores/listState";
 
   interface Props {
     onclose: () => void;
@@ -26,7 +27,7 @@
     onclose();
     // A folder is created where you are, not by navigating to an editor.
     if (id === "folder") { onnewfolder?.(); return; }
-    goto(`/note/new?kind=${id}`);
+    goto(newNoteHref(id));
   }
 
   function onKey(e: KeyboardEvent) {

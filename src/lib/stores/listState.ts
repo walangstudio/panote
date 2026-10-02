@@ -1,4 +1,4 @@
-import { writable } from "svelte/store";
+import { get, writable } from "svelte/store";
 
 /// Note-list UI state that has to outlive the component.
 ///
@@ -19,6 +19,12 @@ export const listFolder = writable<string | null>(null);
 /// Showing Trash instead of a folder. A flag rather than a sentinel folder id,
 /// so no real id can ever collide with it.
 export const listTrash = writable(false);
+
+/// Where a new note of `kind` is composed: filed into the folder on screen.
+export const newNoteHref = (kind: string) => {
+  const folder = get(listFolder);
+  return `/note/new?kind=${kind}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`;
+};
 
 /// Clear it. Module-level state outlives any single component by design, which
 /// also means it outlives a single test — so tests must reset between cases.
