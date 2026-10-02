@@ -42,13 +42,8 @@ const defaultSort: SortPref = { field: "updated", dir: "desc" };
 
 function loadSort(): SortPref {
   if (typeof window === "undefined") return defaultSort;
-  try {
-    const saved: SortPref = JSON.parse(localStorage.getItem("panote-sort") ?? "");
-    // Custom is withdrawn while its drag does not work. Anyone whose stored
-    // preference is already Custom would otherwise open to a list they cannot
-    // rearrange and cannot switch away from without finding the sort menu.
-    return saved.field === "manual" ? defaultSort : saved;
-  } catch { return defaultSort; }
+  try { return JSON.parse(localStorage.getItem("panote-sort") ?? ""); }
+  catch { return defaultSort; }
 }
 
 export const sortPref = writable<SortPref>(loadSort());
@@ -75,7 +70,8 @@ export function sortNotes(list: NoteMetadata[], pref: SortPref): NoteMetadata[] 
   // the sorted array. Reversing looks equivalent but isn't: sort is stable, so it
   // also flips every tie — and on a field like Kind nearly every pair is a tie, so
   // toggling direction reshuffled each group by nothing more than backend order.
-  const dir = pref.dir === "desc" ? -1 : 1;
+  // Custom has no direction: it is the order the rows were dragged into.
+  const dir = pref.dir === "desc" && pref.field !== "manual" ? -1 : 1;
   const cmp = (a: NoteMetadata, b: NoteMetadata) =>
     (primary(a, b) || collator.compare(a.id, b.id)) * dir;
   // filter() already copies, so the caller's array is never sorted in place.

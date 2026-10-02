@@ -151,8 +151,9 @@
   //
   // Live whenever Custom is the active sort - no mode to enter first. Under any
   // other sort a drag would appear to work and then be undone by the next
-  // refresh, so the grips simply are not there.
-  const reordering = $derived($sortPref.field === "manual");
+  // refresh, so the grips simply are not there. Nor while searching: the
+  // results are a subset spanning subfolders, not one level to arrange.
+  const reordering = $derived($sortPref.field === "manual" && !filter.trim());
 
   /// Set once a drag actually moves something. Rows stay clickable in Custom
   /// view, so only a real drag may swallow the click that follows it.
@@ -175,23 +176,29 @@
     dragIds = [...ids];
     window.addEventListener("pointermove", onReorderMove);
     window.addEventListener("pointerup", onReorderUp);
+    window.addEventListener("pointercancel", onReorderUp);
+  }
+
+  /// `ids` with `id` moved to index `to`; unchanged if either is out of range.
+  function moved(ids: string[], id: string, to: number): string[] {
+    const from = ids.indexOf(id);
+    if (from === -1 || to < 0 || to >= ids.length) return ids;
+    const next = [...ids];
+    next.splice(to, 0, ...next.splice(from, 1));
+    return next;
   }
 
   function onReorderMove(e: PointerEvent) {
     if (!dragIds || !dragId) return;
-    didDrag = true;
     // Hit-test the row under the finger, the same approach the kanban board uses,
     // so this works with a mouse and a touch without separate code paths.
     let el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
     while (el) {
       const over = el.dataset?.rowId;
       if (over && over !== dragId) {
-        const from = dragIds.indexOf(dragId);
-        const to = dragIds.indexOf(over);
-        if (from !== -1 && to !== -1) {
-          const next = [...dragIds];
-          next.splice(to, 0, ...next.splice(from, 1));
-          dragIds = next;
+        if (dragIds.includes(over)) {
+          dragIds = moved(dragIds, dragId, dragIds.indexOf(over));
+          didDrag = true;
         }
         return;
       }
@@ -202,37 +209,55 @@
   async function onReorderUp() {
     window.removeEventListener("pointermove", onReorderMove);
     window.removeEventListener("pointerup", onReorderUp);
+    window.removeEventListener("pointercancel", onReorderUp);
     const ids = dragIds;
     const kind = dragKind;
     dragIds = null; dragKind = null; dragId = null;
-    if (!ids || !kind) return;
+    if (!ids || !kind || !didDrag) return;
     // Cleared after the click that ends the drag has had its chance to fire.
     setTimeout(() => { didDrag = false; }, 0);
+    await saveOrder(kind, ids);
+  }
+
+  async function saveOrder(kind: "note" | "folder", ids: string[]): Promise<boolean> {
     try {
       if (kind === "note") await notesReorder(ids);
       else await foldersReorder(ids);
       await Promise.all([refreshNotes(), refreshFolders()]);
-    } catch (e) { moveError = folderMessage(e); }
+      return true;
+    } catch (e) { moveError = folderMessage(e); return false; }
   }
 
-  /// Rows in the order to paint: the in-flight arrangement while dragging that
-  /// kind, otherwise whatever the backend gave us.
+  /// Arrow keys on a focused grip: the keyboard route for what the drag does.
+  let reorderAnnouncement = $state("");
+  async function reorderByKey(e: KeyboardEvent, kind: "note" | "folder", id: string, label: string, ids: string[]) {
+    e.stopPropagation();
+    const step = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const next = moved(ids, id, ids.indexOf(id) + step);
+    if (next === ids) return;
+    if (!(await saveOrder(kind, next))) return;
+    reorderAnnouncement = `${label} moved to position ${next.indexOf(id) + 1} of ${next.length}`;
+    await tick();
+    // The keyed row moved, and a moved node drops focus.
+    document.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(id)}"] .drag-grip`)?.focus();
+  }
+
+  /// Rows in the order to paint: the in-flight arrangement for the group holding
+  /// the dragged row, otherwise whatever the backend gave us.
   ///
   /// Derived rather than a function call in the template - a call did not track
   /// `dragIds` as a dependency, so the list only reordered once the drag ended
   /// and the rows never followed the pointer.
   function arrange<T extends { id: string }>(rows: T[], ids: string[] | null): T[] {
-    if (!ids) return rows;
+    if (!ids || !rows.some(r => r.id === dragId)) return rows;
     const by = new Map(rows.map(r => [r.id, r]));
     return ids.map(id => by.get(id)).filter((r): r is T => !!r);
   }
 
-  // "manual" is deliberately absent: the drag that makes it usable does not work
-  // on device or desktop, so offering the sort would only strand people in a
-  // list they cannot arrange. Everything behind it - sort_order on notes and
-  // folders, notes_reorder/folders_reorder, the drag itself - is still here and
-  // still tested; only the way in is withdrawn.
   const sortOptions: { field: SortField; label: string }[] = [
+    { field: "manual", label: "Custom" },
     { field: "updated", label: "Date edited" },
     { field: "created", label: "Date created" },
     { field: "title", label: "Title" },
@@ -265,7 +290,9 @@
   const childFolders = $derived(
     $folders
       .filter(f => (f.parent_id ?? null) === $listFolder)
-      .sort((a, b) => a.name.localeCompare(b.name)),
+      .sort((a, b) =>
+        ($sortPref.field === "manual" ? (a.sort_order ?? 0) - (b.sort_order ?? 0) : 0) ||
+        a.name.localeCompare(b.name)),
   );
   /// Direct children only, so the list matches the folder row you clicked.
   const directNotes = $derived(sorted.filter(n => (n.folder_id ?? null) === $listFolder));
@@ -432,8 +459,9 @@
 
   const pinnedNotes = $derived(filtered.filter(n => n.pinned));
   const otherNotes = $derived(filtered.filter(n => !n.pinned));
-  const orderedNotes = $derived(arrange(otherNotes, dragKind === "note" ? dragIds : null));
-  const orderedFolders = $derived(arrange(childFolders, dragKind === "folder" ? dragIds : null));
+  const orderedPinned = $derived(arrange(pinnedNotes, dragIds));
+  const orderedNotes = $derived(arrange(otherNotes, dragIds));
+  const orderedFolders = $derived(arrange(childFolders, dragIds));
 
 
   // Pick dark vs light ink for a note's custom background so text stays legible.
@@ -566,12 +594,14 @@
               <span>{opt.label}</span>
             </button>
           {/each}
-          <div class="sort-divider"></div>
-          <button class="sort-option"
-            onclick={() => sortPref.update(c => ({ field: c.field, dir: c.dir === "asc" ? "desc" : "asc" }))}>
-            <span class="material-symbols-outlined" style="font-size: 18px;">{$sortPref.dir === "asc" ? "arrow_upward" : "arrow_downward"}</span>
-            <span>{$sortPref.dir === "asc" ? "Ascending" : "Descending"}</span>
-          </button>
+          {#if $sortPref.field !== "manual"}
+            <div class="sort-divider"></div>
+            <button class="sort-option"
+              onclick={() => sortPref.update(c => ({ field: c.field, dir: c.dir === "asc" ? "desc" : "asc" }))}>
+              <span class="material-symbols-outlined" style="font-size: 18px;">{$sortPref.dir === "asc" ? "arrow_upward" : "arrow_downward"}</span>
+              <span>{$sortPref.dir === "asc" ? "Ascending" : "Descending"}</span>
+            </button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -622,9 +652,10 @@
                 role="button"
                 tabindex="0"
                 aria-label={`Reorder ${note.title || "Untitled"}`}
+                title="Drag, or press the up and down arrow keys, to move"
                 onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
-                onpointerdown={(e) => startReorder(e, "note", note.id, orderedNotes.map(x => x.id))}
+                onkeydown={(e) => reorderByKey(e, "note", note.id, note.title || "Untitled", (note.pinned ? orderedPinned : orderedNotes).map(x => x.id))}
+                onpointerdown={(e) => startReorder(e, "note", note.id, (note.pinned ? orderedPinned : orderedNotes).map(x => x.id))}
               >⠿</span>
             {/if}
             <span class="badge-wrap">
@@ -769,6 +800,7 @@
     </nav>
   {/if}
 
+  <div class="sr-only" role="status" aria-live="polite">{reorderAnnouncement}</div>
   <ul class="note-list">
     <!-- Folders first, as rows you open — the list is a level, not a filter. -->
     {#if !query}
@@ -791,8 +823,9 @@
                 role="button"
                 tabindex="0"
                 aria-label={`Reorder ${f.name}`}
+                title="Drag, or press the up and down arrow keys, to move"
                 onclick={(e) => e.stopPropagation()}
-                onkeydown={(e) => e.stopPropagation()}
+                onkeydown={(e) => reorderByKey(e, "folder", f.id, f.name, orderedFolders.map(x => x.id))}
                 onpointerdown={(e) => startReorder(e, "folder", f.id, orderedFolders.map(x => x.id))}
               >⠿</span>
             {/if}
@@ -848,12 +881,12 @@
         <span class="material-symbols-outlined sec-ico" style="font-size: 15px; font-variation-settings: 'FILL' 1;">push_pin</span>
         <span>Pinned</span>
       </li>
-      {#each pinnedNotes as note (note.id)}{@render noteCard(note)}{/each}
+      {#each orderedPinned as note (note.id)}{@render noteCard(note)}{/each}
     {/if}
     {#if pinnedNotes.length && otherNotes.length}
       <li class="section-label"><span>All notes</span></li>
     {/if}
-    {#each otherNotes as note (note.id)}{@render noteCard(note)}{/each}
+    {#each orderedNotes as note (note.id)}{@render noteCard(note)}{/each}
     <!-- An empty folder is not an empty library; saying "no notes yet" when the
          note is one level up reads as data loss. -->
     {#if filtered.length === 0 && (query || childFolders.length === 0)}
@@ -1161,6 +1194,11 @@
     font-size: 1.1rem; user-select: none;
   }
   .drag-grip:active { cursor: grabbing; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
   .note-card.reordering { cursor: default; }
   .note-card.reordering:hover { transform: none; }
 

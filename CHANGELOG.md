@@ -15,6 +15,16 @@
   left out of the list, counts, search, folder counts, export and folder sends; a note
   re-sent from another device comes back out of Trash.
 
+### Fixed
+
+- **Custom sort is back, and its drag works.** Rows now follow the pointer while dragging
+  (the note list painted its pre-drag order), a drop lands where it was let go (Custom took
+  the Descending direction and showed every saved order upside down), and folders keep
+  their arranged order (they were always listed by name). Drag the grip with a mouse or a
+  finger; the rest of the row still scrolls. A focused grip moves its row with the up and
+  down arrow keys, announced to screen readers. Pinned notes stay on top and are arranged
+  among themselves. Custom has no direction, and grips hide while searching.
+
 ### Security
 
 - **Protected note titles are sealed under the note password, like the body.** Titles used

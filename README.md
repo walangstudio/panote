@@ -30,6 +30,7 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 
 - Nested folders, browsed like a file manager; create and move notes and folders from the list
 - Tags, pinning, and per-note background colour or image
+- Sort by date edited, date created, title, kind, or Custom: drag notes and folders into your own order by the grip (mouse or touch), or move them with the arrow keys
 - Search by title or tag
 - Multi-select to protect, unprotect, or send several notes at once
 - Trash: deleted notes can be restored for 30 days, then are purged

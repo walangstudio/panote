@@ -37,7 +37,7 @@ import { goto } from "$app/navigation";
 import { page } from "$app/state";
 (page as unknown as { params: Record<string, string> }).params = { id: "" };
 
-import { noteList, notesUnprotect, notesReorder, trashList, trashRestore, trashDelete, trashEmpty } from "$lib/tauri";
+import { noteList, notesUnprotect, notesReorder, foldersReorder, trashList, trashRestore, trashDelete, trashEmpty } from "$lib/tauri";
 import type { TrashedNote } from "$lib/tauri";
 import { notes, bgImages, sortPref } from "$lib/stores/notes";
 import { resetListState, listFolder, listTrash } from "$lib/stores/listState";
@@ -352,15 +352,10 @@ describe("browsing folders like a file manager", () => {
 // Hand-arranging the list. Only offered while the Manual sort is active: a drag
 // under a date sort would appear to work and then be undone by the next refresh,
 // which reads as the app losing the change.
-// Custom is withdrawn from the sort menu while its drag does not work on a real
-// device or on desktop. These still run: the ordering logic and persistence are
-// correct and worth keeping green, so re-listing the option is the only step
-// needed to bring the feature back once the drag is fixed.
-//
-// Note what these could NOT catch: they dispatch pointer events straight at the
-// handler, so they prove the reorder maths and say nothing about whether a real
-// pointer ever reaches it. That gap is exactly why this shipped broken twice.
-describe("arranging by hand (withdrawn from the sort menu)", () => {
+// These dispatch pointer events straight at the handler, so they prove the
+// reorder maths and the save, not that a real pointer arrives. That gap is why
+// this shipped broken twice; e2e/custom-sort.spec.ts drives a real mouse and touch.
+describe("arranging by hand", () => {
   const grips = (t: HTMLElement) => t.querySelectorAll<HTMLElement>(".drag-grip");
   const rowIds = (t: HTMLElement) =>
     [...t.querySelectorAll<HTMLElement>("[data-row-id]")].map(r => r.dataset.rowId);
@@ -402,8 +397,10 @@ describe("arranging by hand (withdrawn from the sort menu)", () => {
     expect(grips(t).length).toBe(3);
   });
 
+  // Descending is the default direction, which is how every drop used to land
+  // upside down.
   it("reorders on a drag and saves it without asking", async () => {
-    sortPref.set({ field: "manual", dir: "asc" });
+    sortPref.set({ field: "manual", dir: "desc" });
     const t = await setup(three);
     await drag(t, 0, 2);
 
@@ -411,11 +408,6 @@ describe("arranging by hand (withdrawn from the sort menu)", () => {
     expect(notesReorder).toHaveBeenCalledWith(["b", "c", "a"]);
   });
 
-  // The in-flight order is tracked and correct - the save below proves it - but
-  // whether the DOM visibly reorders mid-drag cannot be settled here: happy-dom
-  // does not faithfully reproduce how a keyed {#each} moves existing nodes. So
-  // this asserts the state that drives the paint, not the paint itself, and the
-  // visual follow needs checking in a real window.
   it("tracks the new order mid-drag, before anything is saved", async () => {
     sortPref.set({ field: "manual", dir: "asc" });
     const t = await setup(three);
@@ -429,6 +421,7 @@ describe("arranging by hand (withdrawn from the sort menu)", () => {
     await flush();
 
     expect(notesReorder).not.toHaveBeenCalled();
+    expect(titles(t)).toEqual(["Bee", "Cee", "Ay"]);
     // Releasing here must commit exactly what the drag had arranged.
     window.dispatchEvent(new PointerEvent("pointerup", { clientX: 0, clientY: 200 }));
     await flush();
@@ -462,6 +455,68 @@ describe("arranging by hand (withdrawn from the sort menu)", () => {
     await flush();
 
     expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("moves a row with the arrow keys on its grip and announces it", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup(three);
+    grips(t)[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    await flush();
+    await flush();
+    expect(notesReorder).toHaveBeenCalledWith(["b", "a", "c"]);
+    expect(t.parentElement!.querySelector("[aria-live]")!.textContent).toBe("Bee moved to position 1 of 3");
+    expect(goto).not.toHaveBeenCalled();
+  });
+
+  it("does nothing past either end", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup(three);
+    grips(t)[0].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    grips(t)[2].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await flush();
+    expect(notesReorder).not.toHaveBeenCalled();
+  });
+
+  // Pinned notes stay above the rest; each section is arranged on its own.
+  it("arranges pinned notes among themselves", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup([
+      note({ id: "p", title: "Pin", pinned: true, sort_order: 0 }),
+      note({ id: "q", title: "Queue", pinned: true, sort_order: 1 }),
+      ...three,
+    ]);
+    await drag(t, 1, 0);
+    expect(notesReorder).toHaveBeenCalledWith(["q", "p"]);
+  });
+
+  it("does not move a note across the pinned boundary", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup([note({ id: "p", title: "Pin", pinned: true }), ...three]);
+    await drag(t, 1, 0);
+    expect(notesReorder).not.toHaveBeenCalled();
+  });
+
+  // Search results span subfolders; arranging that subset would rewrite the
+  // order of rows from several levels at once.
+  it("hides the grips while searching", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    const t = await setup(three);
+    await type(t, "e");
+    expect(grips(t)).toHaveLength(0);
+  });
+
+  it("lists folders in their arranged order and saves a folder drag", async () => {
+    sortPref.set({ field: "manual", dir: "asc" });
+    folders.set([
+      { id: "f1", parent_id: null, name: "Alpha", note_count: 0, sort_order: 1 },
+      { id: "f2", parent_id: null, name: "Beta", note_count: 0, sort_order: 0 },
+    ]);
+    try {
+      const t = await setup([]);
+      expect(titles(t)).toEqual(["Beta", "Alpha"]);
+      await drag(t, 1, 0);
+      expect(foldersReorder).toHaveBeenCalledWith(["f1", "f2"]);
+    } finally { folders.set([]); }
   });
 
   it("keeps a stored arrangement when Custom is chosen again", async () => {

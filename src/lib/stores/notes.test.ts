@@ -109,6 +109,15 @@ describe("sortNotes", () => {
     }
   });
 
+  // The default direction is descending. Honouring it here showed every drop
+  // upside down: the drag saved b,c,a and the list painted a,c,b.
+  it("keeps Custom in the order it was arranged, whatever the direction", () => {
+    const list = [note({ id: "x", sort_order: 2 }), note({ id: "y", sort_order: 0 }), note({ id: "z", sort_order: 1 })];
+    for (const dir of ["asc", "desc"] as const) {
+      expect(ids(sortNotes(list, { field: "manual", dir }))).toEqual(["y", "z", "x"]);
+    }
+  });
+
   it("does not mutate the array it was given", () => {
     const input = [...arrival];
     sortNotes(input, { field: "kind", dir: "desc" });
