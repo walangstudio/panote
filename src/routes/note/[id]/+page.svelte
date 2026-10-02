@@ -770,11 +770,10 @@
   >
     <!-- Glass sticky header -->
     <header class="editor-header">
-      {#if !$isDesktop}
-        <a href="/" class="round-icon" aria-label="Back">
-          <span class="material-symbols-outlined" style="font-size: 20px;">arrow_back</span>
-        </a>
-      {/if}
+      <!-- Desktop closes the note back to the empty pane; mobile goes back to the list. -->
+      <a href="/" class="round-icon" aria-label={$isDesktop ? "Close note" : "Back"} title={$isDesktop ? "Close note" : undefined}>
+        <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">{$isDesktop ? "close" : "arrow_back"}</span>
+      </a>
       {#if findOpen}
         <div class="find-bar" role="search">
           <span class="material-symbols-outlined find-icon" aria-hidden="true">search</span>

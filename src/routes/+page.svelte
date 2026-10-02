@@ -1,6 +1,13 @@
 <script lang="ts">
+  import { page } from "$app/state";
+  import { goto } from "$app/navigation";
   import { isDesktop } from "$lib/stores/layout";
+  import { applyFolderParam } from "$lib/stores/listState";
   import NoteListPane from "$lib/components/NoteListPane.svelte";
+
+  $effect(() => {
+    if (applyFolderParam(page.url)) void goto("/", { replaceState: true, noScroll: true, keepFocus: true });
+  });
 </script>
 
 {#if $isDesktop}

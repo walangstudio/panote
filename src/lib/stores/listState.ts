@@ -1,4 +1,5 @@
 import { get, writable } from "svelte/store";
+import { goto } from "$app/navigation";
 
 /// Note-list UI state that has to outlive the component.
 ///
@@ -24,6 +25,28 @@ export const listTrash = writable(false);
 export const listClipboard = writable<{ mode: "copy" | "cut"; kind: "note" | "folder"; ids: string[] } | null>(null);
 
 /// Where a new note of `kind` is composed: filed into the folder on screen.
+/// Show folder `id` (null: the root). With a note open this also closes it, so
+/// the folder rides in the URL: the editor's unsaved-changes prompt finishes the
+/// switch on Save or Discard, and Cancel leaves both the note and the list as
+/// they were. The root route applies it (see `applyFolderParam`).
+export function openFolder(id: string | null, noteOpen: boolean) {
+  if (noteOpen) {
+    void goto(`/?folder=${encodeURIComponent(id ?? "")}`);
+    return;
+  }
+  listFolder.set(id);
+  listTrash.set(false);
+}
+
+/// The other half of `openFolder`: run by the root route on arrival.
+export function applyFolderParam(url: URL): boolean {
+  const folder = url.searchParams.get("folder");
+  if (folder === null) return false;
+  listFolder.set(folder || null);
+  listTrash.set(false);
+  return true;
+}
+
 export const newNoteHref = (kind: string) => {
   const folder = get(listFolder);
   return `/note/new?kind=${kind}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}`;

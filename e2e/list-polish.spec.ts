@@ -222,3 +222,58 @@ test.describe("autosave", () => {
     await expect(page.locator(".modal")).toContainText("Unsaved changes");
   });
 });
+
+test.describe("closing a note on desktop", () => {
+  const empty = (page: Page) => page.getByText("Select a note to read it, or create a new one.");
+  const inWork = (page: Page) => page.locator(".crumb.current", { hasText: "Work" });
+
+  test("the close button returns to the empty view", async ({ page }) => {
+    await setupTauriMock(page);
+    await page.goto("/note/note-1");
+    await page.getByRole("link", { name: "Close note" }).click();
+    await expect(empty(page)).toBeVisible();
+  });
+
+  test("opening a folder closes the note, asking about unsaved edits first", async ({ page }) => {
+    await setupTauriMock(page, { folder_list: [WORK] });
+    await page.goto("/note/note-1");
+    await page.fill(".title-input", "Edited");
+
+    await card(page, "Work").click();
+    await expect(page.locator(".modal")).toContainText("Unsaved changes");
+    await page.locator(".modal .btn-cancel").click();
+    await expect(page).toHaveURL(/\/note\/note-1/);
+    await expect(inWork(page)).toHaveCount(0);
+
+    await card(page, "Work").click();
+    await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+    await expect(empty(page)).toBeVisible();
+    await expect(inWork(page)).toBeVisible();
+    await expect(page).toHaveURL(/\/$/);
+  });
+
+  test("with autosave on, opening a folder saves and closes without asking", async ({ page }) => {
+    const updates: unknown[] = [];
+    await setupTauriMock(page, {
+      folder_list: [WORK],
+      get_autosave: true,
+      note_update: (args: unknown) => { updates.push(args); return MOCK_NOTES[0]; },
+    });
+    await page.goto("/note/note-1");
+    await page.fill(".title-input", "Edited");
+    await card(page, "Work").click();
+    await expect(empty(page)).toBeVisible();
+    await expect(inWork(page)).toBeVisible();
+    await expect(page.locator(".modal")).toHaveCount(0);
+    expect(updates.length).toBeGreaterThan(0);
+  });
+});
+
+test("Ctrl+F with no note open focuses the list search", async ({ page }) => {
+  await setupTauriMock(page);
+  await page.goto("/note/note-1");
+  await page.getByRole("link", { name: "Close note" }).click();
+  await expect(page.getByText("Select a note to read it, or create a new one.")).toBeVisible();
+  await page.keyboard.press("Control+f");
+  await expect(page.getByRole("textbox", { name: "Search notes" })).toBeFocused();
+});

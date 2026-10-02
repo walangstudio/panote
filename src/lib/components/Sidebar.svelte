@@ -4,7 +4,7 @@
   import { theme, resolvedTheme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { folders, buildTree, refreshFolders, type FolderNode } from "$lib/stores/folders";
-  import { listFolder, listTrash } from "$lib/stores/listState";
+  import { listFolder, listTrash, openFolder as showFolder } from "$lib/stores/listState";
   import { folderCreate, folderDelete, folderRename } from "$lib/tauri";
 
   interface Props {
@@ -29,10 +29,8 @@
   }
 
   function openFolder(id: string | null) {
-    listFolder.set(id);
-    listTrash.set(false);
     sidebarOpen.set(false);
-    if (page.url.pathname !== "/") goto("/");
+    showFolder(id, page.url.pathname !== "/");
   }
 
   function openTrash() {

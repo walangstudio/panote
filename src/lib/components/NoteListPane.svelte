@@ -13,7 +13,7 @@
   import type { NoteMetadata } from "$lib/tauri";
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import { listFilter, listSelecting, listSelected, listFolder, listTrash, listClipboard, newNoteHref } from "$lib/stores/listState";
+  import { listFilter, listSelecting, listSelected, listFolder, listTrash, listClipboard, newNoteHref, openFolder } from "$lib/stores/listState";
   import { folders, refreshFolders } from "$lib/stores/folders";
   import {
     folderCreate, folderMove, folderRename, folderDelete, noteSetFolder,
@@ -870,7 +870,7 @@
   <!-- Breadcrumb: only meaningful once you are inside something. -->
   {#if trail().length}
     <nav class="crumbs" aria-label="Folder path">
-      <button class="crumb" onclick={() => listFolder.set(null)}>
+      <button class="crumb" onclick={() => openFolder(null, desktop && !!activeId)}>
         <!-- aria-hidden: the ligature text is what a screen reader would read,
              and "inbox Home" is not what this button is called. -->
         <span class="material-symbols-outlined" style="font-size: 16px;" aria-hidden="true">inbox</span>
@@ -881,7 +881,7 @@
         {#if i === trail().length - 1}
           <span class="crumb current" aria-current="page">{c.name}</span>
         {:else}
-          <button class="crumb" onclick={() => listFolder.set(c.id)}>{c.name}</button>
+          <button class="crumb" onclick={() => openFolder(c.id, desktop && !!activeId)}>{c.name}</button>
         {/if}
       {/each}
     </nav>
@@ -899,8 +899,8 @@
             class:cut={isCut(f.id)}
             data-row-id={f.id}
             role="button" tabindex="0"
-            onclick={() => { if (!didDrag) listFolder.set(f.id); }}
-            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
+            onclick={() => { if (!didDrag) openFolder(f.id, desktop && !!activeId); }}
+            onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openFolder(f.id, desktop && !!activeId); } }}
             oncontextmenu={(e) => openMenu(e, folderActions(f))}
           >
             {#if reordering}
