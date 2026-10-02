@@ -6,8 +6,6 @@ pub struct FolderRow {
     pub id: String,
     pub parent_id: Option<String>,
     pub name_ct: String,
-    pub created_at: i64,
-    pub updated_at: i64,
     pub sort_order: i64,
 }
 
@@ -16,8 +14,6 @@ fn to_row(r: sqlx::sqlite::SqliteRow) -> FolderRow {
         id: r.get("id"),
         parent_id: r.get("parent_id"),
         name_ct: r.get("name_ct"),
-        created_at: r.get("created_at"),
-        updated_at: r.get("updated_at"),
         sort_order: r.get("sort_order"),
     }
 }
@@ -44,7 +40,7 @@ pub async fn insert<'e>(
 }
 
 pub async fn get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<FolderRow>> {
-    let row = sqlx::query("SELECT id, parent_id, name_ct, created_at, updated_at, sort_order FROM folders WHERE id = ?")
+    let row = sqlx::query("SELECT id, parent_id, name_ct, sort_order FROM folders WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?;
@@ -53,7 +49,7 @@ pub async fn get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<FolderRow
 
 pub async fn list(pool: &SqlitePool) -> anyhow::Result<Vec<FolderRow>> {
     let rows = sqlx::query(
-        "SELECT id, parent_id, name_ct, created_at, updated_at, sort_order FROM folders ORDER BY sort_order, created_at",
+        "SELECT id, parent_id, name_ct, sort_order FROM folders ORDER BY sort_order, created_at",
     )
     .fetch_all(pool)
     .await?;
@@ -124,6 +120,7 @@ pub async fn set_note_folder(
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn note_folder(pool: &SqlitePool, note_id: &str) -> anyhow::Result<Option<String>> {
     let row = sqlx::query("SELECT folder_id FROM notes WHERE id = ?")
         .bind(note_id)
@@ -163,6 +160,7 @@ pub async fn note_counts(pool: &SqlitePool) -> anyhow::Result<Vec<(String, i64)>
 }
 
 /// Every note in `folder_id`, and in its subfolders, for a folder send.
+#[cfg(test)]
 pub async fn note_ids_in_subtree(
     pool: &SqlitePool,
     folder_id: &str,
