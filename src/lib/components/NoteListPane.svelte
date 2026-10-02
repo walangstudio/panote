@@ -1275,13 +1275,14 @@
     overflow: hidden;
     min-height: calc(2 * 1.4 * 0.78rem);
   }
-  /* One row, never two: a fourth tag is clipped rather than growing the card. */
+  /* One row, never two. Tags wrap inside a box one tag tall, so one that does
+     not fit drops out of sight whole instead of being sliced at the edge. */
   .tags {
-    display: flex; gap: 6px; margin-top: 8px; flex-wrap: nowrap;
-    overflow: hidden; min-height: 1.15rem;
+    display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap;
+    overflow: hidden; height: calc(0.68rem * 1.3 + 4px);
   }
   .tag {
-    font-size: 0.68rem; padding: 2px 10px; font-weight: 600;
+    font-size: 0.68rem; line-height: 1.3; padding: 2px 10px; font-weight: 600; white-space: nowrap;
     background: var(--accent-muted); border-radius: var(--radius-full); color: var(--accent);
   }
   .date { font-size: 0.72rem; color: var(--muted); white-space: nowrap; font-weight: 500; }
