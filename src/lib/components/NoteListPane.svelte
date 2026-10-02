@@ -13,7 +13,7 @@
   import type { NoteMetadata } from "$lib/tauri";
   import { get } from "svelte/store";
   import { sidebarOpen } from "$lib/stores/sidebar";
-  import { listFilter, listSelecting, listSelected, listFolder, listTrash } from "$lib/stores/listState";
+  import { listFilter, listSelecting, listSelected, listFolder, listTrash, newNoteHref } from "$lib/stores/listState";
   import { folders, refreshFolders } from "$lib/stores/folders";
   import {
     folderCreate, folderMove, folderRename, folderDelete, noteSetFolder,
@@ -24,6 +24,8 @@
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
+  import { showMenu, anchorMenu, type MenuAction, type Rect } from "$lib/contextMenu";
+  import { shortcutFor } from "$lib/shortcuts";
 
   interface Props { desktop?: boolean; }
   let { desktop = false }: Props = $props();
@@ -39,9 +41,11 @@
   $effect(() => { listSelecting.set(selecting); });
   $effect(() => { listSelected.set(selected); });
   let transferNoteIds = $state<string[] | null>(null);
-  let deleteTargetId = $state<string | null>(null);
+  let deleteTargets = $state<string[] | null>(null);
   let sortOpen = $state(false);
-  let menuNoteId = $state<string | null>(null);
+  /// The in-app menu, shown only where a native one could not be.
+  let menu = $state<{ anchor: Rect; actions: MenuAction[] } | null>(null);
+  let searchInput: HTMLInputElement | undefined = $state();
   let fabOpen = $state(false);
   let showNewNote = $state(false);
 
@@ -55,7 +59,6 @@
   /// What is being moved: a note, or a folder (whose own subtree is off-limits).
   let moveTarget = $state<{ kind: "note" | "folder"; id: string; from: string | null } | null>(null);
   let moveError = $state("");
-  let folderMenuId = $state<string | null>(null);
 
   async function submitName(name: string) {
     if (!nameModal) return;
@@ -92,8 +95,7 @@
     return raw;
   }
 
-  async function removeFolder(id: string, name: string) {
-    folderMenuId = null;
+  async function removeFolder(id: string) {
     try {
       await folderDelete(id);
       await Promise.all([refreshFolders(), refreshNotes()]);
@@ -355,17 +357,88 @@
   const notShown = $derived(query ? 0 : Math.max(0, $totalNotes - $notes.length));
 
   function doDelete(id: string) {
-    deleteTargetId = id;
+    deleteTargets = [id];
   }
 
   async function confirmDelete() {
-    if (!deleteTargetId) return;
-    const id = deleteTargetId;
-    deleteTargetId = null;
-    await noteDelete(id);
-    await Promise.all([refreshNotes(), refreshFolders()]);
+    if (!deleteTargets) return;
+    const ids = deleteTargets;
+    deleteTargets = null;
+    try {
+      for (const id of ids) await noteDelete(id);
+    } finally {
+      if (ids.length > 1) { selecting = false; selected = new Set(); }
+      await Promise.all([refreshNotes(), refreshFolders()]);
+    }
     // The deleted note may be the one open in the detail pane.
-    if (desktop && activeId === id) goto("/");
+    if (desktop && ids.includes(activeId)) goto("/");
+  }
+
+  // ---- Row menus ----
+  //
+  // One action list per row kind, rendered by the native menu on desktop and by
+  // the in-app popover everywhere else.
+
+  function noteActions(note: NoteMetadata): MenuAction[] {
+    const pw = (mode: PwMode) => () => { pwModal = { mode, ids: [note.id], isBatch: false }; };
+    return [
+      { label: note.pinned ? "Unpin" : "Pin", icon: "push_pin", run: () => togglePin(note.id, note.pinned) },
+      { label: "View", icon: "visibility", run: () => goto(`/note/${note.id}?mode=view`) },
+      { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "note", id: note.id, from: note.folder_id ?? null }; } },
+      { label: "Edit", icon: "edit", run: () => goto(`/note/${note.id}?mode=edit`) },
+      ...(note.has_note_password
+        ? [
+            { label: "Change password", icon: "password", run: pw("change") },
+            { label: "Remove password", icon: "lock_open", danger: true, run: pw("remove") },
+          ]
+        : [{ label: "Set password", icon: "lock", run: pw("set") }]),
+      { label: "Delete", icon: "delete", danger: true, run: () => doDelete(note.id) },
+    ];
+  }
+
+  function folderActions(f: { id: string; name: string; parent_id?: string | null }): MenuAction[] {
+    return [
+      { label: "New note inside", icon: "note_add", run: () => { listFolder.set(f.id); showNewNote = true; } },
+      { label: "New folder inside", icon: "create_new_folder", run: () => { listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; } },
+      { label: "Rename", icon: "edit", run: () => { nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; } },
+      { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; } },
+      { label: "Delete", icon: "delete", danger: true, run: () => removeFolder(f.id) },
+    ];
+  }
+
+  /// Kebab click or right-click. The fallback popover opens at the cursor for a
+  /// right-click and at the button otherwise.
+  function openMenu(e: MouseEvent, actions: MenuAction[]) {
+    // A long-press on touch fires contextmenu too; the kebab is the way in there.
+    if (e.type === "contextmenu" && window.matchMedia?.("(hover: none)").matches) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // A keyboard-raised contextmenu has no pointer position.
+    const atCursor = e.type === "contextmenu" && (e.clientX || e.clientY);
+    const anchor: Rect = atCursor
+      ? { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }
+      : (e.currentTarget as HTMLElement).getBoundingClientRect();
+    showMenu(actions, () => { menu = { anchor, actions }; });
+  }
+
+  function onShortcut(e: KeyboardEvent) {
+    const s = shortcutFor(e);
+    if (!s) return;
+    if (s === "escape") {
+      if (menu || sortOpen || fabOpen) { e.preventDefault(); menu = null; sortOpen = false; fabOpen = false; }
+      return;
+    }
+    // An open dialog owns the keyboard, and Trash has nothing to create or search.
+    if ($listTrash || document.querySelector('[aria-modal="true"]')) return;
+    e.preventDefault();
+    if (s === "new-note") showNewNote = true;
+    else if (s === "new-folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
+    else if (s === "find") searchInput?.focus();
+    else {
+      const ids = selecting && selected.size ? [...selected]
+        : desktop && activeId && activeId !== "new" ? [activeId] : [];
+      if (ids.length) deleteTargets = ids;
+    }
   }
 
   // ---- Trash ----
@@ -549,7 +622,10 @@
   }
 </script>
 
+<svelte:window onkeydown={onShortcut} />
+
 <div class="page" class:desktop>
+  <div class="list-head">
   {#if desktop}
     <div class="pane-head">
       <button class="menu-btn" onclick={() => $sidebarOpen = true} aria-label="Open menu">
@@ -573,7 +649,7 @@
     {:else}
     <div class="search-wrap">
       <span class="material-symbols-outlined search-icon">search</span>
-      <input class="search" placeholder="Search notes" bind:value={filter} />
+      <input class="search" placeholder="Search notes" bind:value={filter} bind:this={searchInput} />
       {#if filter}
         <button class="clear-btn" onclick={() => filter = ""} aria-label="Clear search">
           <span class="material-symbols-outlined" style="font-size: 18px;">close</span>
@@ -610,6 +686,7 @@
     </button>
     {/if}
   </div>
+  </div>
 
   {#snippet noteCard(note: NoteMetadata)}
       <li>
@@ -645,6 +722,7 @@
             style:background-image={safeBgImageUrl(bgOf(note.id))}
             onclick={() => { if (!didDrag) goto(`/note/${note.id}`); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goto(`/note/${note.id}`); } }}
+            oncontextmenu={(e) => openMenu(e, noteActions(note))}
           >
             {#if reordering}
               <span
@@ -687,51 +765,11 @@
             </div>
             <div class="trailing">
               <span class="date">{formatRelative(note.updated_at)}</span>
-              <button class="card-menu" aria-label="More options" onclick={(e) => { e.stopPropagation(); menuNoteId = menuNoteId === note.id ? null : note.id; }}>
+              <button class="card-menu" aria-label="More options" onclick={(e) => openMenu(e, noteActions(note))}>
                 <span class="material-symbols-outlined">more_vert</span>
               </button>
             </div>
           </div>
-          {#if menuNoteId === note.id}
-            <div class="card-menu-backdrop" role="presentation" onclick={(e) => { e.stopPropagation(); menuNoteId = null; }}></div>
-            <div class="card-popover">
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; togglePin(note.id, note.pinned); }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;">{note.pinned ? "push_pin" : "push_pin"}</span>
-                {note.pinned ? "Unpin" : "Pin"}
-              </button>
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; goto(`/note/${note.id}?mode=view`); }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;">visibility</span>
-                View
-              </button>
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; moveError = ""; moveTarget = { kind: "note", id: note.id, from: note.folder_id ?? null }; }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">swap_horiz</span>
-                Move to
-              </button>
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; goto(`/note/${note.id}?mode=edit`); }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;">edit</span>
-                Edit
-              </button>
-              {#if note.has_note_password}
-                <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "change", ids: [note.id], isBatch: false }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">password</span>
-                  Change password
-                </button>
-                <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "remove", ids: [note.id], isBatch: false }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">lock_open</span>
-                  Remove password
-                </button>
-              {:else}
-                <button class="popover-item" onclick={(e) => { e.stopPropagation(); menuNoteId = null; pwModal = { mode: "set", ids: [note.id], isBatch: false }; }}>
-                  <span class="material-symbols-outlined" style="font-size: 18px;">lock</span>
-                  Set password
-                </button>
-              {/if}
-              <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); menuNoteId = null; doDelete(note.id); }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;">delete</span>
-                Delete
-              </button>
-            </div>
-          {/if}
         {/if}
       </li>
   {/snippet}
@@ -813,6 +851,7 @@
             role="button" tabindex="0"
             onclick={() => { if (!didDrag) listFolder.set(f.id); }}
             onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); listFolder.set(f.id); } }}
+            oncontextmenu={(e) => openMenu(e, folderActions(f))}
           >
             {#if reordering}
               <!-- A span, not a button: on a real touch a button consumes the
@@ -845,34 +884,13 @@
               <button
                 class="card-menu"
                 aria-label={`Actions for ${f.name}`}
-                onclick={(e) => { e.stopPropagation(); folderMenuId = folderMenuId === f.id ? null : f.id; }}
+                onclick={(e) => openMenu(e, folderActions(f))}
               >
                 <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
               </button>
               <span class="material-symbols-outlined" style="font-size: 20px;" aria-hidden="true">chevron_right</span>
             </div>
           </div>
-          {#if folderMenuId === f.id}
-            <div class="card-menu-backdrop" role="presentation" onclick={(e) => { e.stopPropagation(); folderMenuId = null; }}></div>
-            <div class="card-popover">
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">create_new_folder</span>
-                New folder inside
-              </button>
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">edit</span>
-                Rename
-              </button>
-              <button class="popover-item" onclick={(e) => { e.stopPropagation(); folderMenuId = null; moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">swap_horiz</span>
-                Move to
-              </button>
-              <button class="popover-item danger" onclick={(e) => { e.stopPropagation(); removeFolder(f.id, f.name); }}>
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">delete</span>
-                Delete
-              </button>
-            </div>
-          {/if}
         </li>
       {/each}
     {/if}
@@ -932,7 +950,7 @@
             onclick={() => {
               fabOpen = false;
               if (kind.id === "folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
-              else goto(`/note/new?kind=${kind.id}`);
+              else goto(newNoteHref(kind.id));
             }}>
             <span class="fab-label">{kind.label}</span>
             <span class="fab-badge"><span class="material-symbols-outlined">{kind.icon}</span></span>
@@ -943,6 +961,20 @@
     <button class="fab" class:open={fabOpen} onclick={() => fabOpen = !fabOpen} aria-label="Create note">
       <span class="material-symbols-outlined">add</span>
     </button>
+  </div>
+{/if}
+
+{#if menu}
+  <div class="card-menu-backdrop" role="presentation"
+    onclick={() => menu = null}
+    oncontextmenu={(e) => { e.preventDefault(); menu = null; }}></div>
+  <div class="card-popover" use:anchorMenu={menu.anchor}>
+    {#each menu.actions as action}
+      <button class="popover-item" class:danger={action.danger} onclick={() => { menu = null; action.run(); }}>
+        <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">{action.icon}</span>
+        {action.label}
+      </button>
+    {/each}
   </div>
 {/if}
 
@@ -1019,14 +1051,16 @@
   {/await}
 {/if}
 
-{#if deleteTargetId}
+{#if deleteTargets}
   <ConfirmModal
     title="Move to Trash?"
-    message="This note will be moved to Trash. You can restore it from there for 30 days."
+    message={deleteTargets.length === 1
+      ? "This note will be moved to Trash. You can restore it from there for 30 days."
+      : `${deleteTargets.length} notes will be moved to Trash. You can restore them from there for 30 days.`}
     confirmLabel="Move to Trash"
     destructive
     onconfirm={confirmDelete}
-    oncancel={() => deleteTargetId = null}
+    oncancel={() => deleteTargets = null}
   />
 {/if}
 
@@ -1049,9 +1083,18 @@
     max-width: 600px; margin: 0 auto;
   }
 
+  /* Pinned while the list scrolls under it. It takes over the page's top and
+     side padding so the band spans the column, and paints what is behind the
+     list - the window gradient, fixed so it lines up with the body's. */
+  .list-head {
+    position: sticky; top: 0; z-index: 30;
+    margin: -1.5rem -2rem 0.5rem; padding: 1.5rem 2rem 0.75rem;
+    background: var(--bg-gradient) fixed, var(--bg);
+  }
+
   /* Toolbar */
   .toolbar {
-    display: flex; gap: 6px; margin-bottom: 1.25rem; align-items: center;
+    display: flex; gap: 6px; align-items: center;
     background: var(--surface-glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     padding: 0.4rem 0.5rem; border-radius: var(--radius);
     border: 1px solid var(--border);
@@ -1111,6 +1154,7 @@
   .select-btn.active { color: var(--accent); background: var(--accent-muted); }
   @media (max-width: 640px) {
     .page:not(.desktop) { padding: 1rem 0.75rem calc(1rem + env(safe-area-inset-bottom, 0px)); }
+    .page:not(.desktop) .list-head { margin: -1rem -0.75rem 0.5rem; padding: 1rem 0.75rem 0.75rem; }
     .search { font-size: 0.85rem; }
   }
 
@@ -1331,19 +1375,19 @@
     display: flex; align-items: center;
   }
   .card-menu:hover { color: var(--text); background: var(--hover); }
-  .card-menu-backdrop { position: fixed; inset: 0; z-index: 19; }
+  /* Above the sticky header and the FAB, which would otherwise cover it. */
+  .card-menu-backdrop { position: fixed; inset: 0; z-index: 89; }
+  /* Fixed and placed by anchorMenu, so no row or scroller can clip it. */
   .card-popover {
-    position: absolute; right: 0; top: 100%; z-index: 20;
+    position: fixed; z-index: 90;
+    max-height: calc(100vh - 16px); overflow-y: auto;
     background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--border); border-radius: var(--radius);
     padding: 0.25rem; box-shadow: 0 8px 24px var(--shadow-color-hover);
     min-width: 140px;
   }
-  /* Anchored under the card, this opened downward - so a card low in the list
-     pushed the menu off the bottom of the screen and not even the first item was
-     reachable. Note menus are the taller ones (pin, view, move, delete), which is
-     why folder menus looked fine. On touch it becomes a sheet at the bottom
-     instead: nothing to clip it, and the rows get a real tap target. */
+  /* On touch the menu is a sheet at the bottom instead: nothing to clip it, and
+     the rows get a real tap target. */
   @media (hover: none) {
     .card-menu-backdrop { z-index: 309; background: var(--backdrop); }
     .card-popover {
@@ -1483,8 +1527,12 @@
   .compose-btn:active { transform: scale(0.95); }
   .compose-btn .material-symbols-outlined { font-size: 22px; }
 
+  /* The pane's own glass over the window gradient, as behind the rows. */
+  .page.desktop .list-head {
+    margin: -0.75rem -0.6rem 0.25rem; padding: 0.75rem 0.6rem 0.25rem;
+    background: linear-gradient(var(--surface-glass), var(--surface-glass)), var(--bg-gradient) fixed, var(--bg);
+  }
   .page.desktop .toolbar {
-    margin-bottom: 0.5rem;
     background: none; backdrop-filter: none; -webkit-backdrop-filter: none;
     border: none; box-shadow: none;
     padding: 0 0.25rem;

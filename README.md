@@ -35,6 +35,8 @@ A local-first note-taking app for desktop and Android, built with Tauri 2, Svelt
 - Multi-select to protect, unprotect, or send several notes at once
 - Trash: deleted notes can be restored for 30 days, then are purged
 - Desktop split view above 900px window width
+- Desktop: right-click a note or folder for a native context menu
+- Shortcuts: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder, Ctrl/Cmd+F search, Delete move to Trash, Ctrl/Cmd+S save, Esc close a menu or dialog
 
 **Protection**
 

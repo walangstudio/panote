@@ -14,8 +14,22 @@
   notes stay encrypted in Trash and keep their password when restored. Trashed notes are
   left out of the list, counts, search, folder counts, export and folder sends; a note
   re-sent from another device comes back out of Trash.
+- **Native context menus on desktop.** Right-click a note or folder, or use its kebab, for
+  an OS menu with the same actions. Touch keeps the bottom sheet.
+- **Keyboard shortcuts** in the list: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder,
+  Ctrl/Cmd+F search, Delete moves the open note (split view) or the selected notes to Trash
+  after a confirm, Esc closes a menu or dialog. Ignored while typing in a field.
+- **New note inside** in a folder's menu, next to New folder inside.
 
 ### Fixed
+
+- **Row menus are never cut off.** Where the native menu is not available, the in-app menu
+  opens at the button or cursor and flips up or left to stay inside the window.
+- **The list header stays put.** Menu, search, sort, select and + stay pinned at the top
+  while the list scrolls, on phones and in the desktop split view.
+- **A new note is created in the folder you are viewing**, from +, the speed-dial, the
+  sidebar and Ctrl+N. It used to land at the root. A folder deleted meanwhile falls back to
+  the root.
 
 - **Custom sort is back, and its drag works.** Rows now follow the pointer while dragging
   (the note list painted its pre-drag order), a drop lands where it was let go (Custom took
