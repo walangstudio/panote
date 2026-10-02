@@ -109,6 +109,8 @@ pub struct NoteMetadata {
     pub preview_text: Option<String>,
     /// Which folder the note sits in; None means the root.
     pub folder_id: Option<String>,
+    /// Position under the Custom sort, as saved by notes_reorder.
+    pub sort_order: i64,
 }
 
 /// Full note returned by note_get.

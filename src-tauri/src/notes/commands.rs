@@ -208,6 +208,7 @@ pub async fn note_create(
         bg_image: input.bg_image,
         show_preview: row.show_preview,
         preview_text,
+        sort_order: row.sort_order,
     })
 }
 
@@ -321,6 +322,7 @@ pub(crate) async fn update_impl(
         bg_image: input.bg_image,
         show_preview: row.show_preview,
         preview_text,
+        sort_order: original.sort_order,
     })
 }
 
@@ -522,6 +524,7 @@ pub(crate) async fn list_impl(
             bg_image: row.bg_image,
             show_preview: row.show_preview,
             preview_text,
+            sort_order: row.sort_order,
         });
     }
     Ok(result)
@@ -1185,6 +1188,20 @@ mod tests {
             .find(|m| m.id == id)
             .unwrap()
             .title
+    }
+
+    /// Custom sort is computed in the frontend from the listed sort_order. Without
+    /// it every note ties and the list falls back to id order after each refresh.
+    #[tokio::test]
+    async fn the_list_reports_the_order_a_reorder_saved() {
+        let state = test_state().await;
+        let a = seed_note(&state, "a").await;
+        let b = seed_note(&state, "b").await;
+        let c = seed_note(&state, "c").await;
+        queries::notes_set_order(&state.db, &[c.clone(), a.clone(), b.clone()]).await.unwrap();
+        let listed = list_impl(&state, None, None).await.unwrap();
+        let order = |id: &str| listed.iter().find(|m| m.id == id).unwrap().sort_order;
+        assert_eq!((order(&c), order(&a), order(&b)), (0, 1, 2));
     }
 
     /// Whether the stored title opens with the device key alone, which is what

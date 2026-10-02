@@ -22,6 +22,8 @@ pub struct FolderJson {
     pub parent_id: Option<String>,
     pub name: String,
     pub note_count: i64,
+    /// Position under the Custom sort, as saved by folders_reorder.
+    pub sort_order: i64,
 }
 
 fn encrypt_name(key: &[u8; 32], id: &str, name: &str) -> Result<String, String> {
@@ -173,7 +175,7 @@ pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, Strin
                 .find(|(fid, _)| *fid == r.id)
                 .map(|(_, n)| *n)
                 .unwrap_or(0);
-            FolderJson { id: r.id, parent_id: r.parent_id, name, note_count }
+            FolderJson { id: r.id, parent_id: r.parent_id, name, note_count, sort_order: r.sort_order }
         })
         .collect())
 }

@@ -263,3 +263,16 @@ async fn moving_a_note_between_folders_works_and_can_clear_it() {
     queries::set_note_folder(&s.db, &note, None, now_secs()).await.unwrap();
     assert_eq!(queries::note_folder(&s.db, &note).await.unwrap(), None);
 }
+
+/// Custom sort orders folders by the listed sort_order; without it they tie and
+/// fall back to name order, so a dragged folder snapped back.
+#[tokio::test]
+async fn the_folder_list_reports_the_order_a_reorder_saved() {
+    let s = state().await;
+    let a = create_impl(&s, "Alpha", None).await.unwrap();
+    let b = create_impl(&s, "Beta", None).await.unwrap();
+    queries::set_order(&s.db, &[b.clone(), a.clone()]).await.unwrap();
+    let listed = list_impl(&s).await.unwrap();
+    let order = |id: &str| listed.iter().find(|f| f.id == id).unwrap().sort_order;
+    assert_eq!((order(&b), order(&a)), (0, 1));
+}
