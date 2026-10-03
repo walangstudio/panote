@@ -7,7 +7,7 @@
     noteGet, noteCreate, noteUpdate,
     noteUnlock, noteLock, noteProtect, noteUnprotect, noteChangePassword,
     noteRecover, noteAddRecovery,
-    noteDelete,
+    notesDelete,
     noteDraftSave, noteDraftGet, noteDraftDiscard, type DraftDetail,
     LOCKED, type NoteKind, type NoteMetadata,
   } from "$lib/tauri";
@@ -131,13 +131,16 @@
     return null;
   });
 
-  const dirty = $derived(
+  /// The note itself differs from what was last saved.
+  const edited = $derived(
     !justSaved && (
       title !== savedTitle ||
       JSON.stringify(content) !== savedContent ||
       JSON.stringify(tags) !== savedTags
     )
   );
+  /// Anything that leaving would lose, including a tag typed but not yet added.
+  const dirty = $derived(edited || (!justSaved && tagInput.trim() !== ""));
 
   /// Leaving with autosave on: the prompt stays hidden unless the save fails.
   let leaving = $state(false);
@@ -167,7 +170,7 @@
   async function doDelete() {
     confirmDelete = false;
     try {
-      await noteDelete(id);
+      await notesDelete([id]);
       await Promise.all([refreshNotes(), refreshFolders()]);
       justSaved = true; // deleted, so the dirty guard must not fight the exit
       goto("/");
@@ -218,6 +221,9 @@
   let autosaveChain: Promise<boolean> = Promise.resolve(true);
   /// The id autosave just gave a new note. Moving to it keeps the editor as is.
   let adoptedId: string | null = null;
+  /// Bumped each time the editor switches notes, so a write or create still in
+  /// flight can tell it no longer belongs to what is on screen.
+  let noteGen = 0;
 
   function queueAutosave() {
     if (loading || locked || lossyLocked || modeParam === "view") return;
@@ -228,13 +234,17 @@
   /// `commitTag` folds a half-typed tag in; a timer firing mid-word must not.
   function flushAutosave(commitTag = true): Promise<boolean> {
     if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
+    const gen = noteGen;
     return (autosaveChain = autosaveChain.then(async () => {
-      if (!dirty || locked) return true;
+      // A typing pause leaves a half-typed tag alone; blur, close and leaving fold it in.
+      if (gen !== noteGen || !(commitTag ? dirty : edited) || locked) return true;
       if (isNew && !title.trim() && !tags.length && !tagInput.trim() && JSON.stringify(content) === savedContent) return true;
       if (commitTag) addTag();
       const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
       const { ok, created } = await persist(false);
       if (!ok) return false;
+      // The editor moved on mid-save; this snapshot is not its baseline.
+      if (gen !== noteGen) return true;
       [savedTitle, savedContent, savedTags] = snapshot;
       if (created) {
         adoptedId = created.id;
@@ -248,9 +258,9 @@
     if ($autosave && dirty && (document.visibilityState === "hidden" || !document.hasFocus())) void flushAutosave();
   }
 
-  // Autosave and drafts track the same values the dirty check does.
+  // Autosave and drafts track the edited note, not the tag box mid-word.
   $effect(() => {
-    if (!dirty) return;
+    if (!edited) return;
     // Read the edited state so this re-runs as it changes.
     void title; void JSON.stringify(content); void JSON.stringify(tags);
     untrack(() => ($autosave ? queueAutosave() : queueDraft()));
@@ -413,7 +423,11 @@
   });
 
   async function openNote(noteId: string, newKind: NoteKind) {
+    noteGen++;
     createdId = null;
+    // A prompt left over from the note being left is moot now.
+    pendingNavUrl = null;
+    leaving = false;
     loading = true;
     error = "";
     locked = false;
@@ -546,23 +560,26 @@
     }
   }
 
-  /// Writes the note. Returns the created row when it was new, and whether the
-  /// write succeeded — navigation is the caller's business, because leaving is
-  /// only safe once the bytes are actually down.
-  /// Every write goes through here one at a time. Autosave, Ctrl+S and the
-  /// prompts can all fire while a create is still in flight, and the URL only
-  /// gains the new id after it lands, so without this a note is created twice.
+  /// Writes run one at a time. Autosave, Ctrl+S and the prompts can all fire
+  /// while a create is still in flight, and the URL only gains the new id after
+  /// it lands, so without this a note is created twice.
   let persistChain: Promise<unknown> = Promise.resolve();
   /// Set the moment a create returns, before the URL catches up.
   let createdId: string | null = null;
 
+  /// Writes the note. Returns the created row when it was new, and whether the
+  /// write succeeded — navigation is the caller's business, because leaving is
+  /// only safe once the bytes are actually down. A write queued for a note the
+  /// editor has since left is dropped rather than aimed at the next one.
   function persist(commitTag = true): Promise<{ ok: boolean; created: NoteMetadata | null }> {
-    const run = persistChain.then(() => persistNow(commitTag));
+    const gen = noteGen;
+    const run = persistChain.then(() =>
+      gen === noteGen ? persistNow(commitTag, gen) : { ok: false, created: null });
     persistChain = run.catch(() => {});
     return run;
   }
 
-  async function persistNow(commitTag: boolean): Promise<{ ok: boolean; created: NoteMetadata | null }> {
+  async function persistNow(commitTag: boolean, gen: number): Promise<{ ok: boolean; created: NoteMetadata | null }> {
     if (commitTag) addTag();
     saving = true;
     error = "";
@@ -574,7 +591,8 @@
       const existing = createdId ?? (isNew ? null : id);
       if (existing === null) {
         created = await noteCreate({ ...input, folder_id: folderParam });
-        createdId = created.id;
+        // Landed after the editor moved on: the note exists, but is not this one.
+        if (gen === noteGen) createdId = created.id;
       } else await noteUpdate(existing, input);
       // Saving is the one place the editor can change a background, so it is the
       // one place that needs the cached image map refreshed.

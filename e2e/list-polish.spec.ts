@@ -301,6 +301,7 @@ test("leaving during an in-flight autosave create does not create the note twice
   await page.locator(".note-card", { hasText: "Draft" }).first().click();
   await page.waitForURL(/note-3/, { timeout: 6000 });
   expect(creates).toBe(1);
+  expect(updates.length).toBeGreaterThanOrEqual(1);
   expect(updates.every(id => id === "made-1")).toBe(true);
 });
 
@@ -362,4 +363,59 @@ test("a failed delete is reported, not swallowed", async ({ page }) => {
   await page.locator(".popover-item", { hasText: "Delete" }).click();
   await page.locator(".modal .btn-confirm").click();
   await expect(page.getByRole("alert")).toContainText("database is locked");
+});
+
+test("a create that lands after switching notes stays out of the next note", async ({ page }) => {
+  const updates: string[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_create: async () => {
+      await new Promise(r => setTimeout(r, 2500));
+      return { ...MOCK_NOTES[0], id: "made-1" };
+    },
+    note_update: (args: { id: string }) => { updates.push(args.id); return MOCK_NOTES[1]; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/new?kind=document");
+  await page.fill(".title-input", "Fresh");
+  await page.waitForTimeout(1300);
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await page.waitForURL(/note-2/);
+  // Give the slow create time to land; it must not pull the editor back.
+  await page.waitForTimeout(2500);
+  await expect(page).toHaveURL(/note-2/);
+
+  await page.fill(".title-input", "Shopping list, edited");
+  await page.keyboard.press("Control+s");
+  await expect.poll(() => updates.at(-1)).toBe("note-2");
+  expect(updates).not.toContain("made-1");
+});
+
+test("autosave saves a half-typed tag on its own when the window loses focus", async ({ page }) => {
+  const updates: { input: { tags: string[] } }[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_update: (args: { input: { tags: string[] } }) => { updates.push(args); return MOCK_NOTES[0]; },
+  });
+  await page.goto("/note/note-1");
+  await page.fill(".tag-input", "urgent");
+  await page.evaluate(() => {
+    document.hasFocus = () => false;
+    window.dispatchEvent(new Event("blur"));
+  });
+  await expect.poll(() => updates.length).toBe(1);
+  expect(updates[0].input.tags).toContain("urgent");
+});
+
+test("a failed multi-note delete keeps the selection for a retry", async ({ page }) => {
+  await setupTauriMock(page, { notes_delete: () => reject("database is locked") });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Select notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await page.keyboard.press("Delete");
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.getByRole("alert")).toContainText("database is locked");
+  await expect(page.locator(".sel-count")).toContainText("2 selected");
 });

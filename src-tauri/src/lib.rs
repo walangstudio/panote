@@ -95,7 +95,6 @@ pub fn run() {
             // Notes
             note_create,
             note_update,
-            note_delete,
             notes_delete,
             note_list,
             note_get,

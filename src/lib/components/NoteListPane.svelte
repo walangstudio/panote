@@ -402,12 +402,13 @@
     try {
       await notesDelete(ids);
     } catch (e) {
+      // Nothing was trashed (one transaction), so keep the selection to retry.
       moveError = String(e);
       return;
     } finally {
-      if (ids.length > 1) { selecting = false; selected = new Set(); }
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
+    if (ids.length > 1) { selecting = false; selected = new Set(); }
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }

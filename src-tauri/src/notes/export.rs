@@ -539,10 +539,20 @@ async fn import_entry(
         if let Some(existing) = existing {
             match resolution {
                 ImportResolution::Skip => {
-                    // Keep the copy we have, but out of Trash: importing a note is
-                    // asking to see it. A no-op for a live note.
-                    crate::trash::queries::restore(&state.db, std::slice::from_ref(&existing.id))
+                    // Keep the copy we have. One sitting in Trash comes back out,
+                    // since importing a note is asking to see it, and that change
+                    // is reported as an update rather than hidden in "skipped".
+                    if queries::note_get_live(&state.db, &existing.id)
+                        .await?
+                        .is_none()
+                    {
+                        crate::trash::queries::restore(
+                            &state.db,
+                            std::slice::from_ref(&existing.id),
+                        )
                         .await?;
+                        return Ok(ImportEntryResult::Updated);
+                    }
                     return Ok(ImportEntryResult::Skipped);
                 }
                 ImportResolution::KeepBoth => {
@@ -1095,7 +1105,10 @@ mod tests {
             let res = import_entry(&state, entry, ImportResolution::Skip)
                 .await
                 .unwrap();
-            assert!(matches!(res, ImportEntryResult::Skipped));
+            assert!(
+                matches!(res, ImportEntryResult::Updated),
+                "a revived note is reported"
+            );
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
     }

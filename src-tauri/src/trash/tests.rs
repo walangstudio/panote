@@ -281,3 +281,23 @@ async fn a_re_sent_note_that_sits_in_trash_comes_back() {
     assert!(list_impl(&s).await.unwrap().is_empty());
     assert_eq!(notes::note_count(&s.db).await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn a_re_sent_locked_protected_note_in_trash_comes_back() {
+    let s = state().await;
+    let id = crate::transfer::commands::import_blob(&s, &s.device_key, blob("vault", "o2"))
+        .await
+        .unwrap();
+    crate::notes::commands::protect_impl(&s, &id, "hunter22")
+        .await
+        .unwrap();
+    s.lock_note(&id);
+    trash(&s, &id).await;
+
+    crate::transfer::commands::import_blob(&s, &s.device_key, blob("vault", "o2"))
+        .await
+        .unwrap();
+
+    assert!(list_impl(&s).await.unwrap().is_empty(), "out of Trash");
+    assert_eq!(notes::note_count(&s.db).await.unwrap(), 1);
+}

@@ -4,7 +4,7 @@
 use super::{queries, MAX_DEPTH};
 use crate::crypto::note::{decrypt_with_vault, encrypt_with_vault};
 use crate::db::queries::{live_notes_in, note_insert};
-use crate::notes::commands::{copy_row, cpu_bound, CopyReport, LOCKED};
+use crate::notes::commands::{copy_row, CopyReport, LOCKED};
 use crate::state::{now_secs, AppState};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
@@ -218,7 +218,7 @@ pub(crate) async fn copy_impl(
         };
         let copy_id = Uuid::new_v4().to_string();
         for row in live_notes_in(&state.db, &folder.id).await.map_err(err)? {
-            match cpu_bound(|| copy_row(state, &row, Some(&copy_id), false)) {
+            match copy_row(state, &row, Some(&copy_id), false) {
                 Ok(copy) => notes.push(copy),
                 Err(e) if e == LOCKED => report.skipped_locked += 1,
                 Err(e) => return Err(e),

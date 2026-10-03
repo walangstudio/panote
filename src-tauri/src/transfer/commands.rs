@@ -605,6 +605,8 @@ pub async fn import_blob_detailed(
         if prev.note_salt.is_some() && effective_pw.is_none() {
             // Locally protected and we have no password to re-protect the new
             // content with — refuse to overwrite rather than silently expose it.
+            // It still comes out of Trash, as every other accepted arrival does.
+            crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
             return Ok((prev.id, ImportOutcome::Updated));
         }
         let mut row = NoteRow {

@@ -348,13 +348,6 @@ pub(crate) async fn update_impl(
 }
 
 /// Moves the note to Trash; `trash_delete` is what removes it for good.
-#[tauri::command]
-pub async fn note_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    crate::trash::queries::trash(&state.db, &[id], now_secs())
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// Moves several notes to Trash in one transaction: all of them or none.
 #[tauri::command]
 pub async fn notes_delete(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
@@ -802,16 +795,6 @@ pub(crate) fn copy_row(
 
 /// Copies `ids` into `folder_id`. Trashed notes are left out; locked protected
 /// ones are counted in `skipped_locked`. All rows land in one transaction.
-/// Argon2 is deliberately slow. On the app's multi-thread runtime, tell tokio this
-/// worker is busy so other commands keep moving; a test's single-thread runtime
-/// has nowhere else to go and just runs it.
-pub(crate) fn cpu_bound<T>(f: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
-        _ => f(),
-    }
-}
-
 pub(crate) async fn copy_impl(
     state: &AppState,
     ids: &[String],
@@ -836,7 +819,7 @@ pub(crate) async fn copy_impl(
             continue;
         };
         let mark_copy = row.folder_id.as_deref() == folder_id;
-        match cpu_bound(|| copy_row(state, &row, folder_id, mark_copy)) {
+        match copy_row(state, &row, folder_id, mark_copy) {
             Ok(copy) => rows.push(copy),
             Err(e) if e == LOCKED => report.skipped_locked += 1,
             Err(e) => return Err(e),

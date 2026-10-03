@@ -90,7 +90,6 @@ export const noteCreate = (input: NoteInput) =>
 export const noteUpdate = (id: string, input: NoteInput) =>
   invoke<NoteMetadata>("note_update", { id, input });
 /// Moves the note to Trash. Only `trashDelete` / `trashEmpty` remove it for good.
-export const noteDelete = (id: string) => invoke<void>("note_delete", { id });
 export const notesDelete = (ids: string[]) => invoke<void>("notes_delete", { ids });
 
 /// A note in Trash: what the list shows, plus when it was deleted (unix secs).

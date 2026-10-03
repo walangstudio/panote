@@ -11,13 +11,23 @@ use rand::{rngs::OsRng, RngCore};
 const KDF_PARALLELISM: u32 = 4;
 const KDF_PARALLELISM_LEGACY: u32 = 1;
 
+/// Argon2 is deliberately slow, and every password path calls it from an async
+/// command. On the app's multi-thread runtime, tell tokio this worker is busy so
+/// other commands keep moving; off a runtime, or on a test's single-thread one,
+/// there is nowhere else to go, so it just runs.
+fn cpu_bound<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn derive_key_with(passphrase: &str, salt: &[u8], parallelism: u32) -> anyhow::Result<[u8; 32]> {
     let params = Params::new(65536, 3, parallelism, Some(32))
         .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
-    argon2
-        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+    cpu_bound(|| argon2.hash_password_into(passphrase.as_bytes(), salt, &mut key))
         .map_err(|e| anyhow::anyhow!("argon2 hash: {e}"))?;
     Ok(key)
 }

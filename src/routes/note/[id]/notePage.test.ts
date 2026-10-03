@@ -39,7 +39,7 @@ vi.mock("$lib/tauri", () => ({
   noteGet: vi.fn(),
   noteCreate: vi.fn(async () => ({ id: "created-1" })),
   noteUpdate: vi.fn(async () => {}),
-  noteDelete: vi.fn(async () => {}),
+  notesDelete: vi.fn(async () => {}),
   noteUnlock: vi.fn(async () => {}),
   noteLock: vi.fn(async () => {}),
   noteProtect: vi.fn(async () => {}),
@@ -54,7 +54,7 @@ vi.mock("$lib/tauri", () => ({
 
 import { goto } from "$app/navigation";
 import {
-  noteGet, noteCreate, noteUpdate, noteDelete,
+  noteGet, noteCreate, noteUpdate, notesDelete,
   noteDraftSave, noteDraftGet, noteDraftDiscard, LOCKED,
 } from "$lib/tauri";
 import { refreshNotes } from "$lib/stores/notes";
@@ -113,7 +113,7 @@ beforeEach(() => {
   vi.mocked(noteDraftGet).mockResolvedValue(null as never);
   vi.mocked(noteUpdate).mockResolvedValue(undefined as never);
   vi.mocked(noteCreate).mockResolvedValue({ id: "created-1" } as never);
-  vi.mocked(noteDelete).mockResolvedValue(undefined as never);
+  vi.mocked(notesDelete).mockResolvedValue(undefined as never);
   vi.mocked(noteDraftSave).mockResolvedValue(undefined as never);
   vi.mocked(noteDraftDiscard).mockResolvedValue(undefined as never);
 });
@@ -352,7 +352,7 @@ describe("deleting", () => {
     await flush();
     await flush();
 
-    expect(noteDelete).toHaveBeenCalledWith("n1");
+    expect(notesDelete).toHaveBeenCalledWith(["n1"]);
     expect(refreshNotes).toHaveBeenCalled();
     expect(goto).toHaveBeenCalledWith("/");
   });
