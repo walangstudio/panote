@@ -37,6 +37,9 @@
   window with unsaved changes now asks to Save, Discard or Cancel, as leaving a note does.
 - Kanban columns and cards move with the keyboard: focus a drag handle and use the arrow
   keys. Handles used to be mouse- and touch-only.
+- **Close a note on desktop** with the close button at the top left, back to the empty
+  pane. Opening a folder closes the open note too. Unsaved changes ask first unless
+  Autosave is on; Cancel keeps both the note and the folder you were in.
 
 ### Fixed
 
