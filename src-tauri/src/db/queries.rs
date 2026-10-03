@@ -177,7 +177,7 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
             v != 0
         },
         preview_text: r.get("preview_text"),
-        origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
+        origin_device_id: origin_device_id.unwrap_or_default(),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
         folder_id: r.get("folder_id"),
         sort_order: r.get("sort_order"),
@@ -236,7 +236,7 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
             v != 0
         },
         preview_text: r.get("preview_text"),
-        origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
+        origin_device_id: origin_device_id.unwrap_or_default(),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
         rc_salt: None,
         rc_nonce: None,
@@ -576,6 +576,66 @@ pub async fn known_peers_list_history(
         .collect())
 }
 
+/// Lists every live note, newest-first. Used by export/import, which must see the
+/// full set — do not add pagination here; see `note_list_page` for the
+/// bounded variant used by the frontend list view (K14).
+pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_note).collect())
+}
+
+/// Lists notes, bounded by `limit`/`offset` (K14) so the frontend list view
+/// can't force decrypting every note in the database at once.
+///
+/// Ordered `pinned DESC` first, then newest: pinning is the user saying "this
+/// one matters", so a pinned note must never be the one that falls outside the
+/// window. Before this, pinning a note older than the newest 500 made it vanish
+/// from the Pinned section entirely.
+///
+/// Returned rows carry no body ciphertext — see [`row_to_list_note`].
+pub async fn note_list_page(
+    pool: &SqlitePool,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {LIST_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+    ))
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_list_note).collect())
+}
+
+/// Every note that has a background image, as `(id, data_uri)`.
+///
+/// Deliberately separate from the list query: backgrounds are large and change
+/// rarely, so they are fetched once and cached rather than re-serialised through
+/// IPC every time a note is saved, pinned or deleted.
+pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, String)>> {
+    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> '' AND deleted_at IS NULL")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("id"), r.get("bg_image")))
+        .collect())
+}
+
+/// Total notes, so the list can say how many it is NOT showing. Counting is
+/// cheap — no decryption, no row payload.
+pub async fn note_count(pool: &SqlitePool) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get("n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,64 +760,4 @@ mod tests {
         let timestamps: Vec<_> = rows.iter().map(|r| r.last_transfer_at.unwrap()).collect();
         assert_eq!(timestamps, vec![3000, 2000, 1000]);
     }
-}
-
-/// Lists every live note, newest-first. Used by export/import, which must see the
-/// full set — do not add pagination here; see `note_list_page` for the
-/// bounded variant used by the frontend list view (K14).
-pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
-    let rows = sqlx::query(&format!(
-        "SELECT {SELECT_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC"
-    ))
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(row_to_note).collect())
-}
-
-/// Lists notes, bounded by `limit`/`offset` (K14) so the frontend list view
-/// can't force decrypting every note in the database at once.
-///
-/// Ordered `pinned DESC` first, then newest: pinning is the user saying "this
-/// one matters", so a pinned note must never be the one that falls outside the
-/// window. Before this, pinning a note older than the newest 500 made it vanish
-/// from the Pinned section entirely.
-///
-/// Returned rows carry no body ciphertext — see [`row_to_list_note`].
-pub async fn note_list_page(
-    pool: &SqlitePool,
-    limit: i64,
-    offset: i64,
-) -> anyhow::Result<Vec<NoteRow>> {
-    let rows = sqlx::query(&format!(
-        "SELECT {LIST_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
-    ))
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(row_to_list_note).collect())
-}
-
-/// Every note that has a background image, as `(id, data_uri)`.
-///
-/// Deliberately separate from the list query: backgrounds are large and change
-/// rarely, so they are fetched once and cached rather than re-serialised through
-/// IPC every time a note is saved, pinned or deleted.
-pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, String)>> {
-    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> '' AND deleted_at IS NULL")
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.get("id"), r.get("bg_image")))
-        .collect())
-}
-
-/// Total notes, so the list can say how many it is NOT showing. Counting is
-/// cheap — no decryption, no row payload.
-pub async fn note_count(pool: &SqlitePool) -> anyhow::Result<i64> {
-    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes WHERE deleted_at IS NULL")
-        .fetch_one(pool)
-        .await?;
-    Ok(row.get("n"))
 }

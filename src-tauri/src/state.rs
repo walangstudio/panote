@@ -105,154 +105,6 @@ pub struct AppState {
     pub passphrase_failures: Arc<Mutex<HashMap<String, u32>>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{crypto::vault::derive_key, db::init_pool};
-
-    async fn test_state() -> AppState {
-        let pool = init_pool(":memory:").await.unwrap();
-        let key = derive_key("key", &[0u8; 16]).unwrap();
-        AppState::new(pool, key, "test-device-uuid".into())
-    }
-
-    /// Backdate a cached unlock so the timeout can be exercised without waiting.
-    fn age_unlock(state: &AppState, note_id: &str, secs: i64) {
-        state
-            .unlocked
-            .lock()
-            .unwrap()
-            .get_mut(note_id)
-            .expect("note should be unlocked")
-            .touched_at -= secs;
-    }
-
-    #[tokio::test]
-    async fn unlocked_note_password_is_readable() {
-        let state = test_state().await;
-        state.unlock_note("n1", "hunter2", "title");
-        assert_eq!(state.note_password("n1").as_deref(), Some("hunter2"));
-    }
-
-    #[tokio::test]
-    async fn unlock_expires_after_the_timeout() {
-        let state = test_state().await;
-        state.unlock_note("n1", "hunter2", "title");
-        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS + 1);
-        assert!(
-            state.note_password("n1").is_none(),
-            "a stale unlock must not hand back the password"
-        );
-    }
-
-    /// Inactivity timeout: using a note keeps it open, so a long editing
-    /// session doesn't get locked out mid-edit.
-    #[tokio::test]
-    async fn using_a_note_extends_its_unlock() {
-        let state = test_state().await;
-        state.unlock_note("n1", "hunter2", "title");
-        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
-        assert!(state.note_password("n1").is_some());
-        // The read above should have reset the clock.
-        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
-        assert!(state.note_password("n1").is_some());
-    }
-
-    /// Entries nobody asks for again must still be dropped, or an unlocked
-    /// credential note would sit in memory for the life of the process.
-    #[tokio::test]
-    async fn any_access_sweeps_other_expired_entries() {
-        let state = test_state().await;
-        state.unlock_note("stale", "old-secret", "title");
-        state.unlock_note("fresh", "new-secret", "title");
-        age_unlock(&state, "stale", UNLOCK_TIMEOUT_SECS + 1);
-
-        assert!(state.note_password("fresh").is_some());
-        assert!(
-            !state.unlocked.lock().unwrap().contains_key("stale"),
-            "expired entry should have been swept from memory"
-        );
-    }
-
-    #[tokio::test]
-    async fn reading_the_cached_title_does_not_extend_the_unlock() {
-        let state = test_state().await;
-        state.unlock_note("n1", "hunter2", "Bank");
-        assert_eq!(state.note_title("n1").as_deref(), Some("Bank"));
-        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
-        state.note_title("n1");
-        age_unlock(&state, "n1", 10);
-        assert!(
-            state.note_title("n1").is_none(),
-            "reading the title must not extend the unlock"
-        );
-    }
-
-    #[tokio::test]
-    async fn locking_forgets_the_password() {
-        let state = test_state().await;
-        state.unlock_note("n1", "hunter2", "title");
-        state.lock_note("n1");
-        assert!(state.note_password("n1").is_none());
-    }
-
-    fn sample_transfer(id: &str) -> PendingTransfer {
-        PendingTransfer {
-            transfer_id: id.to_string(),
-            from_peer: "alice.local".into(),
-            transfer_salt: vec![1, 2, 3],
-            transfer_nonce: vec![4, 5, 6],
-            transfer_ct: vec![7, 8, 9],
-            received_at: 1000,
-        }
-    }
-
-    #[tokio::test]
-    async fn peek_pending_returns_transfer_without_removing() {
-        let state = test_state().await;
-        state.add_pending(sample_transfer("t1"));
-        let peeked = state.peek_pending("t1");
-        assert!(peeked.is_some());
-        assert_eq!(
-            state.list_pending().len(),
-            1,
-            "transfer must still be present after peek"
-        );
-    }
-
-    #[tokio::test]
-    async fn peek_after_take_returns_none() {
-        let state = test_state().await;
-        state.add_pending(sample_transfer("t1"));
-        state.take_pending("t1");
-        assert!(state.peek_pending("t1").is_none());
-    }
-
-    #[tokio::test]
-    async fn peek_nonexistent_returns_none() {
-        let state = test_state().await;
-        assert!(state.peek_pending("no-such-id").is_none());
-    }
-
-    #[tokio::test]
-    async fn offer_attempts_map_is_capped_across_many_distinct_peers() {
-        let state = test_state().await;
-        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
-            state.allow_offer_attempt(&format!("10.0.0.{i}"));
-        }
-        assert!(state.offer_attempts.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
-    }
-
-    #[tokio::test]
-    async fn passphrase_failures_map_is_capped_across_many_distinct_peers() {
-        let state = test_state().await;
-        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
-            state.record_passphrase_failure(&format!("10.0.0.{i}"));
-        }
-        assert!(state.passphrase_failures.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
-    }
-}
-
 impl AppState {
     pub fn new(db: SqlitePool, device_key: [u8; 32], device_uuid: String) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -420,5 +272,153 @@ impl AppState {
 
     pub fn is_receiving(&self) -> bool {
         self.receiving.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{crypto::vault::derive_key, db::init_pool};
+
+    async fn test_state() -> AppState {
+        let pool = init_pool(":memory:").await.unwrap();
+        let key = derive_key("key", &[0u8; 16]).unwrap();
+        AppState::new(pool, key, "test-device-uuid".into())
+    }
+
+    /// Backdate a cached unlock so the timeout can be exercised without waiting.
+    fn age_unlock(state: &AppState, note_id: &str, secs: i64) {
+        state
+            .unlocked
+            .lock()
+            .unwrap()
+            .get_mut(note_id)
+            .expect("note should be unlocked")
+            .touched_at -= secs;
+    }
+
+    #[tokio::test]
+    async fn unlocked_note_password_is_readable() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        assert_eq!(state.note_password("n1").as_deref(), Some("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn unlock_expires_after_the_timeout() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS + 1);
+        assert!(
+            state.note_password("n1").is_none(),
+            "a stale unlock must not hand back the password"
+        );
+    }
+
+    /// Inactivity timeout: using a note keeps it open, so a long editing
+    /// session doesn't get locked out mid-edit.
+    #[tokio::test]
+    async fn using_a_note_extends_its_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+        // The read above should have reset the clock.
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+    }
+
+    /// Entries nobody asks for again must still be dropped, or an unlocked
+    /// credential note would sit in memory for the life of the process.
+    #[tokio::test]
+    async fn any_access_sweeps_other_expired_entries() {
+        let state = test_state().await;
+        state.unlock_note("stale", "old-secret", "title");
+        state.unlock_note("fresh", "new-secret", "title");
+        age_unlock(&state, "stale", UNLOCK_TIMEOUT_SECS + 1);
+
+        assert!(state.note_password("fresh").is_some());
+        assert!(
+            !state.unlocked.lock().unwrap().contains_key("stale"),
+            "expired entry should have been swept from memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_the_cached_title_does_not_extend_the_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "Bank");
+        assert_eq!(state.note_title("n1").as_deref(), Some("Bank"));
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        state.note_title("n1");
+        age_unlock(&state, "n1", 10);
+        assert!(
+            state.note_title("n1").is_none(),
+            "reading the title must not extend the unlock"
+        );
+    }
+
+    #[tokio::test]
+    async fn locking_forgets_the_password() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        state.lock_note("n1");
+        assert!(state.note_password("n1").is_none());
+    }
+
+    fn sample_transfer(id: &str) -> PendingTransfer {
+        PendingTransfer {
+            transfer_id: id.to_string(),
+            from_peer: "alice.local".into(),
+            transfer_salt: vec![1, 2, 3],
+            transfer_nonce: vec![4, 5, 6],
+            transfer_ct: vec![7, 8, 9],
+            received_at: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn peek_pending_returns_transfer_without_removing() {
+        let state = test_state().await;
+        state.add_pending(sample_transfer("t1"));
+        let peeked = state.peek_pending("t1");
+        assert!(peeked.is_some());
+        assert_eq!(
+            state.list_pending().len(),
+            1,
+            "transfer must still be present after peek"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_after_take_returns_none() {
+        let state = test_state().await;
+        state.add_pending(sample_transfer("t1"));
+        state.take_pending("t1");
+        assert!(state.peek_pending("t1").is_none());
+    }
+
+    #[tokio::test]
+    async fn peek_nonexistent_returns_none() {
+        let state = test_state().await;
+        assert!(state.peek_pending("no-such-id").is_none());
+    }
+
+    #[tokio::test]
+    async fn offer_attempts_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.allow_offer_attempt(&format!("10.0.0.{i}"));
+        }
+        assert!(state.offer_attempts.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
+    }
+
+    #[tokio::test]
+    async fn passphrase_failures_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.record_passphrase_failure(&format!("10.0.0.{i}"));
+        }
+        assert!(state.passphrase_failures.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
     }
 }

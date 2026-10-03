@@ -332,6 +332,9 @@ async fn handle_incoming(
 /// 1. Store offer, emit event, wait for recipient to enter code
 /// 2. Send code back to sender
 /// 3. Read incoming SendNote messages and auto-import
+// The arguments are the offer's own fields plus the connection; a struct would
+// only exist to be unpacked again on the next line.
+#[allow(clippy::too_many_arguments)]
 async fn handle_transfer_offer(
     tls: &mut tokio_rustls::server::TlsStream<TcpStream>,
     state: &Arc<AppState>,

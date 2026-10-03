@@ -2311,7 +2311,7 @@ mod tests {
     async fn trashed_notes_are_not_copied() {
         let state = test_state().await;
         let id = seed_note(&state, "a").await;
-        crate::trash::queries::trash(&state.db, &[id.clone()], now_secs())
+        crate::trash::queries::trash(&state.db, std::slice::from_ref(&id), now_secs())
             .await
             .unwrap();
         assert!(copy(&state, &[&id], None).await.copied.is_empty());
