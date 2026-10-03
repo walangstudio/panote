@@ -108,6 +108,18 @@ npm run tauri android dev           # deploys to phone, starts Vite on 0.0.0.0:1
 ./src-tauri/target/debug/panote.exe # run desktop binary directly
 ```
 
+Checks CI runs on every pull request to `main` (`.github/workflows/tests.yml`); run them before pushing:
+
+```bash
+npm run check                                  # svelte-check
+npm test                                       # vitest
+npm run test:e2e                               # Playwright
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
 ---
 
 ## Building
