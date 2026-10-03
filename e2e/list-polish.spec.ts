@@ -13,6 +13,9 @@ test.describe("the row menu sits at the far right", () => {
       await setupTauriMock(page, { folder_list: [WORK] });
       await page.setViewportSize(size);
       await page.goto("/");
+      // Until the icon font loads, an icon renders as its ligature text ("chevron_right"),
+      // which is far wider than the glyph and throws the measurements below.
+      await page.waitForFunction(() => document.fonts.check('24px "Material Symbols Outlined"'));
       for (const [row, other] of [[card(page, "Meeting notes"), ".date"], [card(page, "Work"), ".chevron"]] as const) {
         const kebab = (await row.locator(".card-menu").boundingBox())!;
         const before = (await row.locator(other).boundingBox())!;
