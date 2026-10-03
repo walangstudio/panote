@@ -2,6 +2,7 @@ import { defineConfig, devices } from "playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  globalSetup: "./e2e/global-setup.ts",
   timeout: 15000,
   retries: 0,
   // One worker on purpose. The default (cores/2) points six browsers at a single
@@ -15,7 +16,10 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:1420",
     headless: true,
-    trace: "off",
+    // Enough to debug a CI failure from the uploaded artifact; tracing every
+    // test locally would only slow the suite down.
+    trace: process.env.CI ? "retain-on-failure" : "off",
+    screenshot: "only-on-failure",
   },
   projects: [
     {

@@ -3,8 +3,9 @@ name: Tests
 on:
   push:
     branches: [main]
+  # Every PR, whatever its base: a branch stacked on a release branch is
+  # checked before it lands there, not only when the release PR moves.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: tests-${{ github.ref }}
