@@ -7,7 +7,7 @@
     trashed, refreshTrash,
   } from "$lib/stores/notes";
   import {
-    noteDelete, notePin, trashRestore, trashDelete, trashEmpty,
+    notesDelete, notePin, trashRestore, trashDelete, trashEmpty,
     noteProtect, noteUnprotect, noteChangePassword, notesProtect, notesUnprotect,
   } from "$lib/tauri";
   import type { NoteMetadata } from "$lib/tauri";
@@ -400,7 +400,10 @@
     const ids = deleteTargets;
     deleteTargets = null;
     try {
-      for (const id of ids) await noteDelete(id);
+      await notesDelete(ids);
+    } catch (e) {
+      moveError = String(e);
+      return;
     } finally {
       if (ids.length > 1) { selecting = false; selected = new Set(); }
       await Promise.all([refreshNotes(), refreshFolders()]);
@@ -475,14 +478,23 @@
     // The open note's find bar takes it instead.
     if (s === "find" && findBelongsToNote(e.target)) return;
     e.preventDefault();
-    // The selection, else the note open beside the list.
+    // The selection, else the row with keyboard focus, else the note open beside
+    // the list: a focused row is what the user is pointing at.
+    const row = (e.target as HTMLElement | null)?.closest?.<HTMLElement>("[data-row-id]");
+    const focusedFolder = row?.classList.contains("folder-card") ? row.dataset.rowId : undefined;
     const ids = selecting && selected.size ? [...selected]
+      : row && !focusedFolder ? [row.dataset.rowId!]
+      : focusedFolder ? []
       : desktop && activeId && activeId !== "new" ? [activeId] : [];
     if (s === "new-note") showNewNote = true;
     else if (s === "new-folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
     else if (s === "find") searchInput?.focus();
-    else if (s === "copy" || s === "cut") { if (ids.length) clip(s, "note", ids); }
+    else if (s === "copy" || s === "cut") {
+      if (ids.length) clip(s, "note", ids);
+      else if (focusedFolder) clip(s, "folder", [focusedFolder]);
+    }
     else if (s === "paste") paste($listFolder);
+    // A focused folder is left alone: deleting one has no confirm step yet.
     else if (ids.length) deleteTargets = ids;
   }
 

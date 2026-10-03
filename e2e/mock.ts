@@ -52,6 +52,7 @@ const DEFAULT_HANDLERS: HandlerMap = {
   note_create: MOCK_NOTES[0],
   note_update: {},
   note_delete: null,
+  notes_delete: null,
   note_count: MOCK_NOTES.length,
   note_pin: null,
   notes_reorder: null,

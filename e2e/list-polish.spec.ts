@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "playwright/test";
-import { setupTauriMock, MOCK_NOTES, MOCK_NOTE_DETAIL } from "./mock";
+import { setupTauriMock, reject, MOCK_NOTES, MOCK_NOTE_DETAIL } from "./mock";
 
 const WORK = { id: "f-work", parent_id: null, name: "Work", note_count: 0 };
 const HOME = { id: "f-home", parent_id: null, name: "Home", note_count: 0 };
@@ -279,4 +279,87 @@ test("Ctrl+F with no note open focuses the list search", async ({ page }) => {
   await expect(page.getByText("Select a note to read it, or create a new one.")).toBeVisible();
   await page.keyboard.press("Control+f");
   await expect(page.getByRole("textbox", { name: "Search notes" })).toBeFocused();
+});
+
+test("leaving during an in-flight autosave create does not create the note twice", async ({ page }) => {
+  let creates = 0;
+  const updates: string[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_create: async () => {
+      creates++;
+      await new Promise(r => setTimeout(r, 1500));
+      return { ...MOCK_NOTES[0], id: "made-1" };
+    },
+    note_update: (args: { id: string }) => { updates.push(args.id); return MOCK_NOTES[0]; },
+  });
+  await page.goto("/note/new?kind=document");
+  await page.fill(".title-input", "Fresh");
+  // Autosave fires after 1s and its create takes 1.5s; leaving lands in between,
+  // and with autosave on, leaving saves too.
+  await page.waitForTimeout(1300);
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.waitForURL(/note-3/, { timeout: 6000 });
+  expect(creates).toBe(1);
+  expect(updates.every(id => id === "made-1")).toBe(true);
+});
+
+test("autosave on blur keeps a half-typed tag and leaves the note saved", async ({ page }) => {
+  const updates: { input: { tags: string[] } }[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_update: (args: { input: { tags: string[] } }) => { updates.push(args); return MOCK_NOTES[0]; },
+  });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Edited");
+  await page.fill(".tag-input", "urgent");
+  await page.evaluate(() => {
+    document.hasFocus = () => false;
+    window.dispatchEvent(new Event("blur"));
+  });
+  await expect.poll(() => updates.length).toBe(1);
+  expect(updates[0].input.tags).toContain("urgent");
+  // A stale baseline would leave the note dirty and queue another save.
+  await page.waitForTimeout(2000);
+  expect(updates.length).toBe(1);
+});
+
+test("Delete acts on the focused row, not the note open beside the list", async ({ page }) => {
+  const deleted: string[] = [];
+  await setupTauriMock(page, { notes_delete: (args: { ids: string[] }) => { deleted.push(...args.ids); return null; } });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.locator(".note-card", { hasText: "Draft" }).first().focus();
+  await page.keyboard.press("Delete");
+  await page.locator(".modal .btn-confirm").click();
+  await expect.poll(() => deleted).toEqual(["note-3"]);
+});
+
+test("opening Trash with unsaved edits waits for the prompt; Cancel changes nothing", async ({ page }) => {
+  await setupTauriMock(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Edited");
+  const openTrash = async () => {
+    await page.getByRole("button", { name: "Open menu" }).first().click();
+    await page.locator("aside.drawer").getByRole("button", { name: "Trash" }).click();
+  };
+  await openTrash();
+  await page.locator(".modal .btn-cancel").click();
+  await expect(page).toHaveURL(/\/note\/note-1/);
+  await expect(page.locator(".note-card", { hasText: "Meeting notes" }).first()).toBeVisible();
+
+  await openTrash();
+  await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.locator(".note-card", { hasText: "Meeting notes" })).toHaveCount(0);
+});
+
+test("a failed delete is reported, not swallowed", async ({ page }) => {
+  await setupTauriMock(page, { notes_delete: () => reject("database is locked") });
+  await page.goto("/");
+  await page.locator(".note-card", { hasText: "Draft" }).first().getByRole("button", { name: "More options" }).click();
+  await page.locator(".popover-item", { hasText: "Delete" }).click();
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.getByRole("alert")).toContainText("database is locked");
 });

@@ -231,8 +231,9 @@
     return (autosaveChain = autosaveChain.then(async () => {
       if (!dirty || locked) return true;
       if (isNew && !title.trim() && !tags.length && !tagInput.trim() && JSON.stringify(content) === savedContent) return true;
+      if (commitTag) addTag();
       const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
-      const { ok, created } = await persist(commitTag);
+      const { ok, created } = await persist(false);
       if (!ok) return false;
       [savedTitle, savedContent, savedTags] = snapshot;
       if (created) {
@@ -412,6 +413,7 @@
   });
 
   async function openNote(noteId: string, newKind: NoteKind) {
+    createdId = null;
     loading = true;
     error = "";
     locked = false;
@@ -547,7 +549,20 @@
   /// Writes the note. Returns the created row when it was new, and whether the
   /// write succeeded — navigation is the caller's business, because leaving is
   /// only safe once the bytes are actually down.
-  async function persist(commitTag = true): Promise<{ ok: boolean; created: NoteMetadata | null }> {
+  /// Every write goes through here one at a time. Autosave, Ctrl+S and the
+  /// prompts can all fire while a create is still in flight, and the URL only
+  /// gains the new id after it lands, so without this a note is created twice.
+  let persistChain: Promise<unknown> = Promise.resolve();
+  /// Set the moment a create returns, before the URL catches up.
+  let createdId: string | null = null;
+
+  function persist(commitTag = true): Promise<{ ok: boolean; created: NoteMetadata | null }> {
+    const run = persistChain.then(() => persistNow(commitTag));
+    persistChain = run.catch(() => {});
+    return run;
+  }
+
+  async function persistNow(commitTag: boolean): Promise<{ ok: boolean; created: NoteMetadata | null }> {
     if (commitTag) addTag();
     saving = true;
     error = "";
@@ -556,8 +571,11 @@
     try {
       const content_hint = kind === "document" ? detectFormat((content as { body: string }).body ?? "") : undefined;
       const input = { kind, title, content, tags, content_hint, show_preview: showPreview, bg_color: bgColor, bg_image: bgImage };
-      if (isNew) created = await noteCreate({ ...input, folder_id: folderParam });
-      else await noteUpdate(id, input);
+      const existing = createdId ?? (isNew ? null : id);
+      if (existing === null) {
+        created = await noteCreate({ ...input, folder_id: folderParam });
+        createdId = created.id;
+      } else await noteUpdate(existing, input);
       // Saving is the one place the editor can change a background, so it is the
       // one place that needs the cached image map refreshed.
       await refreshNotes({ withBackgrounds: true });

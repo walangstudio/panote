@@ -11,6 +11,7 @@ vi.mock("$lib/tauri", () => ({
   noteList: vi.fn(async () => []),
   noteCount: vi.fn(async () => 0),
   noteDelete: vi.fn(async () => {}),
+  notesDelete: vi.fn(async () => {}),
   notePin: vi.fn(async () => {}),
   noteProtect: vi.fn(async () => {}),
   noteUnprotect: vi.fn(async () => {}),

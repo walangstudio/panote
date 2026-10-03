@@ -355,6 +355,14 @@ pub async fn note_delete(id: String, state: State<'_, AppState>) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
+/// Moves several notes to Trash in one transaction: all of them or none.
+#[tauri::command]
+pub async fn notes_delete(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
+    crate::trash::queries::trash(&state.db, &ids, now_secs())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ----- Drafts -----
 //
 // Editing must never overwrite a committed note. In-progress work is autosaved
@@ -794,6 +802,16 @@ pub(crate) fn copy_row(
 
 /// Copies `ids` into `folder_id`. Trashed notes are left out; locked protected
 /// ones are counted in `skipped_locked`. All rows land in one transaction.
+/// Argon2 is deliberately slow. On the app's multi-thread runtime, tell tokio this
+/// worker is busy so other commands keep moving; a test's single-thread runtime
+/// has nowhere else to go and just runs it.
+pub(crate) fn cpu_bound<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 pub(crate) async fn copy_impl(
     state: &AppState,
     ids: &[String],
@@ -811,24 +829,14 @@ pub(crate) async fn copy_impl(
     let mut report = CopyReport::default();
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
-        if crate::folders::queries::is_trashed(&state.db, id)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            continue;
-        }
-        let Some(row) = queries::note_get(&state.db, id)
+        let Some(row) = queries::note_get_live(&state.db, id)
             .await
             .map_err(|e| e.to_string())?
         else {
             continue;
         };
-        match copy_row(
-            state,
-            &row,
-            folder_id,
-            row.folder_id.as_deref() == folder_id,
-        ) {
+        let mark_copy = row.folder_id.as_deref() == folder_id;
+        match cpu_bound(|| copy_row(state, &row, folder_id, mark_copy)) {
             Ok(copy) => rows.push(copy),
             Err(e) if e == LOCKED => report.skipped_locked += 1,
             Err(e) => return Err(e),
@@ -2291,6 +2299,23 @@ mod tests {
             "secret body"
         );
         assert_eq!(listed_title(&state, &new_id).await, "Secret (copy)");
+    }
+
+    /// The app runs on a multi-thread runtime, where the copy's Argon2 work goes
+    /// through block_in_place; that path must still produce a working copy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_protected_copy_works_on_the_apps_multi_thread_runtime() {
+        let state = test_state().await;
+        let id = seed_note(&state, "secret body").await;
+        protect_impl(&state, &id, "pw").await.unwrap();
+
+        let new_id = copy(&state, &[&id], None).await.copied[0].clone();
+        state.lock_note(&new_id);
+        unlock_impl(&state, &new_id, "pw").await.unwrap();
+        assert_eq!(
+            decrypt_content(&state, &fetch(&state, &new_id).await).unwrap()["body"],
+            "secret body"
+        );
     }
 
     #[tokio::test]

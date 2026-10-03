@@ -129,23 +129,6 @@ pub async fn note_folder(pool: &SqlitePool, note_id: &str) -> anyhow::Result<Opt
     Ok(row.and_then(|r| r.get::<Option<String>, _>("folder_id")))
 }
 
-/// Notes directly in `folder_id`, leaving Trash out.
-pub async fn live_note_ids_in(pool: &SqlitePool, folder_id: &str) -> anyhow::Result<Vec<String>> {
-    let rows = sqlx::query("SELECT id FROM notes WHERE folder_id = ? AND deleted_at IS NULL")
-        .bind(folder_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(|r| r.get::<String, _>("id")).collect())
-}
-
-pub async fn is_trashed(pool: &SqlitePool, note_id: &str) -> anyhow::Result<bool> {
-    let row = sqlx::query("SELECT deleted_at FROM notes WHERE id = ?")
-        .bind(note_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.is_some_and(|r| r.get::<Option<i64>, _>("deleted_at").is_some()))
-}
-
 /// Note counts per folder, for the tree. Notes at the root are not counted.
 pub async fn note_counts(pool: &SqlitePool) -> anyhow::Result<Vec<(String, i64)>> {
     let rows = sqlx::query(

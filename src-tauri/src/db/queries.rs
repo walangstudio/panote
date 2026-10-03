@@ -362,6 +362,28 @@ pub async fn note_get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Note
     Ok(row.map(row_to_note))
 }
 
+/// `note_get`, but `None` for a note in Trash.
+pub async fn note_get_live(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<NoteRow>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE id = ? AND deleted_at IS NULL"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(row_to_note))
+}
+
+/// Notes directly in `folder_id`, leaving Trash out.
+pub async fn live_notes_in(pool: &SqlitePool, folder_id: &str) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE folder_id = ? AND deleted_at IS NULL"
+    ))
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_note).collect())
+}
+
 // ----- Drafts -----
 
 /// A note's unsaved edits. Encrypted like note content; see 0013_note_drafts.sql.

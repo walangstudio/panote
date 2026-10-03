@@ -536,9 +536,15 @@ async fn import_entry(
             queries::note_find_by_origin(&state.db, &entry.origin_device_id, &entry.origin_note_id)
                 .await?;
 
-        if existing.is_some() {
+        if let Some(existing) = existing {
             match resolution {
-                ImportResolution::Skip => return Ok(ImportEntryResult::Skipped),
+                ImportResolution::Skip => {
+                    // Keep the copy we have, but out of Trash: importing a note is
+                    // asking to see it. A no-op for a live note.
+                    crate::trash::queries::restore(&state.db, std::slice::from_ref(&existing.id))
+                        .await?;
+                    return Ok(ImportEntryResult::Skipped);
+                }
                 ImportResolution::KeepBoth => {
                     // Strip origin so import_blob_detailed treats it as a fresh note
                     // with a newly-minted local origin (attributed to this device).
@@ -1053,6 +1059,38 @@ mod tests {
                 .await
                 .unwrap();
         }
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            let res = import_entry(&state, entry, ImportResolution::Skip)
+                .await
+                .unwrap();
+            assert!(matches!(res, ImportEntryResult::Skipped));
+        }
+        assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
+    }
+
+    /// Importing a backup is asking to see its notes: a match that sits in Trash
+    /// comes back instead of being skipped there until the 30-day purge.
+    #[tokio::test]
+    async fn import_skip_brings_a_trashed_match_back() {
+        let state = test_state().await;
+        let bytes = serde_json::to_vec(&sample_v1()).unwrap();
+        let contents = String::from_utf8(bytes).unwrap();
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
+        }
+        let ids: Vec<String> = queries::note_list(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        crate::trash::queries::trash(&state.db, &ids, 1)
+            .await
+            .unwrap();
+        assert!(queries::note_list(&state.db).await.unwrap().is_empty());
+
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
             let res = import_entry(&state, entry, ImportResolution::Skip)
                 .await

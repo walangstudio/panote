@@ -38,8 +38,21 @@ export function openFolder(id: string | null, noteOpen: boolean) {
   listTrash.set(false);
 }
 
-/// The other half of `openFolder`: run by the root route on arrival.
+/// Show Trash. Leaves an open note the same way `openFolder` does.
+export function openTrash(noteOpen: boolean) {
+  if (noteOpen) {
+    void goto("/?trash=1");
+    return;
+  }
+  listTrash.set(true);
+}
+
+/// The other half of `openFolder` and `openTrash`: run by the root route on arrival.
 export function applyFolderParam(url: URL): boolean {
+  if (url.searchParams.has("trash")) {
+    listTrash.set(true);
+    return true;
+  }
   const folder = url.searchParams.get("folder");
   if (folder === null) return false;
   listFolder.set(folder || null);

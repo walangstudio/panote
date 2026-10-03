@@ -1,10 +1,9 @@
 <script lang="ts">
   import { page } from "$app/state";
-  import { goto } from "$app/navigation";
   import { theme, resolvedTheme } from "$lib/stores/theme";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { folders, buildTree, refreshFolders, type FolderNode } from "$lib/stores/folders";
-  import { listFolder, listTrash, openFolder as showFolder } from "$lib/stores/listState";
+  import { listFolder, listTrash, openFolder as showFolder, openTrash as showTrash } from "$lib/stores/listState";
   import { folderCreate, folderDelete, folderRename } from "$lib/tauri";
 
   interface Props {
@@ -34,9 +33,8 @@
   }
 
   function openTrash() {
-    listTrash.set(true);
     sidebarOpen.set(false);
-    if (page.url.pathname !== "/") goto("/");
+    showTrash(page.url.pathname !== "/");
   }
 
   async function addFolder(parentId: string | null) {

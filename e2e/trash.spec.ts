@@ -9,10 +9,10 @@ async function withTrash(page: Page) {
   await setupTauriMock(page, {
     note_list: () => live,
     note_count: () => live.length,
-    note_delete: ({ id }: { id: string }) => {
-      const n = live.find(x => x.id === id)!;
-      live = live.filter(x => x.id !== id);
-      binned = [{ ...n, deleted_at: Math.floor(Date.now() / 1000) }, ...binned];
+    notes_delete: ({ ids }: { ids: string[] }) => {
+      const now = Math.floor(Date.now() / 1000);
+      binned = [...live.filter(x => ids.includes(x.id)).map(n => ({ ...n, deleted_at: now })), ...binned];
+      live = live.filter(x => !ids.includes(x.id));
       return null;
     },
     trash_list: () => binned,
