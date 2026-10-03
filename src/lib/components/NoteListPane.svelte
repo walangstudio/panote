@@ -408,7 +408,8 @@
     } finally {
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
-    if (ids.length > 1) { selecting = false; selected = new Set(); }
+    // Done with the selection, however many it held; it named notes now in Trash.
+    if (selecting) { selecting = false; selected = new Set(); }
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }

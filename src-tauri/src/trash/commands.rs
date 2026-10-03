@@ -63,6 +63,7 @@ pub async fn trash_list(state: State<'_, AppState>) -> Result<Vec<TrashedNote>, 
 pub async fn trash_restore(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
     queries::restore(&state.db, &ids)
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 

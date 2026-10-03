@@ -50,20 +50,23 @@ pub async fn list(pool: &SqlitePool) -> anyhow::Result<Vec<TrashRow>> {
 /// Back into the folder it was deleted from, or the root if that folder is gone.
 /// Deleting a folder already nulls `folder_id` via ON DELETE SET NULL; the CASE
 /// covers a database where that never ran.
-pub async fn restore(pool: &SqlitePool, ids: &[String]) -> anyhow::Result<()> {
+/// Returns how many notes actually came out of Trash; live ids are left alone.
+pub async fn restore(pool: &SqlitePool, ids: &[String]) -> anyhow::Result<u64> {
     let mut tx = pool.begin().await?;
+    let mut restored = 0;
     for id in ids {
-        sqlx::query(
+        restored += sqlx::query(
             "UPDATE notes SET deleted_at = NULL, \
              folder_id = CASE WHEN folder_id IN (SELECT id FROM folders) THEN folder_id END \
              WHERE id = ? AND deleted_at IS NOT NULL",
         )
         .bind(id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
     }
     tx.commit().await?;
-    Ok(())
+    Ok(restored)
 }
 
 /// Permanent. Only ever touches trashed rows, so a live note cannot be destroyed

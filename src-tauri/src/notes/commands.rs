@@ -347,8 +347,8 @@ pub(crate) async fn update_impl(
     })
 }
 
-/// Moves the note to Trash; `trash_delete` is what removes it for good.
-/// Moves several notes to Trash in one transaction: all of them or none.
+/// Moves notes to Trash in one transaction: all of them or none.
+/// `trash_delete` is what removes them for good.
 #[tauri::command]
 pub async fn notes_delete(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
     crate::trash::queries::trash(&state.db, &ids, now_secs())

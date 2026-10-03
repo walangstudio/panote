@@ -365,31 +365,33 @@ test("a failed delete is reported, not swallowed", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("database is locked");
 });
 
-test("a create that lands after switching notes stays out of the next note", async ({ page }) => {
+test("a second click during an autosave leave waits; the note is made once and saves stay put", async ({ page }) => {
+  let creates = 0;
   const updates: string[] = [];
   await setupTauriMock(page, {
     get_autosave: true,
     note_create: async () => {
+      creates++;
       await new Promise(r => setTimeout(r, 2500));
       return { ...MOCK_NOTES[0], id: "made-1" };
     },
-    note_update: (args: { id: string }) => { updates.push(args.id); return MOCK_NOTES[1]; },
+    note_update: (args: { id: string }) => { updates.push(args.id); return MOCK_NOTES[2]; },
   });
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/note/new?kind=document");
   await page.fill(".title-input", "Fresh");
   await page.waitForTimeout(1300);
   await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  // Ignored while the leave to Draft is still saving the new note.
   await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
-  await page.waitForURL(/note-2/);
-  // Give the slow create time to land; it must not pull the editor back.
-  await page.waitForTimeout(2500);
-  await expect(page).toHaveURL(/note-2/);
+  await page.waitForURL(/note-3/, { timeout: 8000 });
+  await page.waitForTimeout(1000);
+  await expect(page).toHaveURL(/note-3/);
+  expect(creates).toBe(1);
 
-  await page.fill(".title-input", "Shopping list, edited");
+  await page.fill(".title-input", "Draft, edited");
   await page.keyboard.press("Control+s");
-  await expect.poll(() => updates.at(-1)).toBe("note-2");
-  expect(updates).not.toContain("made-1");
+  await expect.poll(() => updates.at(-1)).toBe("note-3");
 });
 
 test("autosave saves a half-typed tag on its own when the window loses focus", async ({ page }) => {
@@ -418,4 +420,87 @@ test("a failed multi-note delete keeps the selection for a retry", async ({ page
   await page.locator(".modal .btn-confirm").click();
   await expect(page.getByRole("alert")).toContainText("database is locked");
   await expect(page.locator(".sel-count")).toContainText("2 selected");
+});
+
+test("deleting a one-note selection leaves select mode", async ({ page }) => {
+  await setupTauriMock(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Select notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.keyboard.press("Delete");
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.locator(".sel-count")).toHaveCount(0);
+});
+
+test("while autosave is leaving a note, another click waits for it", async ({ page }) => {
+  const updates: { id: string; input: { title: string } }[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_update: async (args: { id: string; input: { title: string } }) => {
+      await new Promise(r => setTimeout(r, 1500));
+      updates.push(args);
+      return MOCK_NOTES[0];
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Edited before leaving");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await page.waitForURL(/note-3/, { timeout: 6000 });
+  expect(updates.some(u => u.id === "note-1" && u.input.title === "Edited before leaving")).toBe(true);
+});
+
+test("saving while the next note loads never writes the last note into it", async ({ page }) => {
+  const updates: { id: string; input: { title: string } }[] = [];
+  await setupTauriMock(page, {
+    note_get: async (args: { id: string }) => {
+      if (args.id === "note-3") await new Promise(r => setTimeout(r, 2000));
+      return { ...MOCK_NOTE_DETAIL, id: args.id, title: args.id === "note-3" ? "Draft" : "Meeting notes" };
+    },
+    note_update: (args: { id: string; input: { title: string } }) => { updates.push(args); return MOCK_NOTES[0]; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Discard me");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+  await page.waitForURL(/note-3/);
+  await page.keyboard.press("Control+s");
+  await expect(page.locator(".title-input")).toHaveValue("Draft", { timeout: 5000 });
+  expect(updates.filter(u => u.id === "note-3" && u.input.title === "Discard me")).toEqual([]);
+});
+
+test("a failure from the note just left does not prompt on the next one", async ({ page }) => {
+  await setupTauriMock(page, {
+    note_update: async () => {
+      await new Promise(r => setTimeout(r, 1500));
+      return reject("locked");
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Edited");
+  // A slow save is in flight; leaving with Discard does not wait for it.
+  await page.keyboard.press("Control+s");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+  await page.waitForURL(/note-3/);
+  await page.waitForTimeout(2500);
+  await expect(page.getByText("Unlock to save")).toHaveCount(0);
+});
+
+test("a draft pending for one note is never saved under the next", async ({ page }) => {
+  const drafts: string[] = [];
+  await setupTauriMock(page, {
+    note_draft_save: (args: { id: string }) => { drafts.push(args.id); return null; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Typed");
+  await page.keyboard.press("Control+s");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.waitForURL(/note-3/);
+  await page.waitForTimeout(1500);
+  expect(drafts).not.toContain("note-3");
 });

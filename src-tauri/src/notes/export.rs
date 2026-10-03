@@ -542,18 +542,16 @@ async fn import_entry(
                     // Keep the copy we have. One sitting in Trash comes back out,
                     // since importing a note is asking to see it, and that change
                     // is reported as an update rather than hidden in "skipped".
-                    if queries::note_get_live(&state.db, &existing.id)
-                        .await?
-                        .is_none()
-                    {
-                        crate::trash::queries::restore(
-                            &state.db,
-                            std::slice::from_ref(&existing.id),
-                        )
-                        .await?;
-                        return Ok(ImportEntryResult::Updated);
-                    }
-                    return Ok(ImportEntryResult::Skipped);
+                    let revived = crate::trash::queries::restore(
+                        &state.db,
+                        std::slice::from_ref(&existing.id),
+                    )
+                    .await?;
+                    return Ok(if revived > 0 {
+                        ImportEntryResult::Updated
+                    } else {
+                        ImportEntryResult::Skipped
+                    });
                 }
                 ImportResolution::KeepBoth => {
                     // Strip origin so import_blob_detailed treats it as a fresh note

@@ -133,20 +133,27 @@
 
   /// The note itself differs from what was last saved.
   const edited = $derived(
-    !justSaved && (
+    // While the next note loads, the editor still shows the last one: nothing is edited.
+    !justSaved && !loading && (
       title !== savedTitle ||
       JSON.stringify(content) !== savedContent ||
       JSON.stringify(tags) !== savedTags
     )
   );
   /// Anything that leaving would lose, including a tag typed but not yet added.
-  const dirty = $derived(edited || (!justSaved && tagInput.trim() !== ""));
+  const dirty = $derived(edited || (!justSaved && !loading && tagInput.trim() !== ""));
 
   /// Leaving with autosave on: the prompt stays hidden unless the save fails.
   let leaving = $state(false);
 
   beforeNavigate(({ cancel, to, type }) => {
-    if (!dirty || pendingNavUrl !== null) return;
+    // Mid-leave with autosave, only the leave itself may go: another click would
+    // switch notes under the save still writing this one.
+    if (pendingNavUrl !== null) {
+      if (leaving && to?.url.toString() !== pendingNavUrl) cancel();
+      return;
+    }
+    if (!dirty) return;
     // Autosave binding a new note to its real id is not leaving it.
     if (adoptedId && to?.url.pathname === `/note/${adoptedId}`) return;
     // An unload cannot wait for a save; the window close handler below covers it.
@@ -424,6 +431,8 @@
 
   async function openNote(noteId: string, newKind: NoteKind) {
     noteGen++;
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
     createdId = null;
     // A prompt left over from the note being left is moot now.
     pendingNavUrl = null;
@@ -551,7 +560,8 @@
       await noteLock(id);
       if ($isDesktop) {
         // The list stays beside us; re-read so the lock gate renders in place.
-        // loadNote resets the saved snapshots, so this clears dirty on its own.
+        // loadNote resets the saved snapshots; the tag box is not among them.
+        tagInput = "";
         await loadNote();
       } else {
         justSaved = true;
@@ -568,7 +578,7 @@
   let createdId: string | null = null;
 
   /// Writes the note. Returns the created row when it was new, and whether the
-  /// write succeeded — navigation is the caller's business, because leaving is
+  /// write succeeded - navigation is the caller's business, because leaving is
   /// only safe once the bytes are actually down. A write queued for a note the
   /// editor has since left is dropped rather than aimed at the next one.
   function persist(commitTag = true): Promise<{ ok: boolean; created: NoteMetadata | null }> {
@@ -580,6 +590,9 @@
   }
 
   async function persistNow(commitTag: boolean, gen: number): Promise<{ ok: boolean; created: NoteMetadata | null }> {
+    // Mid-load the editor still holds the previous note; saving it would write
+    // that note's content under this one's id.
+    if (loading) return { ok: false, created: null };
     if (commitTag) addTag();
     saving = true;
     error = "";
@@ -599,10 +612,11 @@
       await refreshNotes({ withBackgrounds: true });
       ok = true;
     } catch (e) {
-      if (String(e) === LOCKED) {
-        needUnlockForSave = true;
-      } else {
-        error = String(e);
+      // A failure that belongs to a note since left must not surface on this one,
+      // least of all as an unlock prompt that would unlock and save the wrong note.
+      if (gen === noteGen) {
+        if (String(e) === LOCKED) needUnlockForSave = true;
+        else error = String(e);
       }
     }
     saving = false;

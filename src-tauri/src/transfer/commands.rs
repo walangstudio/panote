@@ -593,6 +593,9 @@ pub async fn import_blob_detailed(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(prev) = existing {
+        // Accepting a note is asking to see it, whichever branch below handles
+        // it; one that sits in Trash would otherwise arrive invisible.
+        crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
         // Model B: the note arrives as plaintext inside the E2E envelope; the
         // sender never imposes a password. If the recipient already protects
         // this note locally, keep that protection (re-seal with the cached
@@ -605,8 +608,6 @@ pub async fn import_blob_detailed(
         if prev.note_salt.is_some() && effective_pw.is_none() {
             // Locally protected and we have no password to re-protect the new
             // content with — refuse to overwrite rather than silently expose it.
-            // It still comes out of Trash, as every other accepted arrival does.
-            crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
             return Ok((prev.id, ImportOutcome::Updated));
         }
         let mut row = NoteRow {
@@ -643,9 +644,6 @@ pub async fn import_blob_detailed(
             crate::notes::commands::apply_sealed(&mut row, sealed);
         }
         queries::note_update(&state.db, &row).await?;
-        // Accepting a note is asking to see it; updating a copy that sits in
-        // Trash would make the arrival invisible.
-        crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
         if let Some(pw) = &effective_pw {
             state.unlock_note(&prev.id, pw, &blob.title);
         }
