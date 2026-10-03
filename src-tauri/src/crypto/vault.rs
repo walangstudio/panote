@@ -50,12 +50,22 @@ pub fn random_nonce() -> [u8; 12] {
 /// Encrypt plaintext with a 32-byte key, binding `aad` (additional authenticated
 /// data — e.g. a note id) so ciphertext can't be swapped between rows/contexts.
 /// Returns (nonce, ciphertext).
-pub fn encrypt(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> anyhow::Result<([u8; 12], Vec<u8>)> {
+pub fn encrypt(
+    key: &[u8; 32],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> anyhow::Result<([u8; 12], Vec<u8>)> {
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_bytes = random_nonce();
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ct = cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
     Ok((nonce_bytes, ct))
 }
@@ -70,7 +80,13 @@ pub fn decrypt(
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
-        .decrypt(nonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| anyhow::anyhow!("decryption failed — wrong key or corrupted data"))
 }
 

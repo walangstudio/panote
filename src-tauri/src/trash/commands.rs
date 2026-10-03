@@ -28,12 +28,19 @@ pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<TrashedNote>, Stri
             // One unreadable title must not make the rest of Trash unreachable,
             // or the note could never be deleted for good.
             let title = if r.note_salt.is_some() {
-                state.note_title(&r.id).unwrap_or_else(|| LOCKED_TITLE.to_string())
+                state
+                    .note_title(&r.id)
+                    .unwrap_or_else(|| LOCKED_TITLE.to_string())
             } else {
-                decrypt_with_vault(&state.device_key, &r.title_nonce, &r.title_ct, r.id.as_bytes())
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_else(|| "(unreadable)".into())
+                decrypt_with_vault(
+                    &state.device_key,
+                    &r.title_nonce,
+                    &r.title_ct,
+                    r.id.as_bytes(),
+                )
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_else(|| "(unreadable)".into())
             };
             TrashedNote {
                 content_hint: migrate_hint(&r.kind, r.content_hint),
@@ -54,12 +61,16 @@ pub async fn trash_list(state: State<'_, AppState>) -> Result<Vec<TrashedNote>, 
 
 #[tauri::command]
 pub async fn trash_restore(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
-    queries::restore(&state.db, &ids).await.map_err(|e| e.to_string())
+    queries::restore(&state.db, &ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn trash_delete(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
-    queries::purge(&state.db, &ids).await.map_err(|e| e.to_string())
+    queries::purge(&state.db, &ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

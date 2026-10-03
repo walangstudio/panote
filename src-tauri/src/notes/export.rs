@@ -24,8 +24,8 @@
 use crate::{
     db::queries::{self, NoteRow},
     state::{now_secs, AppState},
-    transfer::commands::{import_blob_detailed, ImportOutcome},
     transfer::blob::TransferBlob,
+    transfer::commands::{import_blob_detailed, ImportOutcome},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,9 @@ pub struct NoteExportEntryV1 {
     pub show_preview: bool,
 }
 
-fn default_show_preview() -> bool { true }
+fn default_show_preview() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportFileV1 {
@@ -153,7 +155,9 @@ fn migrate_color_syntax(body: &str) -> String {
         let after_open = &tail[OPEN.len()..];
 
         // colour, up to the closing brace
-        let Some(close) = after_open.find('}') else { break };
+        let Some(close) = after_open.find('}') else {
+            break;
+        };
         let color = &after_open[..close];
         let after_color = &after_open[close + 1..];
 
@@ -179,7 +183,10 @@ fn migrate_color_syntax(body: &str) -> String {
                 b'{' => depth += 1,
                 b'}' => {
                     depth -= 1;
-                    if depth == 0 { end = Some(i); break; }
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -234,8 +241,8 @@ fn v1_to_v2(mut file: ExportFileV1) -> ExportFileV2 {
 /// Parse export bytes, detect the version, and upgrade to the current schema.
 /// Rejects unknown formats and versions newer than this build.
 pub fn parse_export(bytes: &[u8]) -> anyhow::Result<ExportFile> {
-    let raw: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| anyhow::anyhow!("not a valid JSON file: {e}"))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| anyhow::anyhow!("not a valid JSON file: {e}"))?;
 
     if raw.get("format").and_then(|v| v.as_str()) != Some(FORMAT_TAG) {
         anyhow::bail!("not a panote export file (missing or wrong 'format' tag)");
@@ -525,12 +532,9 @@ async fn import_entry(
 ) -> anyhow::Result<ImportEntryResult> {
     // Skip/KeepBoth need a pre-check; Overwrite can go straight through import_blob_detailed.
     if resolution != ImportResolution::Overwrite && !entry.origin_device_id.is_empty() {
-        let existing = queries::note_find_by_origin(
-            &state.db,
-            &entry.origin_device_id,
-            &entry.origin_note_id,
-        )
-        .await?;
+        let existing =
+            queries::note_find_by_origin(&state.db, &entry.origin_device_id, &entry.origin_note_id)
+                .await?;
 
         if existing.is_some() {
             match resolution {
@@ -609,11 +613,7 @@ async fn insert_as_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        crypto::vault::derive_key,
-        db::init_pool,
-        state::AppState,
-    };
+    use crate::{crypto::vault::derive_key, db::init_pool, state::AppState};
     use serde_json::json;
 
     async fn test_state() -> AppState {
@@ -707,7 +707,10 @@ mod tests {
         f.format_version = 2;
         f.notes[0].content = json!({ "body": "<span style=\"color:#3182ce\">kept</span>" });
         let parsed = parse_export(&serde_json::to_vec(&f).unwrap()).unwrap();
-        assert_eq!(body_of(&parsed), "<span style=\"color:#3182ce\">kept</span>");
+        assert_eq!(
+            body_of(&parsed),
+            "<span style=\"color:#3182ce\">kept</span>"
+        );
     }
 
     #[test]
@@ -747,8 +750,12 @@ mod tests {
     #[test]
     fn sealed_content_round_trips_with_the_right_password() {
         let entry = sealed_entry("correct horse");
-        let opened = open_secret("secret-note", entry.secret.as_ref().unwrap(), "correct horse")
-            .unwrap();
+        let opened = open_secret(
+            "secret-note",
+            entry.secret.as_ref().unwrap(),
+            "correct horse",
+        )
+        .unwrap();
         assert_eq!(opened.0["body"], SECRET_BODY);
     }
 
@@ -761,8 +768,12 @@ mod tests {
         let mut f = sample_v1();
         f.notes = vec![entry.clone()];
         assert!(!serde_json::to_string(&f).unwrap().contains(SECRET_TITLE));
-        let (_, title) =
-            open_secret("secret-note", entry.secret.as_ref().unwrap(), "correct horse").unwrap();
+        let (_, title) = open_secret(
+            "secret-note",
+            entry.secret.as_ref().unwrap(),
+            "correct horse",
+        )
+        .unwrap();
         assert_eq!(title.as_deref(), Some(SECRET_TITLE));
     }
 
@@ -785,7 +796,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((summary.imported, summary.errors.len()), (1, 0));
-        let listed = crate::notes::commands::list_impl(&state, None, None).await.unwrap();
+        let listed = crate::notes::commands::list_impl(&state, None, None)
+            .await
+            .unwrap();
         assert_eq!(listed[0].title, "Old backup title");
     }
 
@@ -801,21 +814,35 @@ mod tests {
         entry.content = json!({ "body": SECRET_BODY });
         insert_as_blob(&alice, entry).await.unwrap();
         let id = queries::note_list(&alice.db).await.unwrap()[0].id.clone();
-        crate::notes::commands::protect_impl(&alice, &id, "pw").await.unwrap();
+        crate::notes::commands::protect_impl(&alice, &id, "pw")
+            .await
+            .unwrap();
 
         let file = export_impl(&alice, "test".into()).await.unwrap();
-        assert!(!file.contains(SECRET_TITLE), "the title must not be in the backup");
+        assert!(
+            !file.contains(SECRET_TITLE),
+            "the title must not be in the backup"
+        );
         assert!(!file.contains(SECRET_BODY));
 
         alice.lock_note(&id);
-        assert!(export_impl(&alice, "test".into()).await.is_err(), "locked notes block export");
+        assert!(
+            export_impl(&alice, "test".into()).await.is_err(),
+            "locked notes block export"
+        );
 
-        let bob = AppState::new(init_pool(":memory:").await.unwrap(), derive_key("bob", &[0u8; 16]).unwrap(), "device-b".into());
+        let bob = AppState::new(
+            init_pool(":memory:").await.unwrap(),
+            derive_key("bob", &[0u8; 16]).unwrap(),
+            "device-b".into(),
+        );
         let summary = import_impl(&bob, &file, ImportResolution::Overwrite, Some("pw"))
             .await
             .unwrap();
         assert_eq!((summary.imported, summary.errors.len()), (1, 0));
-        let listed = crate::notes::commands::list_impl(&bob, None, None).await.unwrap();
+        let listed = crate::notes::commands::list_impl(&bob, None, None)
+            .await
+            .unwrap();
         assert_eq!(listed[0].title, SECRET_TITLE);
 
         let wrong = test_state().await;
@@ -823,7 +850,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(summary.imported, 0);
-        assert!(!summary.errors[0].contains(SECRET_TITLE), "errors must not leak it either");
+        assert!(
+            !summary.errors[0].contains(SECRET_TITLE),
+            "errors must not leak it either"
+        );
     }
 
     #[test]
@@ -841,8 +871,12 @@ mod tests {
     fn sealed_content_is_bound_to_its_note_id() {
         let entry = sealed_entry("correct horse");
         assert!(
-            open_secret("a-different-note", entry.secret.as_ref().unwrap(), "correct horse")
-                .is_err(),
+            open_secret(
+                "a-different-note",
+                entry.secret.as_ref().unwrap(),
+                "correct horse"
+            )
+            .is_err(),
             "a blob must not decrypt under another note's id"
         );
     }
@@ -862,7 +896,10 @@ mod tests {
         let f = sample_v1();
         assert!(f.notes[0].secret.is_none());
         let text = serde_json::to_string(&f).unwrap();
-        assert!(!text.contains("\"secret\""), "field should be omitted, not null");
+        assert!(
+            !text.contains("\"secret\""),
+            "field should be omitted, not null"
+        );
     }
 
     #[test]
@@ -952,7 +989,9 @@ mod tests {
         let contents = String::from_utf8(serde_json::to_vec(&f).unwrap()).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
 
         let rows = queries::note_list(&state.db).await.unwrap();
@@ -973,7 +1012,9 @@ mod tests {
         let contents = String::from_utf8(serde_json::to_vec(&f).unwrap()).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
 
         let rows = queries::note_list(&state.db).await.unwrap();
@@ -987,11 +1028,15 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         // Second run: should update, not insert.
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Updated));
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
@@ -1004,10 +1049,14 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::Skip).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::Skip)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Skipped));
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
@@ -1020,10 +1069,14 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::KeepBoth).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::KeepBoth)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Inserted));
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 2);

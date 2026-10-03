@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
-    Hello { device_name: String },
+    Hello {
+        device_name: String,
+    },
     /// Sender opens a transfer and starts the SPAKE2 handshake (initiator msg).
     TransferOffer {
         from_peer: String,
@@ -21,7 +23,9 @@ pub enum Message {
         confirm: Vec<u8>,
     },
     /// Sender's key-confirmation MAC — mutual auth before any note is sent.
-    PakeConfirm { confirm: Vec<u8> },
+    PakeConfirm {
+        confirm: Vec<u8>,
+    },
     /// One note encrypted under the PAKE-derived session key (E2E flow).
     SessionNote {
         nonce: Vec<u8>,
@@ -35,8 +39,12 @@ pub enum Message {
         transfer_nonce: Vec<u8>,
         transfer_ct: Vec<u8>,
     },
-    Ack { transfer_id: String },
-    Reject { reason: String },
+    Ack {
+        transfer_id: String,
+    },
+    Reject {
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -50,7 +58,9 @@ mod tests {
 
     #[test]
     fn hello_roundtrip() {
-        let msg = Message::Hello { device_name: "Alice".into() };
+        let msg = Message::Hello {
+            device_name: "Alice".into(),
+        };
         let decoded = roundtrip(&msg);
         assert!(matches!(decoded, Message::Hello { device_name } if device_name == "Alice"));
     }
@@ -69,14 +79,18 @@ mod tests {
 
     #[test]
     fn ack_roundtrip() {
-        let msg = Message::Ack { transfer_id: "tid-123".into() };
+        let msg = Message::Ack {
+            transfer_id: "tid-123".into(),
+        };
         let decoded = roundtrip(&msg);
         assert!(matches!(decoded, Message::Ack { transfer_id } if transfer_id == "tid-123"));
     }
 
     #[test]
     fn reject_roundtrip() {
-        let msg = Message::Reject { reason: "bad passphrase".into() };
+        let msg = Message::Reject {
+            reason: "bad passphrase".into(),
+        };
         let decoded = roundtrip(&msg);
         assert!(matches!(decoded, Message::Reject { reason } if reason == "bad passphrase"));
     }
@@ -90,7 +104,10 @@ mod tests {
             pake_msg: vec![9, 9, 9],
         };
         let decoded = roundtrip(&msg);
-        assert!(matches!(decoded, Message::TransferOffer { note_count: 3, .. }));
+        assert!(matches!(
+            decoded,
+            Message::TransferOffer { note_count: 3, .. }
+        ));
     }
 
     #[test]
@@ -108,12 +125,17 @@ mod tests {
             confirm: vec![3, 4],
         };
         let decoded = roundtrip(&msg);
-        assert!(matches!(decoded, Message::TransferAccept { confirm, .. } if confirm == vec![3, 4]));
+        assert!(
+            matches!(decoded, Message::TransferAccept { confirm, .. } if confirm == vec![3, 4])
+        );
     }
 
     #[test]
     fn session_note_roundtrip() {
-        let msg = Message::SessionNote { nonce: vec![1], ct: vec![2, 3] };
+        let msg = Message::SessionNote {
+            nonce: vec![1],
+            ct: vec![2, 3],
+        };
         let decoded = roundtrip(&msg);
         assert!(matches!(decoded, Message::SessionNote { ct, .. } if ct == vec![2, 3]));
     }

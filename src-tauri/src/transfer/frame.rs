@@ -44,7 +44,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<
 }
 
 /// Write a single length-prefixed frame to `writer`.
-pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> anyhow::Result<()> {
+pub async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+) -> anyhow::Result<()> {
     let frame = encode(payload);
     writer.write_all(&frame).await?;
     writer.flush().await?;

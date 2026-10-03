@@ -21,7 +21,8 @@ pub fn decrypt_with_vault(
     ciphertext: &[u8],
     aad: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    decrypt(vault_key, nonce, ciphertext, aad).or_else(|_| decrypt(vault_key, nonce, ciphertext, b""))
+    decrypt(vault_key, nonce, ciphertext, aad)
+        .or_else(|_| decrypt(vault_key, nonce, ciphertext, b""))
 }
 
 /// Apply an additional per-note encryption layer on top of already-vault-encrypted bytes.
@@ -51,12 +52,22 @@ pub struct SealedNote {
 }
 
 /// Seal already-vault-encrypted body and title under a fresh note-password key.
-pub fn seal_note(password: &str, vault_ct: &[u8], vault_title_ct: &[u8]) -> anyhow::Result<SealedNote> {
+pub fn seal_note(
+    password: &str,
+    vault_ct: &[u8],
+    vault_title_ct: &[u8],
+) -> anyhow::Result<SealedNote> {
     let salt = random_salt();
     let key = derive_key(password, &salt)?;
     let (nonce, content_ct) = encrypt(&key, vault_ct, b"")?;
     let (title_nonce, title_ct) = encrypt(&key, vault_title_ct, TITLE_AAD)?;
-    Ok(SealedNote { salt, nonce, content_ct, title_nonce, title_ct })
+    Ok(SealedNote {
+        salt,
+        nonce,
+        content_ct,
+        title_nonce,
+        title_ct,
+    })
 }
 
 /// Reverse of [`seal_note`]: returns (vault_ct, vault title ct, was_legacy).
@@ -130,7 +141,8 @@ mod tests {
     fn legacy_p1_note_unlocks_and_is_flagged() {
         // A note protected before the K2 bump: password layer derived at p=1.
         let vault_key = make_key("vault-pass");
-        let (vnonce, vault_ct) = encrypt_with_vault(&vault_key, b"legacy secret", b"note-1").unwrap();
+        let (vnonce, vault_ct) =
+            encrypt_with_vault(&vault_key, b"legacy secret", b"note-1").unwrap();
         let salt = [3u8; 16];
         let legacy_key = derive_key_legacy("pw", &salt).unwrap();
         let (nnonce, double_ct) = encrypt(&legacy_key, &vault_ct, b"").unwrap();
@@ -179,10 +191,18 @@ mod tests {
     #[test]
     fn sealed_note_opens_body_and_title_under_one_password() {
         let s = seal_note("pw", b"body-ct", b"title-ct").unwrap();
-        let (body, title, legacy) =
-            open_note("pw", &s.salt, &s.nonce, &s.content_ct, Some((&s.title_nonce, &s.title_ct)))
-                .unwrap();
-        assert_eq!((body.as_slice(), title.as_deref(), legacy), (&b"body-ct"[..], Some(&b"title-ct"[..]), false));
+        let (body, title, legacy) = open_note(
+            "pw",
+            &s.salt,
+            &s.nonce,
+            &s.content_ct,
+            Some((&s.title_nonce, &s.title_ct)),
+        )
+        .unwrap();
+        assert_eq!(
+            (body.as_slice(), title.as_deref(), legacy),
+            (&b"body-ct"[..], Some(&b"title-ct"[..]), false)
+        );
         assert!(open_note("wrong", &s.salt, &s.nonce, &s.content_ct, None).is_err());
     }
 
@@ -191,7 +211,14 @@ mod tests {
     fn sealed_title_and_body_cannot_be_swapped() {
         let s = seal_note("pw", b"body-ct", b"title-ct").unwrap();
         assert!(open_note("pw", &s.salt, &s.title_nonce, &s.title_ct, None).is_err());
-        assert!(open_note("pw", &s.salt, &s.nonce, &s.content_ct, Some((&s.nonce, &s.content_ct))).is_err());
+        assert!(open_note(
+            "pw",
+            &s.salt,
+            &s.nonce,
+            &s.content_ct,
+            Some((&s.nonce, &s.content_ct))
+        )
+        .is_err());
     }
 
     #[test]

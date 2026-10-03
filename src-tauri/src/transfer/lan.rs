@@ -12,7 +12,7 @@
 use crate::{
     crypto::{
         tls,
-        vault::{derive_key, encrypt, decrypt, random_salt},
+        vault::{decrypt, derive_key, encrypt, random_salt},
     },
     db::queries,
     state::{now_secs, AppState, Peer, PendingTransfer, TransportKind},
@@ -46,21 +46,11 @@ pub(crate) const TRANSFER_AAD: &[u8] = b"panote-transfer-v1";
 
 /// Start advertising this instance and browsing for peers.
 /// Returns a `ServiceDaemon` handle; drop it to stop.
-pub fn start_mdns(
-    device_name: &str,
-    state: Arc<AppState>,
-) -> anyhow::Result<ServiceDaemon> {
+pub fn start_mdns(device_name: &str, state: Arc<AppState>) -> anyhow::Result<ServiceDaemon> {
     let daemon = ServiceDaemon::new()?;
 
     let host = format!("{device_name}.local.");
-    let info = ServiceInfo::new(
-        SERVICE_TYPE,
-        device_name,
-        &host,
-        (),
-        TRANSFER_PORT,
-        None,
-    )?;
+    let info = ServiceInfo::new(SERVICE_TYPE, device_name, &host, (), TRANSFER_PORT, None)?;
     daemon.register(info)?;
 
     let receiver = daemon.browse(SERVICE_TYPE)?;
@@ -105,9 +95,7 @@ pub fn start_mdns(
 /// Works across WiFi/Ethernet boundaries where mDNS multicast is filtered.
 pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
     let own_name = device_name.to_string();
-    let announcement = format!(
-        r#"{{"name":"{device_name}","port":{TRANSFER_PORT},"v":1}}"#
-    );
+    let announcement = format!(r#"{{"name":"{device_name}","port":{TRANSFER_PORT},"v":1}}"#);
 
     // Listener
     let state_l = state.clone();
@@ -115,7 +103,10 @@ pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let sock = match UdpSocket::bind(format!("0.0.0.0:{BEACON_PORT}")).await {
             Ok(s) => s,
-            Err(e) => { eprintln!("[beacon] bind error: {e}"); return; }
+            Err(e) => {
+                eprintln!("[beacon] bind error: {e}");
+                return;
+            }
         };
         sock.set_broadcast(true).ok();
         let mut buf = [0u8; 512];
@@ -126,9 +117,15 @@ pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
                     if let Ok(s) = std::str::from_utf8(&buf[..n]) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
                             // K9: validate untrusted beacon fields before use.
-                            let name: String =
-                                v["name"].as_str().unwrap_or("unknown").chars().take(128).collect();
-                            if name == own_name_l { continue; }
+                            let name: String = v["name"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                                .chars()
+                                .take(128)
+                                .collect();
+                            if name == own_name_l {
+                                continue;
+                            }
                             let port = match v["port"].as_u64() {
                                 Some(p) if (1..=65535).contains(&p) => p as u16,
                                 _ => continue,
@@ -167,9 +164,7 @@ pub fn start_beacon(device_name: &str, state: Arc<AppState>) {
                         let mask = u32::from(v4.netmask);
                         std::net::Ipv4Addr::from(ip | !mask)
                     });
-                    if let Ok(sock) =
-                        std::net::UdpSocket::bind((v4.ip, 0))
-                    {
+                    if let Ok(sock) = std::net::UdpSocket::bind((v4.ip, 0)) {
                         sock.set_broadcast(true).ok();
                         let _ = sock.send_to(&msg, (bcast, BEACON_PORT));
                     }
@@ -212,7 +207,15 @@ impl<R: tauri::Runtime> TransferEvents for tauri::AppHandle<R> {
         self.emit("transfer-rejected", reason).ok();
     }
     fn notes_received(&self, from_peer: &str, inserted: u32, updated: u32) {
-        self.emit("notes-received", ReceiveSummary { from_peer, inserted, updated }).ok();
+        self.emit(
+            "notes-received",
+            ReceiveSummary {
+                from_peer,
+                inserted,
+                updated,
+            },
+        )
+        .ok();
     }
 }
 
@@ -276,14 +279,24 @@ async fn handle_incoming(
     let peer_ip = peer_addr.ip().to_string();
 
     match msg {
-        Message::TransferOffer { from_peer, offer_id, note_count, pake_msg } => {
+        Message::TransferOffer {
+            from_peer,
+            offer_id,
+            note_count,
+            pake_msg,
+        } => {
             handle_transfer_offer(
-                &mut tls, &state, &events,
-                &peer_ip, from_peer, offer_id, note_count, pake_msg,
-            ).await?;
+                &mut tls, &state, &events, &peer_ip, from_peer, offer_id, note_count, pake_msg,
+            )
+            .await?;
         }
         // Keep backward-compat: old senders may still blast SendNote directly.
-        Message::SendNote { from_peer, transfer_salt, transfer_nonce, transfer_ct } => {
+        Message::SendNote {
+            from_peer,
+            transfer_salt,
+            transfer_nonce,
+            transfer_ct,
+        } => {
             let transfer = PendingTransfer {
                 transfer_id: Uuid::new_v4().to_string(),
                 from_peer,
@@ -300,7 +313,9 @@ async fn handle_incoming(
             write_frame(&mut tls, &ack).await?;
         }
         Message::Hello { device_name: _ } => {
-            let reply = serde_json::to_vec(&Message::Ack { transfer_id: String::new() })?;
+            let reply = serde_json::to_vec(&Message::Ack {
+                transfer_id: String::new(),
+            })?;
             write_frame(&mut tls, &reply).await?;
         }
         _ => {
@@ -375,10 +390,8 @@ async fn handle_transfer_offer(
     events.offer_received(&offer);
 
     // Wait up to 5 minutes for the recipient to enter the code.
-    let passphrase = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        rx,
-    ).await
+    let passphrase = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+        .await
         .map_err(|_| anyhow::anyhow!("offer timed out"))?
         .map_err(|_| anyhow::anyhow!("offer cancelled"))?;
 
@@ -430,14 +443,20 @@ async fn handle_transfer_offer(
         };
         let blob_bytes = decrypt(&keys.session, &nonce, &ct, TRANSFER_AAD)?;
         let blob = TransferBlob::decode(&blob_bytes)?;
-        match import_blob_detailed(state.as_ref(), &state.device_key, blob).await?.1 {
+        match import_blob_detailed(state.as_ref(), &state.device_key, blob)
+            .await?
+            .1
+        {
             ImportOutcome::Inserted => inserted += 1,
             ImportOutcome::Updated => updated += 1,
         }
     }
-    let _ = queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
+    let _ =
+        queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
 
-    let ack = serde_json::to_vec(&Message::Ack { transfer_id: offer_id })?;
+    let ack = serde_json::to_vec(&Message::Ack {
+        transfer_id: offer_id,
+    })?;
     write_frame(tls, &ack).await?;
 
     events.notes_received(&from_peer, inserted, updated);
@@ -542,8 +561,7 @@ pub async fn send_note(
         encrypt(&transfer_key, &blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let client_cfg = tls::client_config(state.tofu.clone(), provider)
-        .map_err(|e| e.to_string())?;
+    let client_cfg = tls::client_config(state.tofu.clone(), provider).map_err(|e| e.to_string())?;
     let connector = TlsConnector::from(Arc::new(client_cfg));
 
     let stream = TcpStream::connect(format!("{address}:{port}"))
@@ -557,7 +575,10 @@ pub async fn send_note(
     let mut tls = {
         let _guard = state.outbound_lock.lock().await;
         state.tofu.set_peer_address(address);
-        connector.connect(domain, stream).await.map_err(|e| e.to_string())?
+        connector
+            .connect(domain, stream)
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     // K3: hard-reject and persist before sending anything sensitive.
@@ -616,8 +637,7 @@ pub async fn send_notes(
     }
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let client_cfg = tls::client_config(state.tofu.clone(), provider)
-        .map_err(|e| e.to_string())?;
+    let client_cfg = tls::client_config(state.tofu.clone(), provider).map_err(|e| e.to_string())?;
     let connector = TlsConnector::from(Arc::new(client_cfg));
 
     let stream = TcpStream::connect(format!("{address}:{port}"))
@@ -630,7 +650,10 @@ pub async fn send_notes(
     let mut tls = {
         let _guard = state.outbound_lock.lock().await;
         state.tofu.set_peer_address(address);
-        connector.connect(domain, stream).await.map_err(|e| e.to_string())?
+        connector
+            .connect(domain, stream)
+            .await
+            .map_err(|e| e.to_string())?
     };
 
     // K3: hard-reject and persist before sending anything sensitive.
@@ -651,16 +674,21 @@ pub async fn send_notes(
         note_count: note_ids.len() as u32,
         pake_msg: pake_msg_i.clone(),
     };
-    write_frame(&mut tls, &serde_json::to_vec(&offer).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?;
+    write_frame(
+        &mut tls,
+        &serde_json::to_vec(&offer).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // 2. Read the recipient's SPAKE2 message + key-confirmation MAC.
     let reply: Message =
         serde_json::from_slice(&read_frame(&mut tls).await.map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     let (pake_msg_r, confirm_r) = match reply {
-        Message::TransferAccept { pake_msg, confirm, .. } => (pake_msg, confirm),
+        Message::TransferAccept {
+            pake_msg, confirm, ..
+        } => (pake_msg, confirm),
         Message::Reject { reason } => return Err(format!("recipient rejected: {reason}")),
         _ => return Err("unexpected reply from recipient".into()),
     };
@@ -675,26 +703,41 @@ pub async fn send_notes(
     let keys = pake::derive_keys(&spake_key, &pake_msg_i, &pake_msg_r);
     if !pake::verify_mac(&keys.confirm_responder, &confirm_r) {
         state.record_passphrase_failure(address);
-        let reject = serde_json::to_vec(&Message::Reject { reason: "wrong code".into() })
+        let reject = serde_json::to_vec(&Message::Reject {
+            reason: "wrong code".into(),
+        })
+        .map_err(|e| e.to_string())?;
+        write_frame(&mut tls, &reject)
+            .await
             .map_err(|e| e.to_string())?;
-        write_frame(&mut tls, &reject).await.map_err(|e| e.to_string())?;
         return Err("wrong pairing code".into());
     }
     state.reset_passphrase_failures(address);
 
     // 4. Prove we also know the code (mutual auth), then send the notes.
-    let confirm = Message::PakeConfirm { confirm: pake::confirm_mac(&keys.confirm_initiator) };
-    write_frame(&mut tls, &serde_json::to_vec(&confirm).map_err(|e| e.to_string())?)
-        .await
-        .map_err(|e| e.to_string())?;
+    let confirm = Message::PakeConfirm {
+        confirm: pake::confirm_mac(&keys.confirm_initiator),
+    };
+    write_frame(
+        &mut tls,
+        &serde_json::to_vec(&confirm).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     for blob_bytes in &blobs {
         let (nonce, ct) =
             encrypt(&keys.session, blob_bytes, TRANSFER_AAD).map_err(|e| e.to_string())?;
-        let msg = Message::SessionNote { nonce: nonce.to_vec(), ct };
-        write_frame(&mut tls, &serde_json::to_vec(&msg).map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| e.to_string())?;
+        let msg = Message::SessionNote {
+            nonce: nonce.to_vec(),
+            ct,
+        };
+        write_frame(
+            &mut tls,
+            &serde_json::to_vec(&msg).map_err(|e| e.to_string())?,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     }
 
     // 5. Read final Ack
@@ -865,7 +908,10 @@ mod device_identity_key_tests {
 
         // Must be re-encrypted in the DB so it's read as plaintext at most once.
         let row = queries::device_identity_get(&pool).await.unwrap().unwrap();
-        assert_ne!(row.key_der, legacy_key_der, "must be re-encrypted after first read");
+        assert_ne!(
+            row.key_der, legacy_key_der,
+            "must be re-encrypted after first read"
+        );
     }
 
     #[tokio::test]

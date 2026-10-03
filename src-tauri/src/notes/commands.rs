@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::{
     crypto::note::{
         apply_note_password, decrypt_with_vault, encrypt_with_vault, open_note,
@@ -8,6 +7,7 @@ use crate::{
     notes::types::{NoteDetail, NoteInput, NoteMetadata},
     state::{now_secs, AppState},
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
@@ -41,7 +41,9 @@ pub(crate) fn validate_bg_image(bg_image: &Option<String>) -> Result<(), String>
         .decode(&s[prefix.len()..])
         .map_err(|_| "bg_image is not valid base64".to_string())?;
     if decoded.len() > MAX_BG_IMAGE_BYTES {
-        return Err(format!("bg_image exceeds the {MAX_BG_IMAGE_BYTES}-byte limit"));
+        return Err(format!(
+            "bg_image exceeds the {MAX_BG_IMAGE_BYTES}-byte limit"
+        ));
     }
     Ok(())
 }
@@ -75,7 +77,11 @@ pub(crate) fn encrypt_tags(
 // error rather than silently returning empty tags. Legacy rows aren't
 // re-encrypted in place; a future migration should rewrite every row on next
 // write and drop this fallback.
-pub(crate) fn decrypt_tags(key: &[u8; 32], note_id: &str, stored: &str) -> anyhow::Result<Vec<String>> {
+pub(crate) fn decrypt_tags(
+    key: &[u8; 32],
+    note_id: &str,
+    stored: &str,
+) -> anyhow::Result<Vec<String>> {
     let raw = match STANDARD.decode(stored) {
         Ok(raw) if raw.len() > 12 => raw,
         _ => return Ok(serde_json::from_str(stored).unwrap_or_default()),
@@ -96,8 +102,8 @@ pub(crate) fn encrypt_preview(
     note_id: &str,
     preview: &str,
 ) -> Result<String, String> {
-    let (nonce, ct) =
-        encrypt_with_vault(key, preview.as_bytes(), note_id.as_bytes()).map_err(|e| e.to_string())?;
+    let (nonce, ct) = encrypt_with_vault(key, preview.as_bytes(), note_id.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut raw = Vec::with_capacity(nonce.len() + ct.len());
     raw.extend_from_slice(&nonce);
     raw.extend_from_slice(&ct);
@@ -147,7 +153,10 @@ pub async fn note_create(
     create_impl(&state, input).await
 }
 
-pub(crate) async fn create_impl(state: &AppState, input: NoteInput) -> Result<NoteMetadata, String> {
+pub(crate) async fn create_impl(
+    state: &AppState,
+    input: NoteInput,
+) -> Result<NoteMetadata, String> {
     validate_bg_image(&input.bg_image)?;
     // A folder deleted since the list was drawn must not lose the note.
     let folder_id = match input.folder_id.as_deref() {
@@ -161,8 +170,8 @@ pub(crate) async fn create_impl(state: &AppState, input: NoteInput) -> Result<No
     let id = Uuid::new_v4().to_string();
     let ts = now_secs();
 
-    let (title_nonce, title_ct) =
-        encrypt_with_vault(key, input.title.as_bytes(), id.as_bytes()).map_err(|e| e.to_string())?;
+    let (title_nonce, title_ct) = encrypt_with_vault(key, input.title.as_bytes(), id.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     let content_json = serde_json::to_vec(&input.content).map_err(|e| e.to_string())?;
     let (content_nonce, content_ct) =
@@ -247,8 +256,8 @@ pub(crate) async fn update_impl(
         .map_err(|e| e.to_string())?
         .ok_or("note not found")?;
 
-    let (title_nonce, title_ct) =
-        encrypt_with_vault(key, input.title.as_bytes(), id.as_bytes()).map_err(|e| e.to_string())?;
+    let (title_nonce, title_ct) = encrypt_with_vault(key, input.title.as_bytes(), id.as_bytes())
+        .map_err(|e| e.to_string())?;
 
     let content_json = serde_json::to_vec(&input.content).map_err(|e| e.to_string())?;
     let (content_nonce, vault_ct) =
@@ -465,7 +474,9 @@ const DEFAULT_NOTE_LIST_LIMIT: i64 = 500;
 /// a partial view — notes past the cap simply ceased to exist, with nothing said.
 #[tauri::command]
 pub async fn note_count(state: State<'_, AppState>) -> Result<i64, String> {
-    queries::note_count(&state.db).await.map_err(|e| e.to_string())
+    queries::note_count(&state.db)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Background images for every note that has one, keyed by note id.
@@ -511,7 +522,9 @@ pub(crate) async fn list_impl(
     for row in rows {
         // A protected title is sealed at rest; only the unlock cache has it.
         let title = if row.note_salt.is_some() {
-            state.note_title(&row.id).unwrap_or_else(|| LOCKED_TITLE.to_string())
+            state
+                .note_title(&row.id)
+                .unwrap_or_else(|| LOCKED_TITLE.to_string())
         } else {
             vault_title(key, &row, &row.title_ct)?
         };
@@ -543,16 +556,16 @@ pub(crate) async fn list_impl(
 }
 
 fn migrate_code_content(content: serde_json::Value) -> serde_json::Value {
-    let lang = content.get("lang").and_then(|v| v.as_str()).unwrap_or("text");
+    let lang = content
+        .get("lang")
+        .and_then(|v| v.as_str())
+        .unwrap_or("text");
     let body = content.get("body").and_then(|v| v.as_str()).unwrap_or("");
     serde_json::json!({ "body": format!("```{lang}\n{body}\n```") })
 }
 
 #[tauri::command]
-pub async fn note_get(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<NoteDetail, String> {
+pub async fn note_get(id: String, state: State<'_, AppState>) -> Result<NoteDetail, String> {
     let key = &state.device_key;
     let row = queries::note_get(&state.db, &id)
         .await
@@ -621,7 +634,13 @@ fn extract_preview(kind: &str, content: &serde_json::Value) -> Option<String> {
             // Strip markdown markers, collapse whitespace into a single line.
             let stripped: String = no_html
                 .chars()
-                .map(|c| if matches!(c, '#' | '*' | '`' | '>' | '-') { ' ' } else { c })
+                .map(|c| {
+                    if matches!(c, '#' | '*' | '`' | '>' | '-') {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
                 .collect();
             stripped.split_whitespace().collect::<Vec<_>>().join(" ")
         }
@@ -659,7 +678,11 @@ fn extract_preview(kind: &str, content: &serde_json::Value) -> Option<String> {
             let names: Vec<&str> = content
                 .get("columns")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|c| c.get("name").and_then(|n| n.as_str())).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
+                        .collect()
+                })
                 .unwrap_or_default();
             format!("{} rows · {}", rows, names.join(", "))
         }
@@ -712,7 +735,11 @@ pub(crate) fn copy_row(
         None => None,
     };
     let (title, content) = open_row(state, row)?;
-    let title = if mark_copy { format!("{title} (copy)") } else { title };
+    let title = if mark_copy {
+        format!("{title} (copy)")
+    } else {
+        title
+    };
     let key = &state.device_key;
     let id = Uuid::new_v4().to_string();
     let ts = now_secs();
@@ -773,20 +800,35 @@ pub(crate) async fn copy_impl(
     folder_id: Option<&str>,
 ) -> Result<CopyReport, String> {
     if let Some(f) = folder_id {
-        if crate::folders::queries::get(&state.db, f).await.map_err(|e| e.to_string())?.is_none() {
+        if crate::folders::queries::get(&state.db, f)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err("folder not found".into());
         }
     }
     let mut report = CopyReport::default();
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
-        if crate::folders::queries::is_trashed(&state.db, id).await.map_err(|e| e.to_string())? {
+        if crate::folders::queries::is_trashed(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
             continue;
         }
-        let Some(row) = queries::note_get(&state.db, id).await.map_err(|e| e.to_string())? else {
+        let Some(row) = queries::note_get(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?
+        else {
             continue;
         };
-        match copy_row(state, &row, folder_id, row.folder_id.as_deref() == folder_id) {
+        match copy_row(
+            state,
+            &row,
+            folder_id,
+            row.folder_id.as_deref() == folder_id,
+        ) {
             Ok(copy) => rows.push(copy),
             Err(e) if e == LOCKED => report.skipped_locked += 1,
             Err(e) => return Err(e),
@@ -794,7 +836,9 @@ pub(crate) async fn copy_impl(
     }
     let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
     for row in &rows {
-        queries::note_insert(&mut *tx, row).await.map_err(|e| e.to_string())?;
+        queries::note_insert(&mut *tx, row)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     report.copied = rows.into_iter().map(|r| r.id).collect();
@@ -836,7 +880,9 @@ pub(crate) fn open_row(state: &AppState, row: &NoteRow) -> Result<(String, Vec<u
 /// The title's password layer, if sealed. `None` for unprotected notes and for
 /// notes protected before titles were sealed (migrated on their next unlock).
 fn sealed_title(row: &NoteRow) -> Option<(&[u8], &[u8])> {
-    row.title_note_nonce.as_deref().map(|n| (n, row.title_ct.as_slice()))
+    row.title_note_nonce
+        .as_deref()
+        .map(|n| (n, row.title_ct.as_slice()))
 }
 
 /// Decrypt a title's device-key layer.
@@ -859,7 +905,11 @@ pub(crate) fn apply_sealed(row: &mut NoteRow, sealed: SealedNote) {
 /// Drops the list preview, which would sit outside the password layer. Leaves
 /// updated_at untouched so protecting/unlocking a note doesn't reorder a list
 /// sorted by "date modified".
-async fn persist_sealed(state: &AppState, mut row: NoteRow, sealed: SealedNote) -> Result<(), String> {
+async fn persist_sealed(
+    state: &AppState,
+    mut row: NoteRow,
+    sealed: SealedNote,
+) -> Result<(), String> {
     apply_sealed(&mut row, sealed);
     row.preview_text = None;
     queries::note_update(&state.db, &row)
@@ -941,12 +991,13 @@ async fn unprotect_impl(state: &AppState, id: &str, password: &str) -> Result<()
 
     // Regenerate the list preview now that the content is no longer gated —
     // encrypted, like every other write of this column.
-    let preview_text = decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|content| extract_preview(migrate_kind(&row.kind), &content))
-        .map(|p| encrypt_preview(&state.device_key, id, &p))
-        .transpose()?;
+    let preview_text =
+        decrypt_with_vault(&state.device_key, &row.nonce, &vault_ct, row.id.as_bytes())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|content| extract_preview(migrate_kind(&row.kind), &content))
+            .map(|p| encrypt_preview(&state.device_key, id, &p))
+            .transpose()?;
 
     row.content_ct = vault_ct;
     row.note_salt = None;
@@ -985,8 +1036,14 @@ async fn change_password_impl(
     let (vault_ct, vault_title_ct, _) = record_password_attempt(
         state,
         id,
-        open_note(old_password, &salt, &nonce, &row.content_ct, sealed_title(&row))
-            .map_err(|_| WRONG_PASSWORD.to_string()),
+        open_note(
+            old_password,
+            &salt,
+            &nonce,
+            &row.content_ct,
+            sealed_title(&row),
+        )
+        .map_err(|_| WRONG_PASSWORD.to_string()),
     )?;
     let vault_title_ct = vault_title_ct.unwrap_or_else(|| row.title_ct.clone());
     let title = vault_title(&state.device_key, &row, &vault_title_ct)?;
@@ -1179,9 +1236,14 @@ async fn recover_impl(
     };
     state.reset_passphrase_failures(id);
     let old_password = String::from_utf8(password_bytes).map_err(|_| WRONG_RECOVERY.to_string())?;
-    let (vault_ct, vault_title_ct, _) =
-        open_note(&old_password, &note_salt, &note_nonce, &row.content_ct, sealed_title(&row))
-            .map_err(|_| WRONG_RECOVERY.to_string())?;
+    let (vault_ct, vault_title_ct, _) = open_note(
+        &old_password,
+        &note_salt,
+        &note_nonce,
+        &row.content_ct,
+        sealed_title(&row),
+    )
+    .map_err(|_| WRONG_RECOVERY.to_string())?;
     let vault_title_ct = vault_title_ct.unwrap_or_else(|| row.title_ct.clone());
     let title = vault_title(&state.device_key, &row, &vault_title_ct)?;
     let sealed = seal_note(new_password, &vault_ct, &vault_title_ct).map_err(|e| e.to_string())?;
@@ -1334,7 +1396,9 @@ mod tests {
         let a = seed_note(&state, "a").await;
         let b = seed_note(&state, "b").await;
         let c = seed_note(&state, "c").await;
-        queries::notes_set_order(&state.db, &[c.clone(), a.clone(), b.clone()]).await.unwrap();
+        queries::notes_set_order(&state.db, &[c.clone(), a.clone(), b.clone()])
+            .await
+            .unwrap();
         let listed = list_impl(&state, None, None).await.unwrap();
         let order = |id: &str| listed.iter().find(|m| m.id == id).unwrap().sort_order;
         assert_eq!((order(&c), order(&a), order(&b)), (0, 1, 2));
@@ -1343,8 +1407,13 @@ mod tests {
     /// Whether the stored title opens with the device key alone, which is what
     /// anyone holding the DB plus the OS keychain has.
     fn title_readable_with_device_key(state: &AppState, row: &NoteRow) -> bool {
-        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-            .is_ok()
+        decrypt_with_vault(
+            &state.device_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes(),
+        )
+        .is_ok()
     }
 
     /// A note protected before titles were sealed: body under the password, title
@@ -1418,7 +1487,13 @@ mod tests {
         for n in 0..5 {
             seed_tagged(&state, &format!("note-{n}"), &[]).await;
         }
-        assert_eq!(queries::note_list_page(&state.db, 2, 0).await.unwrap().len(), 2);
+        assert_eq!(
+            queries::note_list_page(&state.db, 2, 0)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(queries::note_count(&state.db).await.unwrap(), 5);
     }
 
@@ -1591,19 +1666,32 @@ mod tests {
         let id = seed_note(&state, "committed body").await;
         let before = fetch(&state, &id).await;
 
-        draft_save_impl(&state, &id, &draft("new title", "half-written")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("new title", "half-written"))
+            .await
+            .unwrap();
 
         let after = fetch(&state, &id).await;
-        assert_eq!(before.content_ct, after.content_ct, "note body must not change");
-        assert_eq!(before.title_ct, after.title_ct, "note title must not change");
-        assert_eq!(before.updated_at, after.updated_at, "note must not look edited");
+        assert_eq!(
+            before.content_ct, after.content_ct,
+            "note body must not change"
+        );
+        assert_eq!(
+            before.title_ct, after.title_ct,
+            "note title must not change"
+        );
+        assert_eq!(
+            before.updated_at, after.updated_at,
+            "note must not look edited"
+        );
     }
 
     #[tokio::test]
     async fn a_draft_round_trips() {
         let state = test_state().await;
         let id = seed_note(&state, "body").await;
-        draft_save_impl(&state, &id, &draft("T", "in progress")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("T", "in progress"))
+            .await
+            .unwrap();
 
         let got = draft_get_impl(&state, &id).await.unwrap().expect("draft");
         assert_eq!(got.title, "T");
@@ -1622,8 +1710,12 @@ mod tests {
     async fn saving_a_draft_twice_overwrites_rather_than_duplicating() {
         let state = test_state().await;
         let id = seed_note(&state, "body").await;
-        draft_save_impl(&state, &id, &draft("A", "first")).await.unwrap();
-        draft_save_impl(&state, &id, &draft("B", "second")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("A", "first"))
+            .await
+            .unwrap();
+        draft_save_impl(&state, &id, &draft("B", "second"))
+            .await
+            .unwrap();
 
         let got = draft_get_impl(&state, &id).await.unwrap().expect("draft");
         assert_eq!(got.content["body"], "second");
@@ -1633,7 +1725,9 @@ mod tests {
     async fn discarding_a_draft_keeps_the_committed_note() {
         let state = test_state().await;
         let id = seed_note(&state, "committed body").await;
-        draft_save_impl(&state, &id, &draft("x", "scratch")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("x", "scratch"))
+            .await
+            .unwrap();
 
         let before = fetch(&state, &id).await;
         queries::draft_delete(&state.db, &id).await.unwrap();
@@ -1648,9 +1742,14 @@ mod tests {
     async fn a_draft_is_not_stored_in_the_clear() {
         let state = test_state().await;
         let id = seed_note(&state, "body").await;
-        draft_save_impl(&state, &id, &draft("t", "SENSITIVE-DRAFT-TEXT")).await.unwrap();
+        draft_save_impl(&state, &id, &draft("t", "SENSITIVE-DRAFT-TEXT"))
+            .await
+            .unwrap();
 
-        let row = queries::draft_get(&state.db, &id).await.unwrap().expect("row");
+        let row = queries::draft_get(&state.db, &id)
+            .await
+            .unwrap()
+            .expect("row");
         let raw = String::from_utf8_lossy(&row.ct);
         assert!(!raw.contains("SENSITIVE-DRAFT-TEXT"));
     }
@@ -1662,10 +1761,14 @@ mod tests {
         let state = test_state().await;
         let a = seed_note(&state, "a").await;
         let b = seed_note(&state, "b").await;
-        draft_save_impl(&state, &a, &draft("t", "secret")).await.unwrap();
+        draft_save_impl(&state, &a, &draft("t", "secret"))
+            .await
+            .unwrap();
 
         let row = queries::draft_get(&state.db, &a).await.unwrap().unwrap();
-        queries::draft_upsert(&state.db, &b, &row.nonce, &row.ct, row.updated_at).await.unwrap();
+        queries::draft_upsert(&state.db, &b, &row.nonce, &row.ct, row.updated_at)
+            .await
+            .unwrap();
 
         assert!(draft_get_impl(&state, &b).await.is_err());
     }
@@ -1677,7 +1780,9 @@ mod tests {
         let id = seed_note(&state, "body").await;
         protect_impl(&state, &id, "pw").await.unwrap();
 
-        assert!(draft_save_impl(&state, &id, &draft("t", "x")).await.is_err());
+        assert!(draft_save_impl(&state, &id, &draft("t", "x"))
+            .await
+            .is_err());
     }
 
     /// The list query selects a reduced column set; everything the list view
@@ -1705,7 +1810,10 @@ mod tests {
             decrypt_tags(&state.device_key, &row.id, &row.tags).unwrap(),
             vec!["home".to_string(), "urgent".to_string()]
         );
-        assert!(row.note_salt.is_none(), "unprotected note reports no password");
+        assert!(
+            row.note_salt.is_none(),
+            "unprotected note reports no password"
+        );
 
         // The whole point of the lean SELECT: no body ciphertext on this path.
         assert!(row.content_ct.is_empty());
@@ -1734,7 +1842,10 @@ mod tests {
         protect_impl(&state, &id, "pw").await.unwrap();
 
         let row = fetch(&state, &id).await;
-        assert!(row.title_note_nonce.is_some(), "title should carry a password layer");
+        assert!(
+            row.title_note_nonce.is_some(),
+            "title should carry a password layer"
+        );
         assert!(
             !title_readable_with_device_key(&state, &row),
             "the device key alone must not open a protected title"
@@ -1747,7 +1858,11 @@ mod tests {
         let state = test_state().await;
         let id = seed_tagged(&state, "Diary", &[]).await;
         protect_impl(&state, &id, "pw").await.unwrap();
-        assert_eq!(listed_title(&state, &id).await, "Diary", "protect leaves it unlocked");
+        assert_eq!(
+            listed_title(&state, &id).await,
+            "Diary",
+            "protect leaves it unlocked"
+        );
 
         state.lock_note(&id);
         assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE);
@@ -1763,7 +1878,10 @@ mod tests {
         let id = seed_note(&state, "body").await;
         protect_impl(&state, &id, "pw").await.unwrap();
         state.lock_note(&id);
-        assert_eq!(open_row(&state, &fetch(&state, &id).await).unwrap_err(), LOCKED);
+        assert_eq!(
+            open_row(&state, &fetch(&state, &id).await).unwrap_err(),
+            LOCKED
+        );
     }
 
     #[tokio::test]
@@ -1785,8 +1903,15 @@ mod tests {
         let id = seed_note(&state, "old secret").await;
         protect_legacy(&state, &id, "pw").await;
         let before = fetch(&state, &id).await;
-        assert!(title_readable_with_device_key(&state, &before), "precondition: legacy row");
-        assert_eq!(listed_title(&state, &id).await, LOCKED_TITLE, "locked shows the placeholder");
+        assert!(
+            title_readable_with_device_key(&state, &before),
+            "precondition: legacy row"
+        );
+        assert_eq!(
+            listed_title(&state, &id).await,
+            LOCKED_TITLE,
+            "locked shows the placeholder"
+        );
 
         unlock_impl(&state, &id, "pw").await.unwrap();
         let after = fetch(&state, &id).await;
@@ -1796,11 +1921,17 @@ mod tests {
             "the device-key copy must be gone after the first unlock"
         );
         assert_eq!(listed_title(&state, &id).await, "Secret");
-        assert_eq!(decrypt_content(&state, &after).unwrap()["body"], "old secret");
+        assert_eq!(
+            decrypt_content(&state, &after).unwrap()["body"],
+            "old secret"
+        );
 
         state.lock_note(&id);
         unlock_impl(&state, &id, "pw").await.unwrap();
-        assert_eq!(open_row(&state, &fetch(&state, &id).await).unwrap().0, "Secret");
+        assert_eq!(
+            open_row(&state, &fetch(&state, &id).await).unwrap().0,
+            "Secret"
+        );
     }
 
     /// Both need the title before they re-seal it, including a legacy row whose
@@ -1810,7 +1941,9 @@ mod tests {
         let state = test_state().await;
         let id = seed_note(&state, "x").await;
         protect_legacy(&state, &id, "pw").await;
-        change_password_impl(&state, &id, "pw", "pw2").await.unwrap();
+        change_password_impl(&state, &id, "pw", "pw2")
+            .await
+            .unwrap();
         let row = fetch(&state, &id).await;
         assert!(!title_readable_with_device_key(&state, &row));
         state.lock_note(&id);
@@ -1874,16 +2007,25 @@ mod tests {
     #[tokio::test]
     async fn a_new_note_lands_in_the_folder_it_was_created_in() {
         let state = test_state().await;
-        let folder = crate::folders::commands::create_impl(&state, "Work", None).await.unwrap();
-        let meta = create_impl(&state, new_note_in(Some(folder.clone()))).await.unwrap();
+        let folder = crate::folders::commands::create_impl(&state, "Work", None)
+            .await
+            .unwrap();
+        let meta = create_impl(&state, new_note_in(Some(folder.clone())))
+            .await
+            .unwrap();
         assert_eq!(meta.folder_id.as_deref(), Some(folder.as_str()));
-        assert_eq!(fetch(&state, &meta.id).await.folder_id.as_deref(), Some(folder.as_str()));
+        assert_eq!(
+            fetch(&state, &meta.id).await.folder_id.as_deref(),
+            Some(folder.as_str())
+        );
     }
 
     #[tokio::test]
     async fn a_new_note_for_a_missing_folder_lands_at_the_root() {
         let state = test_state().await;
-        let meta = create_impl(&state, new_note_in(Some("gone".into()))).await.unwrap();
+        let meta = create_impl(&state, new_note_in(Some("gone".into())))
+            .await
+            .unwrap();
         assert_eq!(meta.folder_id, None);
         assert_eq!(fetch(&state, &meta.id).await.folder_id, None);
     }
@@ -1894,8 +2036,20 @@ mod tests {
         for n in 0..3 {
             seed_tagged(&state, &format!("note-{n}"), &[]).await;
         }
-        assert_eq!(queries::note_list_page(&state.db, 2, 0).await.unwrap().len(), 2);
-        assert_eq!(queries::note_list_page(&state.db, 2, 2).await.unwrap().len(), 1);
+        assert_eq!(
+            queries::note_list_page(&state.db, 2, 0)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            queries::note_list_page(&state.db, 2, 2)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1925,7 +2079,9 @@ mod tests {
         let id = seed_note(&state, "x").await;
         protect_impl(&state, &id, "pw").await.unwrap();
         add_recovery_impl(&state, &id, "pw").await.unwrap();
-        assert!(recover_impl(&state, &id, "AAAA-BBBB-CCCC", "new").await.is_err());
+        assert!(recover_impl(&state, &id, "AAAA-BBBB-CCCC", "new")
+            .await
+            .is_err());
         // The real password still works — a failed recovery didn't corrupt it.
         assert!(unlock_impl(&state, &id, "pw").await.is_ok());
     }
@@ -1946,8 +2102,13 @@ mod tests {
         let id = seed_note(&state, "x").await;
         protect_impl(&state, &id, "pw").await.unwrap();
         add_recovery_impl(&state, &id, "pw").await.unwrap();
-        change_password_impl(&state, &id, "pw", "pw2").await.unwrap();
-        assert!(fetch(&state, &id).await.rc_salt.is_none(), "recovery reset on pw change");
+        change_password_impl(&state, &id, "pw", "pw2")
+            .await
+            .unwrap();
+        assert!(
+            fetch(&state, &id).await.rc_salt.is_none(),
+            "recovery reset on pw change"
+        );
     }
 
     #[tokio::test]
@@ -1958,7 +2119,10 @@ mod tests {
         protect_impl(&state, &id, "hunter2").await.unwrap();
         let row = fetch(&state, &id).await;
         assert!(row.note_salt.is_some(), "note should be protected");
-        assert!(row.preview_text.is_none(), "preview must be cleared when protected");
+        assert!(
+            row.preview_text.is_none(),
+            "preview must be cleared when protected"
+        );
 
         // Cached from protect → readable.
         assert_eq!(decrypt_content(&state, &row).unwrap()["body"], "top secret");
@@ -1980,8 +2144,12 @@ mod tests {
         let id = seed_note(&state, "data").await;
         protect_impl(&state, &id, "old").await.unwrap();
 
-        assert!(change_password_impl(&state, &id, "wrong", "new").await.is_err());
-        change_password_impl(&state, &id, "old", "new").await.unwrap();
+        assert!(change_password_impl(&state, &id, "wrong", "new")
+            .await
+            .is_err());
+        change_password_impl(&state, &id, "old", "new")
+            .await
+            .unwrap();
 
         state.lock_note(&id);
         assert!(unlock_impl(&state, &id, "old").await.is_err());
@@ -2002,7 +2170,10 @@ mod tests {
         let row = fetch(&state, &id).await;
         assert!(row.note_salt.is_none(), "protection removed");
         assert!(row.preview_text.is_some(), "preview regenerated");
-        assert_eq!(decrypt_content(&state, &row).unwrap()["body"], "visible again");
+        assert_eq!(
+            decrypt_content(&state, &row).unwrap()["body"],
+            "visible again"
+        );
     }
 
     #[tokio::test]
@@ -2056,7 +2227,9 @@ mod tests {
         row.bg_color = Some("#ffe3f1".into());
         row.show_preview = false;
         queries::note_update(&state.db, &row).await.unwrap();
-        let dest = crate::folders::commands::create_impl(&state, "Dest", None).await.unwrap();
+        let dest = crate::folders::commands::create_impl(&state, "Dest", None)
+            .await
+            .unwrap();
 
         let report = copy(&state, &[&id], Some(&dest)).await;
         assert_eq!(report.skipped_locked, 0);
@@ -2073,7 +2246,10 @@ mod tests {
         assert_eq!(dup.folder_id.as_deref(), Some(dest.as_str()));
         assert_eq!(orig.folder_id, None, "the original stays where it was");
         let copied = fetch(&state, new_id).await;
-        assert_eq!(decrypt_content(&state, &copied), decrypt_content(&state, &row));
+        assert_eq!(
+            decrypt_content(&state, &copied),
+            decrypt_content(&state, &row)
+        );
         // A transfer dedups on origin, so a copy must not claim the original's.
         assert_eq!(copied.origin_note_id, *new_id);
     }
@@ -2083,7 +2259,10 @@ mod tests {
         let state = test_state().await;
         let id = seed_tagged(&state, "Groceries", &[]).await;
         let report = copy(&state, &[&id], None).await;
-        assert_eq!(listed_title(&state, &report.copied[0]).await, "Groceries (copy)");
+        assert_eq!(
+            listed_title(&state, &report.copied[0]).await,
+            "Groceries (copy)"
+        );
     }
 
     #[tokio::test]
@@ -2097,14 +2276,20 @@ mod tests {
         let new_id = report.copied[0].clone();
         let copied = fetch(&state, &new_id).await;
         assert!(copied.note_salt.is_some());
-        assert!(copied.rc_salt.is_none(), "a recovery code belongs to the original only");
+        assert!(
+            copied.rc_salt.is_none(),
+            "a recovery code belongs to the original only"
+        );
         assert!(!title_readable_with_device_key(&state, &copied));
 
         state.lock_note(&new_id);
         assert_eq!(decrypt_content(&state, &copied).unwrap_err(), LOCKED);
         assert!(unlock_impl(&state, &new_id, "other").await.is_err());
         unlock_impl(&state, &new_id, "pw").await.unwrap();
-        assert_eq!(decrypt_content(&state, &copied).unwrap()["body"], "secret body");
+        assert_eq!(
+            decrypt_content(&state, &copied).unwrap()["body"],
+            "secret body"
+        );
         assert_eq!(listed_title(&state, &new_id).await, "Secret (copy)");
     }
 
@@ -2126,7 +2311,9 @@ mod tests {
     async fn trashed_notes_are_not_copied() {
         let state = test_state().await;
         let id = seed_note(&state, "a").await;
-        crate::trash::queries::trash(&state.db, &[id.clone()], now_secs()).await.unwrap();
+        crate::trash::queries::trash(&state.db, &[id.clone()], now_secs())
+            .await
+            .unwrap();
         assert!(copy(&state, &[&id], None).await.copied.is_empty());
     }
 }
@@ -2147,13 +2334,19 @@ mod bg_image_tests {
 
     #[test]
     fn valid_png_data_uri_is_accepted() {
-        let uri = format!("data:image/png;base64,{}", STANDARD.encode(b"tiny png bytes"));
+        let uri = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(b"tiny png bytes")
+        );
         assert!(validate_bg_image(&Some(uri)).is_ok());
     }
 
     #[test]
     fn valid_webp_data_uri_is_accepted() {
-        let uri = format!("data:image/webp;base64,{}", STANDARD.encode(b"tiny webp bytes"));
+        let uri = format!(
+            "data:image/webp;base64,{}",
+            STANDARD.encode(b"tiny webp bytes")
+        );
         assert!(validate_bg_image(&Some(uri)).is_ok());
     }
 
@@ -2213,13 +2406,19 @@ mod tags_tests {
         // "" base64-decodes to a valid, but frame-too-short, empty byte
         // string — must fall back to the legacy plaintext path, not error.
         let key = key();
-        assert_eq!(decrypt_tags(&key, "note-1", "").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            decrypt_tags(&key, "note-1", "").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn legacy_empty_json_array_is_empty_tags() {
         let key = key();
-        assert_eq!(decrypt_tags(&key, "note-1", "[]").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            decrypt_tags(&key, "note-1", "[]").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

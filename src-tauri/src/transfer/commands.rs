@@ -4,11 +4,11 @@ use crate::{
     state::{now_secs, AppState, TransportKind},
     transfer::{blob::TransferBlob, lan::decrypt_transfer},
 };
+use if_addrs;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
-use if_addrs;
 
 fn infer_content_hint(kind: &str, content: &serde_json::Value) -> Option<String> {
     match kind {
@@ -21,7 +21,10 @@ fn infer_content_hint(kind: &str, content: &serde_json::Value) -> Option<String>
     let body = content.get("body").and_then(|v| v.as_str()).unwrap_or("");
     for line in body.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") && trimmed.len() > 3 && trimmed.as_bytes()[3].is_ascii_alphanumeric() {
+        if trimmed.starts_with("```")
+            && trimmed.len() > 3
+            && trimmed.as_bytes()[3].is_ascii_alphanumeric()
+        {
             return Some("code".into());
         }
     }
@@ -33,7 +36,11 @@ fn infer_content_hint(kind: &str, content: &serde_json::Value) -> Option<String>
                 return Some("markdown".into());
             }
         }
-        if trimmed.starts_with("> ") || trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        if trimmed.starts_with("> ")
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+        {
             return Some("markdown".into());
         }
     }
@@ -153,7 +160,9 @@ pub async fn peer_add_manual(
     state: State<'_, AppState>,
 ) -> Result<PeerJson, String> {
     let (host, port) = split_host_port(&address)?;
-    let name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
+    let name = resolve_device_name(&state.db)
+        .await
+        .unwrap_or_else(|_| "panote-device".into());
     let peer = super::lan::hello_probe(&state, &host, port, &name)
         .await
         .map_err(|e| e.to_string())?;
@@ -254,8 +263,19 @@ pub async fn resolve_device_name(pool: &sqlx::SqlitePool) -> anyhow::Result<Stri
 #[tauri::command]
 pub fn device_ips() -> Vec<String> {
     const VPN_PREFIXES: &[&str] = &[
-        "tun", "utun", "tap", "wg", "proton", "vpn", "docker", "veth", "br-",
-        "virbr", "vmnet", "vbox", "tailscale",
+        "tun",
+        "utun",
+        "tap",
+        "wg",
+        "proton",
+        "vpn",
+        "docker",
+        "veth",
+        "br-",
+        "virbr",
+        "vmnet",
+        "vbox",
+        "tailscale",
     ];
     if_addrs::get_if_addrs()
         .unwrap_or_default()
@@ -329,17 +349,18 @@ pub async fn note_send(
     };
 
     let (address, port, via, peer_name) = peer;
-    let device_name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
+    let device_name = resolve_device_name(&state.db)
+        .await
+        .unwrap_or_else(|_| "panote-device".into());
     let result = match via {
         TransportKind::Lan => {
             super::lan::send_note(&state, &note_id, &address, port, &passphrase, &device_name).await
         }
-        TransportKind::Ble => {
-            super::ble::send_note(&state, &note_id, &peer_id).await
-        }
+        TransportKind::Ble => super::ble::send_note(&state, &note_id, &peer_id).await,
     };
     if result.is_ok() {
-        let _ = queries::known_peer_record_transfer(&state.db, &address, &peer_name, now_secs()).await;
+        let _ =
+            queries::known_peer_record_transfer(&state.db, &address, &peer_name, now_secs()).await;
     }
     result
 }
@@ -363,15 +384,19 @@ pub async fn notes_send(
     };
 
     let (address, port, via, peer_name) = peer;
-    let device_name = resolve_device_name(&state.db).await.unwrap_or_else(|_| "panote-device".into());
+    let device_name = resolve_device_name(&state.db)
+        .await
+        .unwrap_or_else(|_| "panote-device".into());
     let result = match via {
         TransportKind::Lan => {
-            super::lan::send_notes(&state, &note_ids, &address, port, &passphrase, &device_name).await
+            super::lan::send_notes(&state, &note_ids, &address, port, &passphrase, &device_name)
+                .await
         }
         TransportKind::Ble => Err("BLE batch send not supported".into()),
     };
     if result.is_ok() {
-        let _ = queries::known_peer_record_transfer(&state.db, &address, &peer_name, now_secs()).await;
+        let _ =
+            queries::known_peer_record_transfer(&state.db, &address, &peer_name, now_secs()).await;
     }
     result
 }
@@ -390,7 +415,8 @@ pub fn transfer_offer_respond(
         .unwrap()
         .remove(&offer_id)
         .ok_or("no pending offer with this ID")?;
-    tx.send(passphrase).map_err(|_| "offer connection already closed".to_string())
+    tx.send(passphrase)
+        .map_err(|_| "offer connection already closed".to_string())
 }
 
 // ---- Pending offers ----
@@ -470,7 +496,8 @@ pub async fn note_receive_accept(
     let note_id = import_blob(&state, &state.device_key, blob)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
+    let _ =
+        queries::known_peer_record_transfer(&state.db, &from_peer, &from_peer, now_secs()).await;
     Ok(note_id)
 }
 
@@ -553,7 +580,10 @@ pub async fn import_blob_detailed(
 
     // N3: encrypt bound to the id this row will actually be stored under —
     // an update reuses the existing row's id, an insert mints a fresh one.
-    let target_id = existing.as_ref().map(|p| p.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
+    let target_id = existing
+        .as_ref()
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let (title_nonce, title_ct) =
         encrypt_with_vault(device_key, blob.title.as_bytes(), target_id.as_bytes())?;
     let content_json = serde_json::to_vec(&blob.content)?;
@@ -668,9 +698,9 @@ pub async fn import_blob_detailed(
             Ok(Some(folder_id)) => {
                 // A folder that cannot be created must not lose the note, so this
                 // is deliberately not fatal - the note simply lands at the root.
-                let _ = crate::folders::queries::set_note_folder(
-                    &state.db, &id, Some(&folder_id), ts,
-                ).await;
+                let _ =
+                    crate::folders::queries::set_note_folder(&state.db, &id, Some(&folder_id), ts)
+                        .await;
             }
             _ => eprintln!("[transfer] could not resolve folder path for an imported note"),
         }
@@ -686,40 +716,74 @@ mod manual_peer_address_tests {
 
     #[test]
     fn a_bare_host_uses_the_default_port() {
-        assert_eq!(split_host_port("192.168.1.10").unwrap(), ("192.168.1.10".into(), TRANSFER_PORT));
+        assert_eq!(
+            split_host_port("192.168.1.10").unwrap(),
+            ("192.168.1.10".into(), TRANSFER_PORT)
+        );
     }
 
     #[test]
     fn an_explicit_port_is_honoured() {
-        assert_eq!(split_host_port("192.168.1.10:9000").unwrap(), ("192.168.1.10".into(), 9000));
+        assert_eq!(
+            split_host_port("192.168.1.10:9000").unwrap(),
+            ("192.168.1.10".into(), 9000)
+        );
     }
 
     #[test]
     fn a_hostname_works_too() {
-        assert_eq!(split_host_port("laptop.local:47391").unwrap(), ("laptop.local".into(), 47391));
+        assert_eq!(
+            split_host_port("laptop.local:47391").unwrap(),
+            ("laptop.local".into(), 47391)
+        );
     }
 
     #[test]
     fn surrounding_whitespace_is_forgiven() {
-        assert_eq!(split_host_port("  10.0.2.2:47291  ").unwrap(), ("10.0.2.2".into(), 47291));
+        assert_eq!(
+            split_host_port("  10.0.2.2:47291  ").unwrap(),
+            ("10.0.2.2".into(), 47291)
+        );
     }
 
     // Bare IPv6 is full of colons, so it must not be split as host:port.
     #[test]
     fn a_bare_ipv6_literal_is_not_split() {
-        assert_eq!(split_host_port("fe80::1").unwrap(), ("fe80::1".into(), TRANSFER_PORT));
-        assert_eq!(split_host_port("::1").unwrap(), ("::1".into(), TRANSFER_PORT));
+        assert_eq!(
+            split_host_port("fe80::1").unwrap(),
+            ("fe80::1".into(), TRANSFER_PORT)
+        );
+        assert_eq!(
+            split_host_port("::1").unwrap(),
+            ("::1".into(), TRANSFER_PORT)
+        );
     }
 
     #[test]
     fn a_bracketed_ipv6_can_carry_a_port() {
-        assert_eq!(split_host_port("[::1]:47291").unwrap(), ("::1".into(), 47291));
-        assert_eq!(split_host_port("[fe80::1]").unwrap(), ("fe80::1".into(), TRANSFER_PORT));
+        assert_eq!(
+            split_host_port("[::1]:47291").unwrap(),
+            ("::1".into(), 47291)
+        );
+        assert_eq!(
+            split_host_port("[fe80::1]").unwrap(),
+            ("fe80::1".into(), TRANSFER_PORT)
+        );
     }
 
     #[test]
     fn rubbish_is_rejected_rather_than_silently_defaulted() {
-        for bad in ["", "   ", "host:", "host:0", "host:99999", "host:abc", ":47291", "[::1", "[]:1"] {
+        for bad in [
+            "",
+            "   ",
+            "host:",
+            "host:0",
+            "host:99999",
+            "host:abc",
+            ":47291",
+            "[::1",
+            "[]:1",
+        ] {
             assert!(split_host_port(bad).is_err(), "{bad:?} should be rejected");
         }
     }
@@ -762,7 +826,10 @@ mod tests {
         let state = test_state().await;
         let blob = sample_blob();
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.kind, "markdown");
         assert!(row.note_salt.is_none());
     }
@@ -773,12 +840,24 @@ mod tests {
         // whether to protect. The device key alone reads the content.
         let state = test_state().await;
         let blob = sample_blob();
-        let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        assert!(row.note_salt.is_none(), "imported note must arrive unprotected");
-        let content_bytes =
-            decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
-                .unwrap();
+        let note_id = import_blob(&state, &state.device_key, blob.clone())
+            .await
+            .unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.note_salt.is_none(),
+            "imported note must arrive unprotected"
+        );
+        let content_bytes = decrypt_with_vault(
+            &state.device_key,
+            &row.nonce,
+            &row.content_ct,
+            row.id.as_bytes(),
+        )
+        .unwrap();
         let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
         assert_eq!(content, blob.content);
     }
@@ -787,11 +866,20 @@ mod tests {
     async fn import_blob_encrypts_title_correctly() {
         let state = test_state().await;
         let blob = sample_blob();
-        let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        let title_bytes =
-            decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-                .unwrap();
+        let note_id = import_blob(&state, &state.device_key, blob.clone())
+            .await
+            .unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let title_bytes = decrypt_with_vault(
+            &state.device_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes(),
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(title_bytes).unwrap(), blob.title);
     }
 
@@ -799,11 +887,20 @@ mod tests {
     async fn import_blob_encrypts_content_correctly() {
         let state = test_state().await;
         let blob = sample_blob();
-        let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        let content_bytes =
-            decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
-                .unwrap();
+        let note_id = import_blob(&state, &state.device_key, blob.clone())
+            .await
+            .unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let content_bytes = decrypt_with_vault(
+            &state.device_key,
+            &row.nonce,
+            &row.content_ct,
+            row.id.as_bytes(),
+        )
+        .unwrap();
         let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
         assert_eq!(content, blob.content);
     }
@@ -811,10 +908,17 @@ mod tests {
     #[tokio::test]
     async fn import_blob_preserves_tags() {
         let state = test_state().await;
-        let blob = TransferBlob { tags: vec!["rust".into(), "shared".into()], ..sample_blob() };
+        let blob = TransferBlob {
+            tags: vec!["rust".into(), "shared".into()],
+            ..sample_blob()
+        };
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
-        let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags).unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let tags =
+            crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags).unwrap();
         assert_eq!(tags, vec!["rust", "shared"]);
     }
 
@@ -831,8 +935,13 @@ mod tests {
     async fn import_blob_preserves_original_created_at() {
         let state = test_state().await;
         let blob = sample_blob();
-        let note_id = import_blob(&state, &state.device_key, blob.clone()).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        let note_id = import_blob(&state, &state.device_key, blob.clone())
+            .await
+            .unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.created_at, blob.created_at);
     }
 
@@ -841,11 +950,18 @@ mod tests {
         let state = test_state().await;
         let blob = sample_blob();
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
         let wrong_key = derive_key("different-key", &[0u8; 16]).unwrap();
-        assert!(
-            decrypt_with_vault(&wrong_key, &row.title_nonce, &row.title_ct, row.id.as_bytes()).is_err()
-        );
+        assert!(decrypt_with_vault(
+            &wrong_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes()
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -877,7 +993,10 @@ mod tests {
         const VALID: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         for _ in 0..20 {
             let code = generate_pairing_code();
-            assert!(code.chars().all(|c| VALID.contains(c)), "unexpected char in code: {code}");
+            assert!(
+                code.chars().all(|c| VALID.contains(c)),
+                "unexpected char in code: {code}"
+            );
         }
     }
 
@@ -912,10 +1031,17 @@ mod tests {
         // Simulate what note_receive_accept does: peek then decrypt
         let t = state.peek_pending("t-retry").unwrap();
         let result = crate::transfer::lan::decrypt_transfer(
-            &t.transfer_salt, &t.transfer_nonce, &t.transfer_ct, "wrong",
+            &t.transfer_salt,
+            &t.transfer_nonce,
+            &t.transfer_ct,
+            "wrong",
         );
         assert!(result.is_err(), "wrong passphrase must fail");
-        assert_eq!(state.list_pending().len(), 1, "transfer must remain pending after wrong code");
+        assert_eq!(
+            state.list_pending().len(),
+            1,
+            "transfer must remain pending after wrong code"
+        );
     }
 
     #[tokio::test]
@@ -943,15 +1069,23 @@ mod tests {
         // First attempt: wrong code
         let t = state.peek_pending("t-retry2").unwrap();
         assert!(crate::transfer::lan::decrypt_transfer(
-            &t.transfer_salt, &t.transfer_nonce, &t.transfer_ct, "wrong"
-        ).is_err());
+            &t.transfer_salt,
+            &t.transfer_nonce,
+            &t.transfer_ct,
+            "wrong"
+        )
+        .is_err());
         assert_eq!(state.list_pending().len(), 1);
 
         // Second attempt: correct code
         let t = state.peek_pending("t-retry2").unwrap();
         let blob = crate::transfer::lan::decrypt_transfer(
-            &t.transfer_salt, &t.transfer_nonce, &t.transfer_ct, passphrase,
-        ).unwrap();
+            &t.transfer_salt,
+            &t.transfer_nonce,
+            &t.transfer_ct,
+            passphrase,
+        )
+        .unwrap();
         state.take_pending("t-retry2");
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
         assert!(!note_id.is_empty());
@@ -995,17 +1129,26 @@ mod tests {
 
     #[test]
     fn hint_legacy_text_is_plain() {
-        assert_eq!(infer_content_hint("text", &json!({})).as_deref(), Some("plain"));
+        assert_eq!(
+            infer_content_hint("text", &json!({})).as_deref(),
+            Some("plain")
+        );
     }
 
     #[test]
     fn hint_legacy_markdown_is_markdown() {
-        assert_eq!(infer_content_hint("markdown", &json!({})).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("markdown", &json!({})).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_legacy_code_is_code() {
-        assert_eq!(infer_content_hint("code", &json!({})).as_deref(), Some("code"));
+        assert_eq!(
+            infer_content_hint("code", &json!({})).as_deref(),
+            Some("code")
+        );
     }
 
     #[test]
@@ -1016,49 +1159,73 @@ mod tests {
     #[test]
     fn hint_document_plain_text() {
         let content = json!({ "body": "Just some plain text" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("plain"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("plain")
+        );
     }
 
     #[test]
     fn hint_document_with_code_fence() {
         let content = json!({ "body": "Some text\n```rust\nfn main() {}\n```" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("code"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("code")
+        );
     }
 
     #[test]
     fn hint_document_with_heading() {
         let content = json!({ "body": "# My Title\nSome content" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_document_with_bold() {
         let content = json!({ "body": "This has **bold** text" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_document_with_list() {
         let content = json!({ "body": "- item one\n- item two" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_document_with_link() {
         let content = json!({ "body": "Check [this](https://example.com)" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_document_with_blockquote() {
         let content = json!({ "body": "> quoted text" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("markdown"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("markdown")
+        );
     }
 
     #[test]
     fn hint_document_empty_body_is_plain() {
         let content = json!({ "body": "" });
-        assert_eq!(infer_content_hint("document", &content).as_deref(), Some("plain"));
+        assert_eq!(
+            infer_content_hint("document", &content).as_deref(),
+            Some("plain")
+        );
     }
 
     #[tokio::test]
@@ -1066,7 +1233,10 @@ mod tests {
         let state = test_state().await;
         let blob = sample_blob(); // kind: "markdown"
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.content_hint.as_deref(), Some("markdown"));
     }
 
@@ -1079,7 +1249,10 @@ mod tests {
             ..sample_blob()
         };
         let note_id = import_blob(&state, &state.device_key, blob).await.unwrap();
-        let row = queries::note_get(&state.db, &note_id).await.unwrap().unwrap();
+        let row = queries::note_get(&state.db, &note_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.content_hint.as_deref(), Some("code"));
     }
     #[tokio::test]
@@ -1095,7 +1268,9 @@ mod tests {
     #[tokio::test]
     async fn an_unrecognised_autosave_value_reads_as_off() {
         let state = test_state().await;
-        queries::device_setting_set(&state.db, AUTOSAVE_KEY, "yes please").await.unwrap();
+        queries::device_setting_set(&state.db, AUTOSAVE_KEY, "yes please")
+            .await
+            .unwrap();
         assert!(!get_autosave_impl(&state).await.unwrap());
     }
 }

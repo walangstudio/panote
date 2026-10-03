@@ -128,18 +128,31 @@ async fn await_pending(state: &AppState) {
 async fn open(state: &AppState, id: &str) -> (String, String, Vec<String>) {
     let row = queries::note_get(&state.db, id).await.unwrap().unwrap();
     let title = String::from_utf8(
-        decrypt_with_vault(&state.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-            .expect("receiver must be able to decrypt the title it stored"),
+        decrypt_with_vault(
+            &state.device_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes(),
+        )
+        .expect("receiver must be able to decrypt the title it stored"),
     )
     .unwrap();
-    let content_bytes =
-        decrypt_with_vault(&state.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
-            .expect("receiver must be able to decrypt the content it stored");
+    let content_bytes = decrypt_with_vault(
+        &state.device_key,
+        &row.nonce,
+        &row.content_ct,
+        row.id.as_bytes(),
+    )
+    .expect("receiver must be able to decrypt the content it stored");
     let content: serde_json::Value = serde_json::from_slice(&content_bytes).unwrap();
     // Tags are encrypted alongside the rest, not stored as readable JSON.
     let tags = crate::notes::commands::decrypt_tags(&state.device_key, &row.id, &row.tags)
         .expect("receiver must be able to decrypt the tags it stored");
-    (title, content["body"].as_str().unwrap_or_default().to_string(), tags)
+    (
+        title,
+        content["body"].as_str().unwrap_or_default().to_string(),
+        tags,
+    )
 }
 
 /// Full rows for everything the receiver holds.
@@ -173,21 +186,38 @@ async fn send_to_a_real_device() {
     let probed = super::lan::hello_probe(&alice, &host, port, "WindowsHarness")
         .await
         .expect("TLS handshake with the real device should succeed");
-    println!("handshake ok: {} at {}:{}", probed.name, probed.address, probed.port);
+    println!(
+        "handshake ok: {} at {}:{}",
+        probed.name, probed.address, probed.port
+    );
 
     // Both cases in one run: a note in no folder must keep working exactly as
     // before, and a nested one should rebuild its path on the far device.
-    let loose = seed(&alice, "No folder", "should land at the root", &["cross-device"]).await;
+    let loose = seed(
+        &alice,
+        "No folder",
+        "should land at the root",
+        &["cross-device"],
+    )
+    .await;
     send_note(&alice, &loose, &host, port, CODE, "WindowsHarness")
         .await
         .expect("a note with no folder should send");
     println!("sent 'No folder' (root)");
 
-    let work = crate::folders::commands::create_impl(&alice, "Work", None).await.unwrap();
+    let work = crate::folders::commands::create_impl(&alice, "Work", None)
+        .await
+        .unwrap();
     let clients = crate::folders::commands::create_impl(&alice, "Clients", Some(&work))
         .await
         .unwrap();
-    let filed = seed(&alice, "In a folder", "should land in Work/Clients", &["cross-device"]).await;
+    let filed = seed(
+        &alice,
+        "In a folder",
+        "should land in Work/Clients",
+        &["cross-device"],
+    )
+    .await;
     crate::folders::queries::set_note_folder(&alice.db, &filed, Some(&clients), 1)
         .await
         .unwrap();
@@ -215,9 +245,14 @@ async fn a_note_sent_from_one_device_arrives_on_the_other() {
 
     // It waits for the recipient rather than landing unannounced.
     assert_eq!(bob.list_pending().len(), 1, "a transfer should be waiting");
-    assert!(received(&bob).await.is_empty(), "nothing lands before the code is entered");
+    assert!(
+        received(&bob).await.is_empty(),
+        "nothing lands before the code is entered"
+    );
 
-    accept_pending(&bob, CODE).await.expect("the right code should open it");
+    accept_pending(&bob, CODE)
+        .await
+        .expect("the right code should open it");
 
     let rows = received(&bob).await;
     assert_eq!(rows.len(), 1);
@@ -233,20 +268,33 @@ async fn a_note_sent_from_one_device_arrives_on_the_other() {
 async fn the_note_is_stored_under_the_receivers_own_key() {
     let alice = device("alice").await;
     let bob = device("bob").await;
-    assert_ne!(alice.device_key, bob.device_key, "the two devices must differ");
+    assert_ne!(
+        alice.device_key, bob.device_key,
+        "the two devices must differ"
+    );
     let note_id = seed(&alice, "Recipe", "sourdough starter", &[]).await;
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     accept_pending(&bob, CODE).await.unwrap();
 
     let listed = received(&bob).await;
-    let row = queries::note_get(&bob.db, &listed[0].id).await.unwrap().unwrap();
+    let row = queries::note_get(&bob.db, &listed[0].id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(open(&bob, &row.id).await.1, "sourdough starter");
     assert!(
-        decrypt_with_vault(&alice.device_key, &row.nonce, &row.content_ct, row.id.as_bytes())
-            .is_err(),
+        decrypt_with_vault(
+            &alice.device_key,
+            &row.nonce,
+            &row.content_ct,
+            row.id.as_bytes()
+        )
+        .is_err(),
         "the sender's key must not open the receiver's copy",
     );
 }
@@ -258,14 +306,28 @@ async fn the_wrong_code_opens_nothing_and_allows_a_retry() {
     let note_id = seed(&alice, "Secret", "do not leak", &[]).await;
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
 
-    assert!(accept_pending(&bob, "WRONGC").await.is_err(), "a wrong code must not decrypt");
-    assert!(received(&bob).await.is_empty(), "nothing may land on a wrong code");
-    assert_eq!(bob.list_pending().len(), 1, "the transfer stays pending so it can be retried");
+    assert!(
+        accept_pending(&bob, "WRONGC").await.is_err(),
+        "a wrong code must not decrypt"
+    );
+    assert!(
+        received(&bob).await.is_empty(),
+        "nothing may land on a wrong code"
+    );
+    assert_eq!(
+        bob.list_pending().len(),
+        1,
+        "the transfer stays pending so it can be retried"
+    );
 
-    accept_pending(&bob, CODE).await.expect("the correct code should still work");
+    accept_pending(&bob, CODE)
+        .await
+        .expect("the correct code should still work");
     let rows = received(&bob).await;
     assert_eq!(open(&bob, &rows[0].id).await.1, "do not leak");
 }
@@ -279,7 +341,9 @@ async fn unicode_and_tags_survive_the_wire() {
     let note_id = seed(&alice, title, body, &["a", "b", "c"]).await;
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     accept_pending(&bob, CODE).await.unwrap();
 
@@ -299,13 +363,19 @@ async fn a_note_larger_than_one_frame_arrives_whole() {
     let note_id = seed(&alice, "Big", &big, &[]).await;
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     accept_pending(&bob, CODE).await.unwrap();
 
     let rows = received(&bob).await;
     let (_, body, _) = open(&bob, &rows[0].id).await;
-    assert_eq!(body.len(), big.len(), "large body must survive chunking intact");
+    assert_eq!(
+        body.len(),
+        big.len(),
+        "large body must survive chunking intact"
+    );
     assert_eq!(body, big);
 }
 
@@ -330,18 +400,28 @@ async fn devices_can_send_both_ways() {
     let alice_port = listen(alice.clone()).await;
     let bob_port = listen(bob.clone()).await;
 
-    send_note(&alice, &from_alice, "127.0.0.1", bob_port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &from_alice, "127.0.0.1", bob_port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     accept_pending(&bob, CODE).await.unwrap();
 
-    send_note(&bob, &from_bob, "127.0.0.1", alice_port, CODE, "Bob").await.unwrap();
+    send_note(&bob, &from_bob, "127.0.0.1", alice_port, CODE, "Bob")
+        .await
+        .unwrap();
     await_pending(&alice).await;
     accept_pending(&alice, CODE).await.unwrap();
 
     let on_bob: Vec<String> = opened_all(&bob).await.into_iter().map(|t| t.0).collect();
     let on_alice: Vec<String> = opened_all(&alice).await.into_iter().map(|t| t.0).collect();
-    assert!(on_bob.contains(&"ToBob".to_string()), "bob should hold alice's note");
-    assert!(on_alice.contains(&"ToAlice".to_string()), "alice should hold bob's note");
+    assert!(
+        on_bob.contains(&"ToBob".to_string()),
+        "bob should hold alice's note"
+    );
+    assert!(
+        on_alice.contains(&"ToAlice".to_string()),
+        "alice should hold bob's note"
+    );
 }
 
 // ---- Folders across the wire ----
@@ -350,11 +430,15 @@ async fn devices_can_send_both_ways() {
 // before; a note in one should arrive filed the same way on the far device.
 
 async fn folder(state: &AppState, name: &str, parent: Option<&str>) -> String {
-    crate::folders::commands::create_impl(state, name, parent).await.unwrap()
+    crate::folders::commands::create_impl(state, name, parent)
+        .await
+        .unwrap()
 }
 
 async fn folder_of(state: &AppState, note_id: &str) -> Option<String> {
-    crate::folders::queries::note_folder(&state.db, note_id).await.unwrap()
+    crate::folders::queries::note_folder(&state.db, note_id)
+        .await
+        .unwrap()
 }
 
 async fn folder_named(state: &AppState, name: &str) -> Option<String> {
@@ -374,14 +458,23 @@ async fn a_note_with_no_folder_still_transfers_and_lands_at_the_root() {
     assert_eq!(folder_of(&alice, &note_id).await, None);
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     assert_eq!(open(&bob, &new_id).await.1, "not in any folder");
-    assert_eq!(folder_of(&bob, &new_id).await, None, "it should sit at the root");
+    assert_eq!(
+        folder_of(&bob, &new_id).await,
+        None,
+        "it should sit at the root"
+    );
     assert!(
-        crate::folders::commands::list_impl(&bob).await.unwrap().is_empty(),
+        crate::folders::commands::list_impl(&bob)
+            .await
+            .unwrap()
+            .is_empty(),
         "no folder should be invented for a note that had none",
     );
 }
@@ -392,15 +485,24 @@ async fn a_note_in_a_folder_arrives_in_that_folder() {
     let bob = device("bob").await;
     let f = folder(&alice, "Work", None).await;
     let note_id = seed(&alice, "Report", "quarterly numbers", &[]).await;
-    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&f), 1).await.unwrap();
+    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&f), 1)
+        .await
+        .unwrap();
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
-    let landed = folder_named(&bob, "Work").await.expect("Work should have been created");
-    assert_eq!(folder_of(&bob, &new_id).await.as_deref(), Some(landed.as_str()));
+    let landed = folder_named(&bob, "Work")
+        .await
+        .expect("Work should have been created");
+    assert_eq!(
+        folder_of(&bob, &new_id).await.as_deref(),
+        Some(landed.as_str())
+    );
 }
 
 #[tokio::test]
@@ -410,19 +512,36 @@ async fn nesting_is_recreated_on_the_receiving_device() {
     let work = folder(&alice, "Work", None).await;
     let clients = folder(&alice, "Clients", Some(&work)).await;
     let note_id = seed(&alice, "Acme", "contract", &[]).await;
-    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&clients), 1).await.unwrap();
+    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&clients), 1)
+        .await
+        .unwrap();
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     let listed = crate::folders::commands::list_impl(&bob).await.unwrap();
-    let w = listed.iter().find(|f| f.name == "Work").expect("Work missing");
-    let c = listed.iter().find(|f| f.name == "Clients").expect("Clients missing");
-    assert_eq!(c.parent_id.as_deref(), Some(w.id.as_str()), "Clients must sit under Work");
+    let w = listed
+        .iter()
+        .find(|f| f.name == "Work")
+        .expect("Work missing");
+    let c = listed
+        .iter()
+        .find(|f| f.name == "Clients")
+        .expect("Clients missing");
+    assert_eq!(
+        c.parent_id.as_deref(),
+        Some(w.id.as_str()),
+        "Clients must sit under Work"
+    );
     assert_eq!(w.parent_id, None);
-    assert_eq!(folder_of(&bob, &new_id).await.as_deref(), Some(c.id.as_str()));
+    assert_eq!(
+        folder_of(&bob, &new_id).await.as_deref(),
+        Some(c.id.as_str())
+    );
 }
 
 /// Two notes from the same folder must share one folder on arrival, not make a
@@ -436,8 +555,12 @@ async fn a_second_note_files_into_the_folder_already_there() {
 
     for title in ["One", "Two"] {
         let id = seed(&alice, title, "body", &[]).await;
-        crate::folders::queries::set_note_folder(&alice.db, &id, Some(&f), 1).await.unwrap();
-        send_note(&alice, &id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+        crate::folders::queries::set_note_folder(&alice.db, &id, Some(&f), 1)
+            .await
+            .unwrap();
+        send_note(&alice, &id, "127.0.0.1", port, CODE, "Alice")
+            .await
+            .unwrap();
         await_pending(&bob).await;
         accept_pending(&bob, CODE).await.unwrap();
     }
@@ -480,14 +603,20 @@ async fn a_resend_does_not_move_a_note_the_recipient_refiled() {
     let note_id = seed(&alice, "Shared", "body", &[]).await;
     let port = listen(bob.clone()).await;
 
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     let mine = folder(&bob, "Mine", None).await;
-    crate::folders::queries::set_note_folder(&bob.db, &new_id, Some(&mine), 1).await.unwrap();
+    crate::folders::queries::set_note_folder(&bob.db, &new_id, Some(&mine), 1)
+        .await
+        .unwrap();
 
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     accept_pending(&bob, CODE).await.unwrap();
 
@@ -551,7 +680,10 @@ async fn an_unlocked_protected_note_sends_its_real_content() {
     let rows = received(&bob).await;
     let (title, body, tags) = open(&bob, &rows[0].id).await;
     assert_eq!(title, "Bank");
-    assert_eq!(body, "account 12345", "the password layer must be peeled, not shipped");
+    assert_eq!(
+        body, "account 12345",
+        "the password layer must be peeled, not shipped"
+    );
     assert_eq!(tags, vec!["finance"]);
 }
 
@@ -564,17 +696,28 @@ async fn a_protected_note_arrives_unprotected() {
     alice.unlock_note(&note_id, "s3cret", "Bank");
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
-    assert!(row.note_salt.is_none(), "protection does not travel with the note");
+    assert!(
+        row.note_salt.is_none(),
+        "protection does not travel with the note"
+    );
     // The sender's sealed title travels in the clear blob, like the body.
     assert_eq!(open(&bob, &new_id).await.0, "Bank");
     // And the sender's copy keeps its protection.
-    let src = queries::note_get(&alice.db, &note_id).await.unwrap().unwrap();
-    assert!(src.note_salt.is_some(), "the sender's copy must stay protected");
+    let src = queries::note_get(&alice.db, &note_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        src.note_salt.is_some(),
+        "the sender's copy must stay protected"
+    );
 }
 
 /// The receiving device can protect what arrived, with its own password - the
@@ -588,13 +731,18 @@ async fn the_receiver_can_protect_what_arrived_with_a_different_password() {
     alice.unlock_note(&note_id, "alice-password", "Bank");
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     protect(&bob, &new_id, "bob-password").await;
     let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
-    assert!(row.note_salt.is_some(), "the receiver's own protection should apply");
+    assert!(
+        row.note_salt.is_some(),
+        "the receiver's own protection should apply"
+    );
 }
 
 // ---- Credential tables ----
@@ -636,22 +784,35 @@ async fn a_credential_table_keeps_its_masked_columns() {
         .unwrap();
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
-    let bytes =
-        decrypt_with_vault(&bob.device_key, &row.nonce, &row.content_ct, row.id.as_bytes()).unwrap();
+    let bytes = decrypt_with_vault(
+        &bob.device_key,
+        &row.nonce,
+        &row.content_ct,
+        row.id.as_bytes(),
+    )
+    .unwrap();
     let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
     assert_eq!(row.kind, "table", "it must still be a table");
-    assert_eq!(got, table, "the whole table, masking included, must round-trip");
+    assert_eq!(
+        got, table,
+        "the whole table, masking included, must round-trip"
+    );
     assert_eq!(
         got["columns"][2]["type"], "masked",
         "the password column must arrive still masked, not in the clear",
     );
-    assert_eq!(got["rows"][0]["cells"]["c-pw"], "hunter2", "and its value must survive");
+    assert_eq!(
+        got["rows"][0]["cells"]["c-pw"], "hunter2",
+        "and its value must survive"
+    );
 }
 
 #[tokio::test]
@@ -689,16 +850,26 @@ async fn a_protected_credential_table_survives_the_whole_round_trip() {
     alice.unlock_note(&note_id, "vault-password", "Production env");
 
     let port = listen(bob.clone()).await;
-    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_note(&alice, &note_id, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     await_pending(&bob).await;
     let new_id = accept_pending(&bob, CODE).await.unwrap();
 
     let row = queries::note_get(&bob.db, &new_id).await.unwrap().unwrap();
-    let bytes =
-        decrypt_with_vault(&bob.device_key, &row.nonce, &row.content_ct, row.id.as_bytes()).unwrap();
+    let bytes = decrypt_with_vault(
+        &bob.device_key,
+        &row.nonce,
+        &row.content_ct,
+        row.id.as_bytes(),
+    )
+    .unwrap();
     let got: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(got, table, "both secret rows must arrive intact");
-    assert!(row.note_salt.is_none(), "and, as ever, unprotected on arrival");
+    assert!(
+        row.note_salt.is_none(),
+        "and, as ever, unprotected on arrival"
+    );
 }
 
 // ---- Batch send: SPAKE2 offer, code confirmed, notes land directly ----
@@ -739,8 +910,14 @@ async fn a_mismatched_code_aborts_the_batch_before_any_note_moves() {
     let result = send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await;
     responder.await.unwrap();
 
-    assert!(result.is_err(), "a mismatched pairing code must fail the transfer");
-    assert!(received(&bob).await.is_empty(), "nothing may land on a failed pairing");
+    assert!(
+        result.is_err(),
+        "a mismatched pairing code must fail the transfer"
+    );
+    assert!(
+        received(&bob).await.is_empty(),
+        "nothing may land on a failed pairing"
+    );
 }
 
 /// A re-send onto a note the receiver protected re-seals the title with the
@@ -754,7 +931,9 @@ async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
     let port = listen(bob.clone()).await;
 
     let responder = answer_with(bob.clone(), CODE);
-    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     responder.await.unwrap();
     let bob_id = received(&bob).await[0].id.clone();
     protect(&bob, &bob_id, "bob-password").await;
@@ -773,19 +952,32 @@ async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
     };
     update_impl(&alice, ids[0].clone(), renamed).await.unwrap();
     let responder = answer_with(bob.clone(), CODE);
-    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap();
     responder.await.unwrap();
 
     let row = queries::note_get(&bob.db, &bob_id).await.unwrap().unwrap();
     assert!(row.note_salt.is_some() && row.title_note_nonce.is_some());
     assert!(
-        decrypt_with_vault(&bob.device_key, &row.title_nonce, &row.title_ct, row.id.as_bytes())
-            .is_err(),
+        decrypt_with_vault(
+            &bob.device_key,
+            &row.title_nonce,
+            &row.title_ct,
+            row.id.as_bytes()
+        )
+        .is_err(),
         "the re-sent title must not be readable with the device key alone"
     );
-    assert_eq!(list_impl(&bob, None, None).await.unwrap()[0].title, "Bank, renamed");
+    assert_eq!(
+        list_impl(&bob, None, None).await.unwrap()[0].title,
+        "Bank, renamed"
+    );
     bob.lock_note(&bob_id);
-    assert_eq!(list_impl(&bob, None, None).await.unwrap()[0].title, LOCKED_TITLE);
+    assert_eq!(
+        list_impl(&bob, None, None).await.unwrap()[0].title,
+        LOCKED_TITLE
+    );
     bob.unlock_note(&bob_id, "bob-password", "");
     let (title, body) = open_row(&bob, &row).unwrap();
     assert_eq!(title, "Bank, renamed");
@@ -803,7 +995,9 @@ async fn resending_the_same_note_does_not_duplicate_it() {
 
     for _ in 0..2 {
         let responder = answer_with(bob.clone(), CODE);
-        send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await.unwrap();
+        send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+            .await
+            .unwrap();
         responder.await.unwrap();
     }
 
@@ -813,4 +1007,3 @@ async fn resending_the_same_note_does_not_duplicate_it() {
         "re-receiving the same origin note should update, not duplicate",
     );
 }
-

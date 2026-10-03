@@ -65,7 +65,9 @@ async fn ancestors(pool: &SqlitePool, id: &str) -> anyhow::Result<Vec<String>> {
         if chain.len() > MAX_DEPTH {
             break;
         }
-        let Some(row) = queries::get(pool, &current).await? else { break };
+        let Some(row) = queries::get(pool, &current).await? else {
+            break;
+        };
         chain.push(row.id);
         cursor = row.parent_id;
     }
@@ -99,10 +101,16 @@ pub(crate) async fn create_impl(
 ) -> Result<String, String> {
     let name = clean_name(name)?;
     if let Some(parent) = parent_id {
-        if queries::get(&state.db, parent).await.map_err(|e| e.to_string())?.is_none() {
+        if queries::get(&state.db, parent)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err("parent folder not found".into());
         }
-        let depth = depth_of(&state.db, parent).await.map_err(|e| e.to_string())?;
+        let depth = depth_of(&state.db, parent)
+            .await
+            .map_err(|e| e.to_string())?;
         if depth + 1 > MAX_DEPTH {
             return Err(TOO_DEEP.into());
         }
@@ -115,13 +123,13 @@ pub(crate) async fn create_impl(
     Ok(id)
 }
 
-pub(crate) async fn rename_impl(
-    state: &AppState,
-    id: &str,
-    name: &str,
-) -> Result<(), String> {
+pub(crate) async fn rename_impl(state: &AppState, id: &str, name: &str) -> Result<(), String> {
     let name = clean_name(name)?;
-    if queries::get(&state.db, id).await.map_err(|e| e.to_string())?.is_none() {
+    if queries::get(&state.db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
         return Err("folder not found".into());
     }
     let name_ct = encrypt_name(&state.device_key, id, &name)?;
@@ -135,24 +143,36 @@ pub(crate) async fn move_impl(
     id: &str,
     new_parent: Option<&str>,
 ) -> Result<(), String> {
-    if queries::get(&state.db, id).await.map_err(|e| e.to_string())?.is_none() {
+    if queries::get(&state.db, id)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
         return Err("folder not found".into());
     }
     if let Some(parent) = new_parent {
         if parent == id {
             return Err(CYCLE.into());
         }
-        if queries::get(&state.db, parent).await.map_err(|e| e.to_string())?.is_none() {
+        if queries::get(&state.db, parent)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err("parent folder not found".into());
         }
         // Moving a folder under its own descendant would detach the subtree from
         // the root and make the tree walk loop forever.
-        let chain = ancestors(&state.db, parent).await.map_err(|e| e.to_string())?;
+        let chain = ancestors(&state.db, parent)
+            .await
+            .map_err(|e| e.to_string())?;
         if chain.iter().any(|a| a == id) {
             return Err(CYCLE.into());
         }
         let parent_depth = chain.len();
-        let height = subtree_height(&state.db, id).await.map_err(|e| e.to_string())?;
+        let height = subtree_height(&state.db, id)
+            .await
+            .map_err(|e| e.to_string())?;
         if parent_depth + height > MAX_DEPTH {
             return Err(TOO_DEEP.into());
         }
@@ -197,8 +217,13 @@ pub(crate) async fn copy_impl(
             name
         };
         let copy_id = Uuid::new_v4().to_string();
-        for note_id in queries::live_note_ids_in(&state.db, &folder.id).await.map_err(err)? {
-            let Some(row) = note_get(&state.db, &note_id).await.map_err(err)? else { continue };
+        for note_id in queries::live_note_ids_in(&state.db, &folder.id)
+            .await
+            .map_err(err)?
+        {
+            let Some(row) = note_get(&state.db, &note_id).await.map_err(err)? else {
+                continue;
+            };
             match copy_row(state, &row, Some(&copy_id), false) {
                 Ok(copy) => notes.push(copy),
                 Err(e) if e == LOCKED => report.skipped_locked += 1,
@@ -206,7 +231,10 @@ pub(crate) async fn copy_impl(
             }
         }
         if depth < MAX_DEPTH {
-            for child in all.iter().filter(|f| f.parent_id.as_deref() == Some(folder.id.as_str())) {
+            for child in all
+                .iter()
+                .filter(|f| f.parent_id.as_deref() == Some(folder.id.as_str()))
+            {
                 stack.push((child, Some(copy_id.clone()), depth + 1));
             }
         }
@@ -217,7 +245,9 @@ pub(crate) async fn copy_impl(
     let mut tx = state.db.begin().await.map_err(|e| e.to_string())?;
     // Parents were pushed before their children, which the foreign key needs.
     for (name_ct, copy_id, parent) in &folders {
-        queries::insert(&mut *tx, copy_id, parent.as_deref(), name_ct, now).await.map_err(err)?;
+        queries::insert(&mut *tx, copy_id, parent.as_deref(), name_ct, now)
+            .await
+            .map_err(err)?;
     }
     for row in &notes {
         note_insert(&mut *tx, row).await.map_err(err)?;
@@ -229,7 +259,9 @@ pub(crate) async fn copy_impl(
 
 pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, String> {
     let rows = queries::list(&state.db).await.map_err(|e| e.to_string())?;
-    let counts = queries::note_counts(&state.db).await.map_err(|e| e.to_string())?;
+    let counts = queries::note_counts(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
         .map(|r| {
@@ -242,7 +274,13 @@ pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, Strin
                 .find(|(fid, _)| *fid == r.id)
                 .map(|(_, n)| *n)
                 .unwrap_or(0);
-            FolderJson { id: r.id, parent_id: r.parent_id, name, note_count, sort_order: r.sort_order }
+            FolderJson {
+                id: r.id,
+                parent_id: r.parent_id,
+                name,
+                note_count,
+                sort_order: r.sort_order,
+            }
         })
         .collect())
 }
@@ -250,7 +288,9 @@ pub(crate) async fn list_impl(state: &AppState) -> Result<Vec<FolderJson>, Strin
 /// Root-to-leaf names, for carrying a note's folder across a transfer. A name
 /// that will not decrypt is skipped rather than failing the send.
 pub(crate) async fn path_of(state: &AppState, folder_id: &str) -> Vec<String> {
-    let Ok(chain) = ancestors(&state.db, folder_id).await else { return Vec::new() };
+    let Ok(chain) = ancestors(&state.db, folder_id).await else {
+        return Vec::new();
+    };
     let mut names = Vec::with_capacity(chain.len());
     // `ancestors` returns nearest-first; a path reads from the root.
     for id in chain.iter().rev() {
@@ -327,7 +367,9 @@ pub async fn folder_copy(
 
 #[tauri::command]
 pub async fn folder_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    queries::delete(&state.db, &id).await.map_err(|e| e.to_string())
+    queries::delete(&state.db, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Write an explicit order for one level. The caller sends the ids as arranged,
@@ -341,7 +383,9 @@ pub async fn notes_reorder(ids: Vec<String>, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 pub async fn folders_reorder(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
-    queries::set_order(&state.db, &ids).await.map_err(|e| e.to_string())
+    queries::set_order(&state.db, &ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -356,7 +400,11 @@ pub async fn note_set_folder(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     if let Some(f) = folder_id.as_deref() {
-        if queries::get(&state.db, f).await.map_err(|e| e.to_string())?.is_none() {
+        if queries::get(&state.db, f)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err("folder not found".into());
         }
     }

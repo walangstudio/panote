@@ -182,7 +182,10 @@ mod tests {
         age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
         state.note_title("n1");
         age_unlock(&state, "n1", 10);
-        assert!(state.note_title("n1").is_none(), "reading the title must not extend the unlock");
+        assert!(
+            state.note_title("n1").is_none(),
+            "reading the title must not extend the unlock"
+        );
     }
 
     #[tokio::test]
@@ -210,7 +213,11 @@ mod tests {
         state.add_pending(sample_transfer("t1"));
         let peeked = state.peek_pending("t1");
         assert!(peeked.is_some());
-        assert_eq!(state.list_pending().len(), 1, "transfer must still be present after peek");
+        assert_eq!(
+            state.list_pending().len(),
+            1,
+            "transfer must still be present after peek"
+        );
     }
 
     #[tokio::test]
@@ -316,7 +323,13 @@ impl AppState {
     /// Whether `peer_addr` is locked out of pairing-passphrase attempts (K5).
     pub fn passphrase_locked_out(&self, peer_addr: &str) -> bool {
         const MAX_FAILURES: u32 = 5;
-        *self.passphrase_failures.lock().unwrap().get(peer_addr).unwrap_or(&0) >= MAX_FAILURES
+        *self
+            .passphrase_failures
+            .lock()
+            .unwrap()
+            .get(peer_addr)
+            .unwrap_or(&0)
+            >= MAX_FAILURES
     }
 
     pub fn record_passphrase_failure(&self, peer_addr: &str) {
@@ -377,7 +390,6 @@ impl AppState {
         self.unlocked.lock().unwrap().remove(note_id);
     }
 
-
     pub fn add_pending(&self, transfer: PendingTransfer) {
         self.pending_transfers
             .lock()
@@ -386,7 +398,11 @@ impl AppState {
     }
 
     pub fn peek_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
-        self.pending_transfers.lock().unwrap().get(transfer_id).cloned()
+        self.pending_transfers
+            .lock()
+            .unwrap()
+            .get(transfer_id)
+            .cloned()
     }
 
     pub fn take_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
@@ -394,7 +410,12 @@ impl AppState {
     }
 
     pub fn list_pending(&self) -> Vec<PendingTransfer> {
-        self.pending_transfers.lock().unwrap().values().cloned().collect()
+        self.pending_transfers
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn is_receiving(&self) -> bool {

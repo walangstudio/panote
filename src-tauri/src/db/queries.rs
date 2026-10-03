@@ -166,10 +166,16 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         updated_at: r.get("updated_at"),
         tags: r.get("tags"),
         content_hint: r.get("content_hint"),
-        pinned: { let v: i32 = r.get("pinned"); v != 0 },
+        pinned: {
+            let v: i32 = r.get("pinned");
+            v != 0
+        },
         bg_color: r.get("bg_color"),
         bg_image: r.get("bg_image"),
-        show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
+        show_preview: {
+            let v: i32 = r.get("show_preview");
+            v != 0
+        },
         preview_text: r.get("preview_text"),
         origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
@@ -215,14 +221,20 @@ fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         updated_at: r.get("updated_at"),
         tags: r.get("tags"),
         content_hint: r.get("content_hint"),
-        pinned: { let v: i32 = r.get("pinned"); v != 0 },
+        pinned: {
+            let v: i32 = r.get("pinned");
+            v != 0
+        },
         bg_color: r.get("bg_color"),
         // Not selected. A background is a base64 data URI that dwarfs everything
         // else in the row — measured at 143x the size of ALL note bodies put
         // together — and the list re-runs on every save, pin and delete. Fetched
         // once via `note_bg_images` and cached instead. See [`row_to_list_note`].
         bg_image: None,
-        show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
+        show_preview: {
+            let v: i32 = r.get("show_preview");
+            v != 0
+        },
         preview_text: r.get("preview_text"),
         origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
@@ -545,7 +557,9 @@ pub async fn known_peer_record_transfer(
     Ok(())
 }
 
-pub async fn known_peers_list_history(pool: &SqlitePool) -> anyhow::Result<Vec<KnownPeerHistoryRow>> {
+pub async fn known_peers_list_history(
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<KnownPeerHistoryRow>> {
     let rows = sqlx::query(
         "SELECT peer_id, display_name, last_transfer_at FROM known_peers \
          WHERE last_transfer_at IS NOT NULL ORDER BY last_transfer_at DESC",
@@ -620,8 +634,12 @@ mod tests {
     #[tokio::test]
     async fn record_transfer_upsert_updates_display_name_and_timestamp() {
         let pool = pool().await;
-        known_peer_record_transfer(&pool, "192.168.1.5", "Old name", 1000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.5", "New name", 2000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "Old name", 1000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "New name", 2000)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].display_name.as_deref(), Some("New name"));
@@ -632,9 +650,13 @@ mod tests {
     async fn record_transfer_does_not_overwrite_fingerprint() {
         let pool = pool().await;
         let fp = [0xabu8; 32];
-        known_peer_upsert(&pool, "192.168.1.5", &fp, 500).await.unwrap();
+        known_peer_upsert(&pool, "192.168.1.5", &fp, 500)
+            .await
+            .unwrap();
         // record_transfer must not zero out the fingerprint
-        known_peer_record_transfer(&pool, "192.168.1.5", "Alice", 1000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "Alice", 1000)
+            .await
+            .unwrap();
         let row = known_peer_get(&pool, "192.168.1.5").await.unwrap().unwrap();
         assert_eq!(row.fingerprint, fp);
     }
@@ -652,17 +674,28 @@ mod tests {
     async fn list_history_excludes_tofu_only_peers() {
         let pool = pool().await;
         // Insert a TOFU-only peer (fingerprint set, no transfer)
-        known_peer_upsert(&pool, "192.168.1.10", &[0u8; 32], 100).await.unwrap();
+        known_peer_upsert(&pool, "192.168.1.10", &[0u8; 32], 100)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
-        assert!(rows.is_empty(), "TOFU-only peer should not appear in transfer history");
+        assert!(
+            rows.is_empty(),
+            "TOFU-only peer should not appear in transfer history"
+        );
     }
 
     #[tokio::test]
     async fn list_history_ordered_by_last_transfer_at_desc() {
         let pool = pool().await;
-        known_peer_record_transfer(&pool, "192.168.1.1", "A", 1000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.2", "B", 3000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.3", "C", 2000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.1", "A", 1000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.2", "B", 3000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.3", "C", 2000)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
         let timestamps: Vec<_> = rows.iter().map(|r| r.last_transfer_at.unwrap()).collect();
         assert_eq!(timestamps, vec![3000, 2000, 1000]);
@@ -690,7 +723,11 @@ pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
 /// from the Pinned section entirely.
 ///
 /// Returned rows carry no body ciphertext — see [`row_to_list_note`].
-pub async fn note_list_page(pool: &SqlitePool, limit: i64, offset: i64) -> anyhow::Result<Vec<NoteRow>> {
+pub async fn note_list_page(
+    pool: &SqlitePool,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<Vec<NoteRow>> {
     let rows = sqlx::query(&format!(
         "SELECT {LIST_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
     ))

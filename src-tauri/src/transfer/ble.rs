@@ -11,14 +11,12 @@ use crate::{
     state::{AppState, Peer, TransportKind},
     transfer::blob::TransferBlob,
 };
-use btleplug::{
-    api::{
-        Central, Manager as _, Peripheral as _, ScanFilter,
-    },
-    platform::{Manager, Peripheral},
-};
 #[cfg(debug_assertions)]
 use btleplug::api::WriteType;
+use btleplug::{
+    api::{Central, Manager as _, Peripheral as _, ScanFilter},
+    platform::{Manager, Peripheral},
+};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -57,12 +55,19 @@ pub fn reassemble_chunks(packets: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
     let mut indexed: Vec<(u16, &[u8])> = Vec::with_capacity(packets.len());
     for p in packets {
         // N5: a short/malformed packet must error, not panic on indexing.
-        anyhow::ensure!(p.len() >= 3, "packet too short: {} bytes (need >= 3)", p.len());
+        anyhow::ensure!(
+            p.len() >= 3,
+            "packet too short: {} bytes (need >= 3)",
+            p.len()
+        );
         let seq = u16::from_be_bytes([p[0], p[1]]);
         indexed.push((seq, &p[3..]));
     }
     indexed.sort_by_key(|(seq, _)| *seq);
-    let data: Vec<u8> = indexed.into_iter().flat_map(|(_, d)| d.iter().copied()).collect();
+    let data: Vec<u8> = indexed
+        .into_iter()
+        .flat_map(|(_, d)| d.iter().copied())
+        .collect();
     Ok(data)
 }
 
@@ -143,22 +148,19 @@ pub async fn send_note(_state: &AppState, _note_id: &str, _peer_id: &str) -> Res
 }
 
 #[cfg(debug_assertions)]
-pub async fn send_note(
-    state: &AppState,
-    note_id: &str,
-    peer_id: &str,
-) -> Result<(), String> {
+pub async fn send_note(state: &AppState, note_id: &str, peer_id: &str) -> Result<(), String> {
     let blob = build_blob(state, note_id)
         .await
         .map_err(|e| e.to_string())?;
 
     let chunks = chunk_payload(&blob);
-    let peripheral = find_peripheral(peer_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let peripheral = find_peripheral(peer_id).await.map_err(|e| e.to_string())?;
 
     peripheral.connect().await.map_err(|e| e.to_string())?;
-    peripheral.discover_services().await.map_err(|e| e.to_string())?;
+    peripheral
+        .discover_services()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let chars = peripheral.characteristics();
     let note_send_char = chars
@@ -187,7 +189,9 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         .ok_or_else(|| anyhow::anyhow!("note not found"))?;
 
     if row.note_salt.is_some() {
-        anyhow::bail!("cannot transfer a per-note-password note over BLE without the per-note password");
+        anyhow::bail!(
+            "cannot transfer a per-note-password note over BLE without the per-note password"
+        );
     }
 
     let title = String::from_utf8(decrypt_with_vault(

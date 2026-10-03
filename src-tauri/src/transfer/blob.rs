@@ -142,7 +142,8 @@ mod tests {
     #[test]
     fn decode_missing_field_errors() {
         // Missing 'content'
-        let bad = br#"{"id":"x","kind":"markdown","title":"t","tags":[],"created_at":0,"updated_at":0}"#;
+        let bad =
+            br#"{"id":"x","kind":"markdown","title":"t","tags":[],"created_at":0,"updated_at":0}"#;
         assert!(TransferBlob::decode(bad).is_err());
     }
 
@@ -182,7 +183,10 @@ mod tests {
 
     #[test]
     fn empty_tags_roundtrip() {
-        let blob = TransferBlob { tags: vec![], ..sample() };
+        let blob = TransferBlob {
+            tags: vec![],
+            ..sample()
+        };
         let recovered = TransferBlob::decode(&blob.encode().unwrap()).unwrap();
         assert!(recovered.tags.is_empty());
     }

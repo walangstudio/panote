@@ -26,10 +26,12 @@ pub async fn init_pool(db_path: &str) -> anyhow::Result<SqlitePool> {
 /// recorded the CRLF variant, and every LF build since refuses those databases
 /// as "previously applied but modified". Same SQL, so re-stamp the canonical sum.
 async fn repair_crlf_checksums(pool: &SqlitePool) -> anyhow::Result<()> {
-    let has_table = sqlx::query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'")
-        .fetch_optional(pool)
-        .await?
-        .is_some();
+    let has_table = sqlx::query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .is_some();
     if !has_table {
         return Ok(());
     }
@@ -74,12 +76,15 @@ mod tests {
             .unwrap();
         pool.close().await;
 
-        let pool = init_pool(&path_str).await.expect("CRLF-stamped database must reopen");
-        let stored: Vec<u8> = sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = 8")
-            .fetch_one(&pool)
+        let pool = init_pool(&path_str)
             .await
-            .unwrap()
-            .get("checksum");
+            .expect("CRLF-stamped database must reopen");
+        let stored: Vec<u8> =
+            sqlx::query("SELECT checksum FROM _sqlx_migrations WHERE version = 8")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("checksum");
         assert_eq!(stored, m.checksum.to_vec());
         pool.close().await;
         let _ = std::fs::remove_file(&path);

@@ -37,10 +37,9 @@ pub fn run() {
 
             // Load the device key from the OS secure store, migrating it out of
             // the DB on first run (Android keeps it in the app-private DB).
-            let device_key = tauri::async_runtime::block_on(
-                crypto::keystore::load_or_migrate_device_key(&pool),
-            )
-            .expect("device key init failed");
+            let device_key =
+                tauri::async_runtime::block_on(crypto::keystore::load_or_migrate_device_key(&pool))
+                    .expect("device key init failed");
 
             // Stable device UUID for note origin tracking (separate from device_key).
             let device_uuid =
@@ -52,14 +51,18 @@ pub fn run() {
                 .expect("note origin backfill failed");
 
             let cutoff = state::now_secs() - trash::RETENTION_SECS;
-            if let Err(e) = tauri::async_runtime::block_on(trash::queries::purge_before(&pool, cutoff)) {
+            if let Err(e) =
+                tauri::async_runtime::block_on(trash::queries::purge_before(&pool, cutoff))
+            {
                 eprintln!("[trash] purge error: {e}");
             }
 
             let state = AppState::new(pool, device_key, device_uuid);
 
             // Restore TOFU fingerprints from DB so they survive restarts.
-            if let Ok(known) = tauri::async_runtime::block_on(db::queries::known_peers_list(&state.db)) {
+            if let Ok(known) =
+                tauri::async_runtime::block_on(db::queries::known_peers_list(&state.db))
+            {
                 for peer in known {
                     if peer.fingerprint.len() == 32 {
                         let mut fp = [0u8; 32];
@@ -73,10 +76,9 @@ pub fn run() {
             // This keeps port 47291 closed until explicitly enabled.
 
             // Start mDNS — store the daemon handle to keep it alive.
-            let device_name = tauri::async_runtime::block_on(
-                transfer::commands::resolve_device_name(&state.db),
-            )
-            .unwrap_or_else(|_| "panote-device".into());
+            let device_name =
+                tauri::async_runtime::block_on(transfer::commands::resolve_device_name(&state.db))
+                    .unwrap_or_else(|_| "panote-device".into());
             match transfer::lan::start_mdns(&device_name, Arc::new(state.clone())) {
                 Ok(daemon) => {
                     app.manage(MdnsHandle(Mutex::new(daemon)));

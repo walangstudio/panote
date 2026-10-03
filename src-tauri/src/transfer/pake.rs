@@ -62,8 +62,10 @@ pub fn derive_keys(spake_key: &[u8], initiator_msg: &[u8], responder_msg: &[u8])
         confirm_responder: [0u8; 32],
     };
     hk.expand(b"session", &mut keys.session).unwrap();
-    hk.expand(b"confirm-initiator", &mut keys.confirm_initiator).unwrap();
-    hk.expand(b"confirm-responder", &mut keys.confirm_responder).unwrap();
+    hk.expand(b"confirm-initiator", &mut keys.confirm_initiator)
+        .unwrap();
+    hk.expand(b"confirm-responder", &mut keys.confirm_responder)
+        .unwrap();
     keys
 }
 

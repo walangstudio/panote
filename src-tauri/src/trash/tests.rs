@@ -25,7 +25,11 @@ fn blob(title: &str, origin: &str) -> TransferBlob {
         tags: vec![],
         created_at: 1,
         updated_at: 1,
-        origin_device_id: if origin.is_empty() { String::new() } else { "peer".into() },
+        origin_device_id: if origin.is_empty() {
+            String::new()
+        } else {
+            "peer".into()
+        },
         origin_note_id: origin.into(),
         folder_path: Vec::new(),
     }
@@ -35,12 +39,16 @@ async fn note_in(state: &AppState, folder: Option<&str>, title: &str) -> String 
     let id = crate::transfer::commands::import_blob(state, &state.device_key, blob(title, ""))
         .await
         .unwrap();
-    folder_queries::set_note_folder(&state.db, &id, folder, now_secs()).await.unwrap();
+    folder_queries::set_note_folder(&state.db, &id, folder, now_secs())
+        .await
+        .unwrap();
     id
 }
 
 async fn trash(state: &AppState, id: &str) {
-    queries::trash(&state.db, &[id.to_string()], now_secs()).await.unwrap();
+    queries::trash(&state.db, &[id.to_string()], now_secs())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -49,7 +57,10 @@ async fn deleting_a_note_keeps_the_row_and_lists_it_in_trash() {
     let id = note_in(&s, None, "Groceries").await;
     trash(&s, &id).await;
 
-    assert!(notes::note_get(&s.db, &id).await.unwrap().is_some(), "trash must not destroy the row");
+    assert!(
+        notes::note_get(&s.db, &id).await.unwrap().is_some(),
+        "trash must not destroy the row"
+    );
     let listed = list_impl(&s).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, id);
@@ -70,17 +81,36 @@ async fn a_trashed_note_is_excluded_from_list_counts_and_export() {
         .unwrap();
     trash(&s, &gone).await;
 
-    let page: Vec<_> = notes::note_list_page(&s.db, 500, 0).await.unwrap().into_iter().map(|r| r.id).collect();
+    let page: Vec<_> = notes::note_list_page(&s.db, 500, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
     assert_eq!(page, vec![kept.clone()], "list");
     assert_eq!(notes::note_count(&s.db).await.unwrap(), 1, "count");
     // `notes_export` reads exactly this.
-    let exported: Vec<_> = notes::note_list(&s.db).await.unwrap().into_iter().map(|r| r.id).collect();
+    let exported: Vec<_> = notes::note_list(&s.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
     assert_eq!(exported, vec![kept.clone()], "export");
-    assert!(notes::note_bg_images(&s.db).await.unwrap().is_empty(), "backgrounds");
+    assert!(
+        notes::note_bg_images(&s.db).await.unwrap().is_empty(),
+        "backgrounds"
+    );
 
     let counted = folders::list_impl(&s).await.unwrap();
     assert_eq!(counted[0].note_count, 1, "folder count");
-    assert_eq!(folder_queries::note_ids_in_subtree(&s.db, &f).await.unwrap(), vec![kept], "folder send");
+    assert_eq!(
+        folder_queries::note_ids_in_subtree(&s.db, &f)
+            .await
+            .unwrap(),
+        vec![kept],
+        "folder send"
+    );
 }
 
 #[tokio::test]
@@ -90,11 +120,19 @@ async fn restore_puts_the_note_back_in_its_folder() {
     let id = note_in(&s, Some(&f), "n").await;
     trash(&s, &id).await;
 
-    queries::restore(&s.db, std::slice::from_ref(&id)).await.unwrap();
+    queries::restore(&s.db, std::slice::from_ref(&id))
+        .await
+        .unwrap();
 
     assert!(list_impl(&s).await.unwrap().is_empty());
     assert_eq!(notes::note_count(&s.db).await.unwrap(), 1);
-    assert_eq!(folder_queries::note_folder(&s.db, &id).await.unwrap().as_deref(), Some(f.as_str()));
+    assert_eq!(
+        folder_queries::note_folder(&s.db, &id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(f.as_str())
+    );
 }
 
 #[tokio::test]
@@ -105,7 +143,9 @@ async fn restore_falls_back_to_the_root_when_the_folder_is_gone() {
     trash(&s, &id).await;
     folder_queries::delete(&s.db, &f).await.unwrap();
 
-    queries::restore(&s.db, std::slice::from_ref(&id)).await.unwrap();
+    queries::restore(&s.db, std::slice::from_ref(&id))
+        .await
+        .unwrap();
 
     assert_eq!(notes::note_count(&s.db).await.unwrap(), 1);
     assert_eq!(folder_queries::note_folder(&s.db, &id).await.unwrap(), None);
@@ -118,10 +158,20 @@ async fn restore_and_delete_forever_take_many_ids() {
     let b = note_in(&s, None, "b").await;
     let c = note_in(&s, None, "c").await;
     let d = note_in(&s, None, "d").await;
-    queries::trash(&s.db, &[a.clone(), b.clone(), c.clone(), d.clone()], now_secs()).await.unwrap();
+    queries::trash(
+        &s.db,
+        &[a.clone(), b.clone(), c.clone(), d.clone()],
+        now_secs(),
+    )
+    .await
+    .unwrap();
 
-    queries::restore(&s.db, &[a.clone(), b.clone()]).await.unwrap();
-    queries::purge(&s.db, &[c.clone(), d.clone()]).await.unwrap();
+    queries::restore(&s.db, &[a.clone(), b.clone()])
+        .await
+        .unwrap();
+    queries::purge(&s.db, &[c.clone(), d.clone()])
+        .await
+        .unwrap();
 
     assert_eq!(notes::note_count(&s.db).await.unwrap(), 2);
     assert!(list_impl(&s).await.unwrap().is_empty());
@@ -133,7 +183,9 @@ async fn restore_and_delete_forever_take_many_ids() {
 async fn delete_forever_refuses_a_live_note() {
     let s = state().await;
     let live = note_in(&s, None, "live").await;
-    queries::purge(&s.db, std::slice::from_ref(&live)).await.unwrap();
+    queries::purge(&s.db, std::slice::from_ref(&live))
+        .await
+        .unwrap();
     assert!(notes::note_get(&s.db, &live).await.unwrap().is_some());
 }
 
@@ -160,10 +212,20 @@ async fn startup_purge_drops_notes_trashed_over_30_days_ago() {
     let old = note_in(&s, None, "old").await;
     let recent = note_in(&s, None, "recent").await;
     let live = note_in(&s, None, "live").await;
-    queries::trash(&s.db, std::slice::from_ref(&old), now - RETENTION_SECS - 1).await.unwrap();
-    queries::trash(&s.db, std::slice::from_ref(&recent), now - RETENTION_SECS + 60).await.unwrap();
+    queries::trash(&s.db, std::slice::from_ref(&old), now - RETENTION_SECS - 1)
+        .await
+        .unwrap();
+    queries::trash(
+        &s.db,
+        std::slice::from_ref(&recent),
+        now - RETENTION_SECS + 60,
+    )
+    .await
+    .unwrap();
 
-    let purged = queries::purge_before(&s.db, now - RETENTION_SECS).await.unwrap();
+    let purged = queries::purge_before(&s.db, now - RETENTION_SECS)
+        .await
+        .unwrap();
 
     assert_eq!(purged, 1);
     assert!(notes::note_get(&s.db, &old).await.unwrap().is_none());
@@ -175,21 +237,32 @@ async fn startup_purge_drops_notes_trashed_over_30_days_ago() {
 async fn a_protected_note_stays_protected_through_trash_and_restore() {
     let s = state().await;
     let id = note_in(&s, None, "Vault").await;
-    crate::notes::commands::protect_impl(&s, &id, "hunter22").await.unwrap();
+    crate::notes::commands::protect_impl(&s, &id, "hunter22")
+        .await
+        .unwrap();
     let before = notes::note_get(&s.db, &id).await.unwrap().unwrap();
 
     trash(&s, &id).await;
     s.lock_note(&id);
     let listed = list_impl(&s).await.unwrap();
     assert!(listed[0].has_note_password);
-    assert_eq!(listed[0].title, crate::notes::commands::LOCKED_TITLE, "a sealed title must not leak via Trash");
+    assert_eq!(
+        listed[0].title,
+        crate::notes::commands::LOCKED_TITLE,
+        "a sealed title must not leak via Trash"
+    );
     s.unlock_note(&id, "hunter22", "Vault");
     assert_eq!(list_impl(&s).await.unwrap()[0].title, "Vault");
 
-    queries::restore(&s.db, std::slice::from_ref(&id)).await.unwrap();
+    queries::restore(&s.db, std::slice::from_ref(&id))
+        .await
+        .unwrap();
     let after = notes::note_get(&s.db, &id).await.unwrap().unwrap();
     assert_eq!(after.note_salt, before.note_salt);
-    assert_eq!(after.content_ct, before.content_ct, "ciphertext must be untouched");
+    assert_eq!(
+        after.content_ct, before.content_ct,
+        "ciphertext must be untouched"
+    );
 }
 
 #[tokio::test]

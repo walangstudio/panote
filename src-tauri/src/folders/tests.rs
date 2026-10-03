@@ -34,12 +34,19 @@ async fn note_in(state: &AppState, folder: Option<&str>, title: &str) -> String 
     let id = crate::transfer::commands::import_blob(state, &state.device_key, blob)
         .await
         .unwrap();
-    queries::set_note_folder(&state.db, &id, folder, now_secs()).await.unwrap();
+    queries::set_note_folder(&state.db, &id, folder, now_secs())
+        .await
+        .unwrap();
     id
 }
 
 async fn names(state: &AppState) -> Vec<String> {
-    let mut n: Vec<String> = list_impl(state).await.unwrap().into_iter().map(|f| f.name).collect();
+    let mut n: Vec<String> = list_impl(state)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
     n.sort();
     n
 }
@@ -129,7 +136,15 @@ async fn a_legitimate_move_is_allowed() {
     let b = create_impl(&s, "B", None).await.unwrap();
     move_impl(&s, &b, Some(&a)).await.unwrap();
     let listed = list_impl(&s).await.unwrap();
-    assert_eq!(listed.iter().find(|f| f.id == b).unwrap().parent_id.as_deref(), Some(a.as_str()));
+    assert_eq!(
+        listed
+            .iter()
+            .find(|f| f.id == b)
+            .unwrap()
+            .parent_id
+            .as_deref(),
+        Some(a.as_str())
+    );
 }
 
 #[tokio::test]
@@ -149,10 +164,15 @@ async fn nesting_stops_at_the_depth_cap() {
     let s = state().await;
     let mut parent = create_impl(&s, "d0", None).await.unwrap();
     for i in 1..MAX_DEPTH {
-        parent = create_impl(&s, &format!("d{i}"), Some(&parent)).await.unwrap();
+        parent = create_impl(&s, &format!("d{i}"), Some(&parent))
+            .await
+            .unwrap();
     }
     // MAX_DEPTH levels exist; one more must be refused.
-    assert_eq!(create_impl(&s, "toodeep", Some(&parent)).await.unwrap_err(), TOO_DEEP);
+    assert_eq!(
+        create_impl(&s, "toodeep", Some(&parent)).await.unwrap_err(),
+        TOO_DEEP
+    );
 }
 
 #[tokio::test]
@@ -161,7 +181,9 @@ async fn a_move_that_would_exceed_the_cap_is_refused() {
     // A chain one short of the cap...
     let mut deep = create_impl(&s, "d0", None).await.unwrap();
     for i in 1..(MAX_DEPTH - 1) {
-        deep = create_impl(&s, &format!("d{i}"), Some(&deep)).await.unwrap();
+        deep = create_impl(&s, &format!("d{i}"), Some(&deep))
+            .await
+            .unwrap();
     }
     // ...and a 3-deep subtree that will not fit under it.
     let x = create_impl(&s, "x", None).await.unwrap();
@@ -198,7 +220,10 @@ async fn deleting_a_folder_removes_its_subfolders() {
     create_impl(&s, "C", Some(&b)).await.unwrap();
 
     queries::delete(&s.db, &a).await.unwrap();
-    assert!(names(&s).await.is_empty(), "the whole subtree should be gone");
+    assert!(
+        names(&s).await.is_empty(),
+        "the whole subtree should be gone"
+    );
 }
 
 #[tokio::test]
@@ -211,7 +236,10 @@ async fn deleting_a_folder_keeps_notes_from_its_subfolders_too() {
     queries::delete(&s.db, &a).await.unwrap();
 
     assert!(
-        crate::db::queries::note_get(&s.db, &note).await.unwrap().is_some(),
+        crate::db::queries::note_get(&s.db, &note)
+            .await
+            .unwrap()
+            .is_some(),
         "a note in a subfolder must survive its folder being deleted",
     );
     assert_eq!(queries::note_folder(&s.db, &note).await.unwrap(), None);
@@ -246,7 +274,10 @@ async fn a_folder_send_collects_the_whole_subtree() {
     let ids = queries::note_ids_in_subtree(&s.db, &a).await.unwrap();
     assert!(ids.contains(&top));
     assert!(ids.contains(&nested), "subfolder notes must be included");
-    assert!(!ids.contains(&loose), "notes outside the folder must not be");
+    assert!(
+        !ids.contains(&loose),
+        "notes outside the folder must not be"
+    );
     assert_eq!(ids.len(), 2);
 }
 
@@ -257,10 +288,17 @@ async fn moving_a_note_between_folders_works_and_can_clear_it() {
     let b = create_impl(&s, "B", None).await.unwrap();
     let note = note_in(&s, Some(&a), "n").await;
 
-    queries::set_note_folder(&s.db, &note, Some(&b), now_secs()).await.unwrap();
-    assert_eq!(queries::note_folder(&s.db, &note).await.unwrap().as_deref(), Some(b.as_str()));
+    queries::set_note_folder(&s.db, &note, Some(&b), now_secs())
+        .await
+        .unwrap();
+    assert_eq!(
+        queries::note_folder(&s.db, &note).await.unwrap().as_deref(),
+        Some(b.as_str())
+    );
 
-    queries::set_note_folder(&s.db, &note, None, now_secs()).await.unwrap();
+    queries::set_note_folder(&s.db, &note, None, now_secs())
+        .await
+        .unwrap();
     assert_eq!(queries::note_folder(&s.db, &note).await.unwrap(), None);
 }
 
@@ -271,7 +309,9 @@ async fn the_folder_list_reports_the_order_a_reorder_saved() {
     let s = state().await;
     let a = create_impl(&s, "Alpha", None).await.unwrap();
     let b = create_impl(&s, "Beta", None).await.unwrap();
-    queries::set_order(&s.db, &[b.clone(), a.clone()]).await.unwrap();
+    queries::set_order(&s.db, &[b.clone(), a.clone()])
+        .await
+        .unwrap();
     let listed = list_impl(&s).await.unwrap();
     let order = |id: &str| listed.iter().find(|f| f.id == id).unwrap().sort_order;
     assert_eq!((order(&b), order(&a)), (0, 1));
@@ -298,7 +338,9 @@ async fn copying_a_folder_copies_its_subtree_but_not_its_trash() {
     note_in(&s, Some(&top), "a").await;
     note_in(&s, Some(&sub), "b").await;
     let gone = note_in(&s, Some(&sub), "c").await;
-    crate::trash::queries::trash(&s.db, &[gone], now_secs()).await.unwrap();
+    crate::trash::queries::trash(&s.db, &[gone], now_secs())
+        .await
+        .unwrap();
 
     let report = copy_impl(&s, &top, Some(&dest)).await.unwrap();
     assert_eq!(report.copied.len(), 2);
@@ -313,10 +355,16 @@ async fn copying_a_folder_copies_its_subtree_but_not_its_trash() {
         .iter()
         .find(|f| f.name == "Sub" && f.parent_id.as_deref() == Some(top2.id.as_str()))
         .expect("a copy of Sub inside the copy of Top");
-    let notes = crate::notes::commands::list_impl(&s, None, None).await.unwrap();
+    let notes = crate::notes::commands::list_impl(&s, None, None)
+        .await
+        .unwrap();
     assert_eq!(titles_in(&notes, &top2.id), vec!["a"]);
     assert_eq!(titles_in(&notes, &sub2.id), vec!["b"]);
-    assert_eq!(titles_in(&notes, &sub), vec!["b"], "the original keeps its notes");
+    assert_eq!(
+        titles_in(&notes, &sub),
+        vec!["b"],
+        "the original keeps its notes"
+    );
 }
 
 #[tokio::test]
@@ -326,10 +374,19 @@ async fn a_folder_copied_beside_itself_is_marked_as_a_copy() {
     note_in(&s, Some(&top), "a").await;
     copy_impl(&s, &top, None).await.unwrap();
     let folders = list_impl(&s).await.unwrap();
-    let dup = folders.iter().find(|f| f.name == "Top (copy)").expect("suffixed copy");
+    let dup = folders
+        .iter()
+        .find(|f| f.name == "Top (copy)")
+        .expect("suffixed copy");
     assert_eq!(dup.parent_id, None);
-    let notes = crate::notes::commands::list_impl(&s, None, None).await.unwrap();
-    assert_eq!(titles_in(&notes, &dup.id), vec!["a"], "notes inside keep their titles");
+    let notes = crate::notes::commands::list_impl(&s, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        titles_in(&notes, &dup.id),
+        vec!["a"],
+        "notes inside keep their titles"
+    );
 }
 
 #[tokio::test]
@@ -337,7 +394,9 @@ async fn a_folder_copy_that_would_exceed_the_cap_is_refused() {
     let s = state().await;
     let mut deep = create_impl(&s, "d0", None).await.unwrap();
     for i in 1..(MAX_DEPTH - 1) {
-        deep = create_impl(&s, &format!("d{i}"), Some(&deep)).await.unwrap();
+        deep = create_impl(&s, &format!("d{i}"), Some(&deep))
+            .await
+            .unwrap();
     }
     let x = create_impl(&s, "x", None).await.unwrap();
     let y = create_impl(&s, "y", Some(&x)).await.unwrap();
