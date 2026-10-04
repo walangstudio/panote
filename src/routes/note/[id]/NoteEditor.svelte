@@ -23,6 +23,7 @@
   import { sidebarOpen } from "$lib/stores/sidebar";
   import { detectFormat } from "$lib/detectFormat";
   import { autosave } from "$lib/stores/autosave";
+  import { forgetSelected } from "$lib/stores/listState";
   import { findBelongsToNote } from "$lib/shortcuts";
   import {
     collectMatches, showMatches, clearMatches, stepMatch, matchLabel, type Match,
@@ -34,7 +35,11 @@
   /// `onrenew` asks the route for a fresh editor on the coming navigation, even if
   /// it lands on this same URL: after a save or discard on the way out, or to
   /// retry a note that failed to load.
-  let { onadopt, onrenew }: { onadopt?: (id: string) => void; onrenew?: () => void } = $props();
+  let { onadopt, onrenew }: {
+    onadopt?: (id: string) => void;
+    /// `url` is where the coming navigation goes; omitted when unknown (Back).
+    onrenew?: (url?: string) => void;
+  } = $props();
 
   // This editor's note, fixed when it is built. The route builds a new editor for
   // every other note, so reading the live URL here would let a write still in
@@ -163,7 +168,7 @@
     if (adoptNav && to?.url.pathname === `/note/${adoptedId}` && !to.url.search) return;
     // A note that failed to load has nothing to lose; any visit, even to itself,
     // gets a fresh editor that tries again.
-    if (loadFailed) { onrenew?.(); return; }
+    if (loadFailed) { onrenew?.(to?.url.toString()); return; }
     // Mid-leave, every navigation waits for the save. An unload is held too: the
     // browser asks, and the save in flight gets to finish. A click becomes the
     // leave's destination; Back and Forward are just held, since replaying them as
@@ -174,6 +179,14 @@
       return;
     }
     if (!dirty) return;
+    // Re-clicking this very note with autosave on: save it where it stands rather
+    // than leave and rebuild the editor around the same note. Not for a new note:
+    // its URL again means "another new note", which is a real leave.
+    if ($autosave && !isNew && type !== "leave" && to?.url.pathname === location.pathname && to.url.search === location.search) {
+      cancel();
+      void flushAutosave();
+      return;
+    }
     // An unload cannot wait for a save; the window close handler below covers it.
     if (type === "leave" && $autosave) return;
     cancel();
@@ -196,6 +209,7 @@
     confirmDelete = false;
     try {
       await notesDelete([id]);
+      forgetSelected([id]);
       await Promise.all([refreshNotes(), refreshFolders()]);
       justSaved = true; // deleted, so the dirty guard must not fight the exit
       if (!destroyed) goto("/");
@@ -206,6 +220,10 @@
 
   const DRAFT_DEBOUNCE_MS = 800;
   let draftTimer: ReturnType<typeof setTimeout> | null = null;
+  /// The draft save in flight, if any; Discard waits for it.
+  let draftWrite: Promise<void> | null = null;
+  /// This session has written a draft, so Discard has one of its own to remove.
+  let wroteDraft = false;
   let draftStatus = $state<"" | "saving" | "saved">("");
   /// An outstanding draft found on open, offered rather than applied.
   let pendingDraft = $state<DraftDetail | null>(null);
@@ -223,14 +241,18 @@
     // New notes have no id to key a draft on, and protected notes refuse them.
     if (isNew || hasPassword || locked || loading) return;
     if (draftTimer) clearTimeout(draftTimer);
-    draftTimer = setTimeout(async () => {
-      try {
-        draftStatus = "saving";
-        await noteDraftSave(id, { title, content, tags });
-        draftStatus = "saved";
-      } catch {
-        draftStatus = "";
-      }
+    draftTimer = setTimeout(() => {
+      draftTimer = null;
+      draftWrite = (async () => {
+        try {
+          draftStatus = "saving";
+          wroteDraft = true;
+          await noteDraftSave(id, { title, content, tags });
+          draftStatus = "saved";
+        } catch {
+          draftStatus = "";
+        }
+      })();
     }, DRAFT_DEBOUNCE_MS);
   }
 
@@ -261,10 +283,10 @@
       if (!(commitTag ? dirty : edited) || locked) return true;
       if (isNew && !title.trim() && !tags.length && !tagInput.trim() && JSON.stringify(content) === savedContent) return true;
       if (commitTag) addTag();
-      const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
+      const snapshot = takeSnapshot();
       const { ok, created } = await persist(false);
       if (!ok) return false;
-      [savedTitle, savedContent, savedTags] = snapshot;
+      commitBaseline(snapshot);
       if (created) await adopt(created.id);
       return true;
     }));
@@ -319,17 +341,31 @@
     closeWindow();
   }
 
-  /// "Discard" means the edits are gone. The draft holding them would otherwise
-  /// offer them straight back the next time the note opens.
-  async function dropDraft() {
+  /// "Discard" means the edits are gone. A draft this session wrote holds them and
+  /// would offer them straight back the next time the note opens, so it goes. A
+  /// draft from an earlier session is not this session's to throw away, unless
+  /// `force` (the banner's own "Keep saved version").
+  async function dropDraft(force = false) {
     if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
-    if (isNew) return;
-    try { await noteDraftDiscard(id); } catch { /* nothing to discard */ }
+    // A draft write already under way would land after the discard and undo it.
+    await draftWrite;
+    if (isNew || !(force || wroteDraft)) return;
+    try {
+      await noteDraftDiscard(id);
+      wroteDraft = false;
+    } catch { /* nothing to discard */ }
   }
 
+  let closeSaving = false;
   async function saveAndClose() {
-    const { ok } = await persist();
-    if (ok) closeWindow();
+    if (closeSaving) return;
+    closeSaving = true;
+    try {
+      const { ok } = await persist();
+      if (ok) closeWindow();
+    } finally {
+      closeSaving = false;
+    }
   }
 
   // ---- Find in note ----
@@ -405,7 +441,7 @@
   async function discardDraft() {
     pendingDraft = null;
     draftStatus = "";
-    try { await noteDraftDiscard(id); } catch { /* nothing to discard */ }
+    await dropDraft(true);
   }
 
   /// Ctrl/Cmd+S commits. Writers hit it reflexively; before this it did nothing
@@ -456,7 +492,7 @@
     justSaved = true;
     await dropDraft();
     if (destroyed) return;
-    onrenew?.();
+    onrenew?.(target ?? undefined);
     if (target) {
       goto(target);
     } else {
@@ -625,16 +661,21 @@
     return { ok, created };
   }
 
-  function rebaseline() {
-    savedTitle = title;
-    savedContent = JSON.stringify(content);
-    savedTags = JSON.stringify(tags);
+  /// What a write is about to put on disk. Taken before the write, so anything
+  /// typed while it runs still counts as unsaved afterwards.
+  function takeSnapshot() {
+    return { title, content: JSON.stringify(content), tags: JSON.stringify(tags) };
+  }
+
+  function commitBaseline(s: ReturnType<typeof takeSnapshot>) {
+    savedTitle = s.title;
+    savedContent = s.content;
+    savedTags = s.tags;
   }
 
   async function save() {
     addTag();
-    // Taken before the write: anything typed while it runs is still unsaved after.
-    const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
+    const snapshot = takeSnapshot();
     const { ok, created } = await persist(false);
     if (!ok || destroyed) return;
     if (!$isDesktop) {
@@ -643,26 +684,41 @@
       return;
     }
     // Staying put: what was written is the new baseline.
-    [savedTitle, savedContent, savedTags] = snapshot;
+    commitBaseline(snapshot);
+    justSaved = false;
     // Bind the editor to the real note, or the next save creates a duplicate.
     if (created) await adopt(created.id);
   }
 
   /// "Save" from the unsaved-changes prompt: persist, then continue to wherever
   /// the user was heading. A failed write keeps the prompt up so nothing is lost.
+  let leaveSaving = false;
   async function saveAndNavigate() {
-    const { ok } = await persist();
-    if (!ok) { leaving = false; return; }
-    rebaseline();
-    // Read after the save: a click made while it ran replaced the target.
-    const target = pendingNavUrl;
-    pendingNavUrl = null;
-    justSaved = true;
-    if (destroyed) return;
-    // Wherever this goes, even this same URL, the next editor starts clean.
-    onrenew?.();
-    if (target) goto(target);
-    else history.back();
+    // The prompt's Save can be clicked twice; one leave is enough.
+    if (leaveSaving) return;
+    leaveSaving = true;
+    try {
+      // Keep writing until nothing typed during a write is left behind: leaving
+      // rebuilds the editor from disk, and anything not written would be lost.
+      do {
+        addTag();
+        const snapshot = takeSnapshot();
+        const { ok } = await persist(false);
+        if (!ok) { leaving = false; return; }
+        commitBaseline(snapshot);
+      } while (edited && !destroyed);
+      // Read after the save: a click made while it ran replaced the target.
+      const target = pendingNavUrl;
+      pendingNavUrl = null;
+      justSaved = true;
+      if (destroyed) return;
+      // Wherever this goes, even this same URL, the next editor starts clean.
+      onrenew?.(target ?? undefined);
+      if (target) goto(target);
+      else history.back();
+    } finally {
+      leaveSaving = false;
+    }
   }
 
   async function unlockForSave(v: { password: string }) {

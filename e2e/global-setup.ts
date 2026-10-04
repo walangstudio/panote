@@ -11,7 +11,11 @@ export default async function globalSetup(config: FullConfig) {
   await setupTauriMock(page);
   await page.goto(baseURL);
   await page.locator(".note-card").first().waitFor({ timeout: 120_000 });
-  await page.goto(`${baseURL}/note/note-1`);
-  await page.locator(".title-input").waitFor({ timeout: 120_000 });
+  // Every editor kind: each pulls in its own dependencies (TipTap for documents),
+  // and the first spec to open one would otherwise pay for that compile.
+  for (const kind of ["document", "checklist", "kanban", "table"]) {
+    await page.goto(`${baseURL}/note/new?kind=${kind}`);
+    await page.locator(".title-input").waitFor({ timeout: 120_000 });
+  }
   await browser.close();
 }

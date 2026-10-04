@@ -736,3 +736,74 @@ test("clicking a note that failed to load tries again", async ({ page }) => {
   await page.locator(".note-card", { hasText: "Draft" }).first().click();
   await expect(page.locator(".title-input")).toHaveValue("Draft");
 });
+
+
+test("Save on the way out also writes what was typed while it ran", async ({ page }) => {
+  const titles: string[] = [];
+  await setupTauriMock(page, {
+    note_update: async (args: { input: { title: string } }) => {
+      await new Promise(r => setTimeout(r, 1000));
+      titles.push(args.input.title);
+      return MOCK_NOTES[0];
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Before saving");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".modal .btn-confirm").click();
+  await page.fill(".title-input", "Before saving, and after");
+  await page.waitForURL(/note-3/, { timeout: 8000 });
+  expect(titles.at(-1)).toBe("Before saving, and after");
+});
+
+test("re-clicking the open note mid-autosave saves in place without rebuilding", async ({ page }) => {
+  const gets: string[] = [];
+  const updates: string[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_get: (args: { id: string }) => { gets.push(args.id); return { ...MOCK_NOTE_DETAIL, id: args.id }; },
+    note_update: (args: { id: string }) => { updates.push(args.id); return MOCK_NOTES[0]; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await expect(page.locator(".title-input")).toHaveValue("Meeting notes");
+  await page.fill(".title-input", "Typing");
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await expect.poll(() => updates.length).toBeGreaterThan(0);
+  expect(gets.filter(g => g === "note-1").length).toBe(1);
+  await expect(page.locator(".title-input")).toHaveValue("Typing");
+});
+
+test("Discard keeps an earlier session's draft when this session wrote none", async ({ page }) => {
+  let discards = 0;
+  await setupTauriMock(page, {
+    note_draft_get: (args: { id: string }) =>
+      args.id === "note-1"
+        ? { title: "From last session", content: { body: "x" }, tags: [], updated_at: 1700000000 }
+        : null,
+    note_draft_discard: () => { discards++; return null; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await expect(page.locator(".draft-banner")).toBeVisible();
+  await page.fill(".tag-input", "half");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+  await page.waitForURL(/note-3/);
+  expect(discards).toBe(0);
+});
+
+test("a note trashed from the editor leaves the selection even when the list is capped", async ({ page }) => {
+  await setupTauriMock(page, { note_count: 999 });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.getByRole("button", { name: "Select notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await expect(page.locator(".sel-count")).toContainText("2 selected");
+  await page.locator('.editor-header button[aria-label="More options"]').click();
+  await page.locator(".overflow-item", { hasText: "Delete" }).click();
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.locator(".sel-count")).toContainText("1 selected");
+});

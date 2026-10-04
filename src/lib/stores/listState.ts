@@ -13,6 +13,12 @@ import { goto } from "$app/navigation";
 export const listFilter = writable("");
 export const listSelecting = writable(false);
 export const listSelected = writable(new Set<string>());
+
+/// Drop notes that just went to Trash from the selection, wherever they were
+/// trashed from: a batch action must never reach them.
+export function forgetSelected(ids: string[]) {
+  listSelected.update(s => (ids.some(i => s.has(i)) ? new Set([...s].filter(i => !ids.includes(i))) : s));
+}
 /// Which folder the list is showing; null means everything. Lives here for the
 /// same reason as the search text: opening a note on mobile unmounts the list,
 /// and a folder you had drilled into should still be there when you come back.

@@ -59,6 +59,23 @@
   finger; the rest of the row still scrolls. A focused grip moves its row with the up and
   down arrow keys, announced to screen readers. Pinned notes stay on top and are arranged
   among themselves. Custom has no direction, and grips hide while searching.
+- **Discard really discards.** Choosing Discard when leaving a note, or when closing the
+  window, used to keep the edits as a draft and offer them back the next time the note
+  opened. A draft from an earlier session is left alone.
+- **Switching notes can no longer mix them up.** Each note now gets its own editor, so an
+  edit, a save still in flight or a pending draft from the note you left can never land in
+  the next one. With autosave on, leaving during a save no longer creates a note twice,
+  text typed while a save runs is written too, and a click made meanwhile becomes the
+  destination.
+- **A note that fails to open shows an error and a way back**, instead of an empty editor
+  that could have been saved over it. Opening it again retries.
+- **Delete acts on the row that has keyboard focus**, not the note open beside the list.
+  Deleting several notes is all or nothing and reports a failure instead of hiding it,
+  and notes that go to Trash leave the selection.
+- **A note sitting in Trash comes back when it arrives again**, from a transfer or a
+  backup import (Skip or Overwrite), instead of staying hidden until the 30-day purge.
+- **Copying or protecting many password-protected notes no longer stalls the app**; the
+  key derivation runs off the thread other actions use.
 
 ### Security
 

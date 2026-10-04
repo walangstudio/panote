@@ -49,6 +49,8 @@
   $effect(() => { listFilter.set(filter); });
   $effect(() => { listSelecting.set(selecting); });
   $effect(() => { listSelected.set(selected); });
+  // ...and back: the editor prunes the store when it trashes a selected note.
+  onMount(() => listSelected.subscribe(v => { if (v !== untrack(() => selected)) selected = v; }));
   let transferNoteIds = $state<string[] | null>(null);
   let deleteTargets = $state<string[] | null>(null);
   let sortOpen = $state(false);
