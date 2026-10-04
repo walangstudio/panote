@@ -563,3 +563,51 @@ test("a note that failed to load is never saved over", async ({ page }) => {
   await page.waitForTimeout(800);
   expect(updates).not.toContain("note-3");
 });
+
+test("saving on a click to the open note keeps tracking later edits", async ({ page }) => {
+  await setupTauriMock(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "First edit");
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.locator(".modal")).toHaveCount(0);
+  // A later edit must still count as unsaved.
+  await page.fill(".title-input", "Second edit");
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await expect(page.locator(".modal")).toContainText("Unsaved changes");
+});
+
+test("a note that failed to load shows an error, not an editor", async ({ page }) => {
+  await setupTauriMock(page, {
+    note_get: (args: { id: string }) =>
+      args.id === "note-3" ? reject("database is locked") : { ...MOCK_NOTE_DETAIL, id: args.id },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-3");
+  await expect(page.getByText("Couldn't open this note")).toBeVisible();
+  await expect(page.locator(".title-input")).toHaveCount(0);
+});
+
+test("Back during an autosave leave is held, not replayed as a new navigation", async ({ page }) => {
+  const updates: string[] = [];
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_update: async (args: { id: string }) => {
+      await new Promise(r => setTimeout(r, 1500));
+      updates.push(args.id);
+      return MOCK_NOTES[0];
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-3");
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.waitForURL(/note-1/);
+  const before = await page.evaluate(() => history.length);
+  await page.fill(".title-input", "Edited");
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await page.goBack();
+  await page.waitForURL(/note-2/, { timeout: 8000 });
+  expect(updates).toContain("note-1");
+  expect(await page.evaluate(() => history.length)).toBe(before + 1);
+});

@@ -1,30 +1,24 @@
 <script lang="ts">
-  import { page } from "$app/state";
-  import { untrack } from "svelte";
-  import NoteEditor, { adoption } from "./NoteEditor.svelte";
+  import { afterNavigate } from "$app/navigation";
+  import NoteEditor from "./NoteEditor.svelte";
 
-  // One editor per note. Switching notes builds a fresh one, so nothing from the
+  // One editor per note. Every navigation builds a fresh one, so nothing from the
   // note being left (unsaved edits, timers, writes still in flight) can reach the
-  // next. Autosave giving a new note its real id is the same note: it keeps the editor.
-  const target = $derived(
-    page.params.id === "new"
-      ? `new?${page.url.searchParams.get("kind")}&${page.url.searchParams.get("folder")}`
-      : (page.params.id ?? ""),
-  );
+  // next. The one exception is autosave giving a new note its real id: that is
+  // the same note, and rebuilding would throw away the cursor mid-sentence.
   let key = $state(0);
-  let shown = untrack(() => target);
+  /// The id an adoption is moving to. Spent by the next navigation either way, so
+  /// an adoption cut short by a click cannot make a later visit reuse the editor.
+  let adopting: string | null = null;
 
-  $effect(() => {
-    const next = target;
-    untrack(() => {
-      if (next === shown) return;
-      if (next === adoption.id) adoption.id = null;
-      else key++;
-      shown = next;
-    });
+  afterNavigate(({ type, to }) => {
+    if (type === "enter") return;
+    const adopted = adopting !== null && to?.params?.id === adopting;
+    adopting = null;
+    if (!adopted) key++;
   });
 </script>
 
 {#key key}
-  <NoteEditor />
+  <NoteEditor onadopt={(id) => (adopting = id)} />
 {/key}

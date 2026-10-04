@@ -1,9 +1,3 @@
-<script lang="ts" module>
-  /// Set when autosave gives a new note its real id. The route then keeps this
-  /// editor instead of building a fresh one for what is the same note.
-  export const adoption: { id: string | null } = { id: null };
-</script>
-
 <script lang="ts">
   import { page } from "$app/state";
   import { untrack, onMount, onDestroy, tick } from "svelte";
@@ -35,15 +29,23 @@
   } from "$lib/findInNote";
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
-  const id = $derived(page.params.id ?? "");
+  /// Told before autosave moves the URL to a new note's real id, so the route
+  /// keeps this editor for what is the same note.
+  let { onadopt }: { onadopt?: (id: string) => void } = $props();
+
+  // This editor's note, fixed when it is built. The route builds a new editor for
+  // every other note, so reading the live URL here would let a write still in
+  // flight, or a timer, land on the note being opened instead of this one. The
+  // id changes only when autosave gives a new note its real id.
+  let id = $state(untrack(() => page.params.id ?? ""));
   const isNew = $derived(id === "new");
-  const kindParam = $derived((page.url.searchParams.get("kind") ?? "document") as NoteKind);
-  const modeParam = $derived(page.url.searchParams.get("mode"));
-  const folderParam = $derived(page.url.searchParams.get("folder"));
+  const kindParam = untrack(() => (page.url.searchParams.get("kind") ?? "document") as NoteKind);
+  const modeParam = untrack(() => page.url.searchParams.get("mode"));
+  const folderParam = untrack(() => page.url.searchParams.get("folder"));
 
   let loading = $state(true);
   /// The note could not be read; nothing here may be saved over it.
-  let loadFailed = false;
+  let loadFailed = $state(false);
   let saving = $state(false);
   let error = $state("");
   let hasPassword = $state(false);
@@ -77,10 +79,8 @@
   let justSaved = $state(false);
   let pendingNavUrl = $state<string | null>(null);
   let updatedAt = $state<number | undefined>();
-  /// Bumped once a note's state is fully populated. The editor is keyed on this
-  /// rather than on `id`: for a brand-new note `openNote` runs synchronously, so
-  /// keying on `id` recreated the editor during the render *before* the reset
-  /// ran, leaving the previous note's body on screen.
+  /// Bumped whenever the note's content is replaced in place (unlock, recovery,
+  /// restoring a draft), so the body editor is rebuilt around the new content.
   let loadToken = $state(0);
 
   // Auto-contrast ink for custom backgrounds
@@ -155,18 +155,18 @@
   let leaving = $state(false);
 
   beforeNavigate(({ cancel, to, type }) => {
-    // Mid-leave, every navigation waits for the save; the leave then goes to the
-    // latest click. An unload is never held: that would only raise the browser's
-    // own prompt, and the window close handler covers it.
+    // Autosave binding a new note to its real id is not leaving it, mid-leave or not.
+    if (adoptedId && to?.url.pathname === `/note/${adoptedId}`) return;
+    // Mid-leave, every navigation waits for the save. An unload is held too: the
+    // browser asks, and the save in flight gets to finish. A click becomes the
+    // leave's destination; Back and Forward are just held, since replaying them as
+    // a new navigation would grow the history.
     if (pendingNavUrl !== null) {
-      if (type === "leave") return;
       cancel();
-      if (leaving && to) pendingNavUrl = to.url.toString();
+      if (leaving && to && type !== "leave" && type !== "popstate") pendingNavUrl = to.url.toString();
       return;
     }
     if (!dirty) return;
-    // Autosave binding a new note to its real id is not leaving it.
-    if (adoptedId && to?.url.pathname === `/note/${adoptedId}`) return;
     // An unload cannot wait for a save; the window close handler below covers it.
     if (type === "leave" && $autosave) return;
     cancel();
@@ -258,12 +258,13 @@
       const { ok, created } = await persist(false);
       if (!ok) return false;
       [savedTitle, savedContent, savedTags] = snapshot;
-      // Mid-leave there is no point binding the URL to the new id: the leave's own
-      // save already knows it (createdId) and is about to navigate elsewhere.
-      if (created && !destroyed && pendingNavUrl === null) {
+      if (created && !destroyed) {
+        id = created.id;
         adoptedId = created.id;
-        adoption.id = created.id;
+        onadopt?.(created.id);
         await goto(`/note/${created.id}`, { replaceState: true, keepFocus: true, noScroll: true });
+        // Spent: a later visit to this id is an ordinary navigation again.
+        adoptedId = null;
       }
       return true;
     }));
@@ -426,35 +427,10 @@
     }
   }
 
-  // The route builds one editor per note, so this loads it once. The id changes
-  // under a live editor only when autosave gives a new note its real id.
-  $effect(() => {
-    const target = id;
-    const targetKind = kindParam;
-    untrack(() => {
-      if (target === adoptedId) { adoptedId = null; return; }
-      void openNote(target, targetKind);
-    });
-  });
+  onMount(() => void openNote(id, kindParam));
 
+  // Runs once per editor instance, so every field below starts at its default.
   async function openNote(noteId: string, newKind: NoteKind) {
-    loading = true;
-    error = "";
-    locked = false;
-    hasPassword = false;
-    needUnlockForSave = false;
-    pwModal = null;
-    menuOpen = false;
-    bgMenuOpen = false;
-    recoverOpen = false;
-    postProtectPw = null;
-    recoveryCode = null;
-    justSaved = false;
-    tagInput = "";
-    bgColor = undefined;
-    bgImage = undefined;
-    updatedAt = undefined;
-    closeFind();
     if (noteId === "new") {
       kind = newKind;
       title = "";
@@ -477,6 +453,7 @@
     try {
       const note = await noteGet(requested);
       if (requested !== id) return;
+      loadFailed = false;
       kind = note.kind;
       title = note.title;
       content = note.content;
@@ -562,14 +539,7 @@
       await noteLock(id);
       if ($isDesktop) {
         // The list stays beside us; re-read so the lock gate renders in place.
-        // Locking puts the note away: drop its plaintext and anything unsaved,
-        // so nothing prompts for or saves a locked note.
-        title = savedTitle = "";
-        content = defaultContent(kind);
-        savedContent = JSON.stringify(content);
-        tags = [];
-        savedTags = "[]";
-        tagInput = "";
+        // loadNote resets the saved snapshots, so this clears dirty on its own.
         await loadNote();
       } else {
         justSaved = true;
@@ -785,6 +755,9 @@
 
 {#if loading}
   <div class="loading">Loading…</div>
+{:else if loadFailed}
+  <!-- Nothing of the note is here, so there is nothing to edit or save over it. -->
+  <div class="loading" role="alert">Couldn't open this note: {error}</div>
 {:else if locked}
   <div class="lock-gate">
     <div class="lock-gate-circle">
@@ -1003,9 +976,7 @@
 
       <!-- Body editors -->
       <div class="editor-body">
-        <!-- Keyed on the load token, not the id: the split view reuses this
-             component across notes, and the editor must only be rebuilt once the
-             new note's content is in place (see loadToken). -->
+        <!-- Rebuilt whenever the content is replaced in place (see loadToken). -->
         {#key loadToken}
           {#if kind === "document"}
             <!-- WYSIWYG now, so there is no edit/preview split — only ?mode=view

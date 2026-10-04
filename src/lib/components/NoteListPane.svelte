@@ -409,9 +409,10 @@
     } finally {
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
-    // Done with the selection once it went to Trash; a single row deleted while
-    // selecting leaves the selection alone.
+    // Done with the selection once it went to Trash. A single row deleted while
+    // selecting leaves the rest selected, minus what is now in Trash.
     if (wasSelection) { selecting = false; selected = new Set(); }
+    else if (ids.some(i => selected.has(i))) selected = new Set([...selected].filter(i => !ids.includes(i)));
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }
