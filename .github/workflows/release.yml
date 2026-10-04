@@ -101,7 +101,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - id: ndk
         uses: nttld/setup-ndk@v1
         with:
