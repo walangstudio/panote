@@ -4,7 +4,7 @@
 
 # Panote
 
-[![Version](https://img.shields.io/badge/version-0.4.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
@@ -14,6 +14,21 @@
 ---
 
 A local-first note-taking app for desktop and Android, built with Tauri 2, Svelte 5, and Rust. Notes are stored encrypted on-device. Transferring a note to another device uses a one-time pairing code; nothing goes through a server.
+
+---
+
+## Download
+
+Installers are on the [releases page](https://github.com/walangstudio/panote/releases/latest):
+
+| Platform | File |
+|---|---|
+| Windows | `.msi` or `.exe` (setup) |
+| macOS (Apple silicon and Intel) | `.dmg` |
+| Linux | `.AppImage`, `.deb` or `.rpm` |
+| Android 7+ | `.apk` |
+
+Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("More info", then "Run anyway"); on macOS, open the app once, then allow it under System Settings > Privacy & Security > Open Anyway.
 
 ---
 
@@ -142,6 +157,10 @@ adb install src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-univ
 ```
 
 Desktop installers are output to `src-tauri/target/release/bundle/`.
+
+### Releasing
+
+Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, date its `CHANGELOG.md` section, then push a `vX.Y.Z` tag. The Release workflow builds every installer into a draft release whose notes are that CHANGELOG section; publish it once the files check out. The APK is signed only when the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` and `ANDROID_KEY_ALIAS` repository secrets are set; without them the release ships no APK.
 
 ---
 

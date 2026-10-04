@@ -1,0 +1,150 @@
+name: Release
+
+# A v* tag builds every installer into a draft release, which is published by hand once
+# checked. A PR touching the release setup, or a run from the Actions tab, builds the same
+# files as workflow artifacts only.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - src-tauri/gen/android/**
+      - src-tauri/tauri.conf.json
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.create.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          app=$(jq -r .version src-tauri/tauri.conf.json)
+          [ "$version" = "$app" ] || { echo "::error::tag $TAG does not match app version $app"; exit 1; }
+          awk -v h="## [$version]" 'index($0, h) == 1 { f = 1; next } /^## \[/ { f = 0 } f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no [$version] section"; exit 1; }
+          gh release create "$TAG" --draft --verify-tag --title "Panote $version" --notes-file notes.md
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.name }})
+    needs: draft
+    if: ${{ !cancelled() && needs.draft.result != 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            args: ""
+          - name: Linux
+            # The oldest supported runner, so the AppImage and .deb run on older glibc.
+            platform: ubuntu-22.04
+            args: ""
+          - name: macOS universal
+            platform: macos-latest
+            args: --target universal-apple-darwin
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libssl-dev libdbus-1-dev patchelf xdg-utils pkg-config build-essential
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          releaseId: ${{ needs.draft.outputs.id }}
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true
+
+  android:
+    name: Android
+    needs: draft
+    if: ${{ !cancelled() && needs.draft.result != 'failure' }}
+    runs-on: ubuntu-latest
+    env:
+      HAS_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27d
+          local-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Signing key
+        if: env.HAS_KEY == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$RUNNER_TEMP/release.jks" "$PASSWORD" "$ALIAS" "$PASSWORD" > src-tauri/gen/android/keystore.properties
+      - run: npm run tauri android build -- --apk
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+      - id: apk
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          dir=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          if [ "$HAS_KEY" = true ]; then src="$dir/app-universal-release.apk"; suffix=""; else src="$dir/app-universal-release-unsigned.apk"; suffix="_unsigned"; fi
+          out="Panote_${version}_android-universal${suffix}.apk"
+          cp "$src" "$out"
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: ${{ steps.apk.outputs.file }}
+      # An unsigned APK cannot be installed, so it never goes on the release.
+      - if: needs.draft.outputs.id != '' && env.HAS_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" "${{ steps.apk.outputs.file }}"

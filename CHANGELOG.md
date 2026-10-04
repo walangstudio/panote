@@ -1,9 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-10-04
 
 ### Added
 
+- **Downloads on every release.** Each GitHub release carries installers for Windows
+  (`.msi`, `.exe`), macOS (universal `.dmg` for Apple silicon and Intel), Linux
+  (`.AppImage`, `.deb`, `.rpm`) and Android (`.apk`). The desktop builds are not code-signed,
+  so Windows SmartScreen and macOS Gatekeeper warn on first launch. iOS is not built.
+  An APK installed from an earlier local or debug build has a different signature:
+  export your notes, uninstall it, then install this one.
 - A **System** theme that follows the OS light/dark setting and switches live when it
   changes. It is the default on a fresh install; an existing Light or Dark choice is kept.
   Pick it from the sidebar or Settings > Appearance.
