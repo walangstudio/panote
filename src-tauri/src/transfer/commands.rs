@@ -593,9 +593,6 @@ pub async fn import_blob_detailed(
         .map_err(|e| anyhow::anyhow!(e))?;
 
     if let Some(prev) = existing {
-        // Accepting a note is asking to see it, whichever branch below handles
-        // it; one that sits in Trash would otherwise arrive invisible.
-        crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
         // Model B: the note arrives as plaintext inside the E2E envelope; the
         // sender never imposes a password. If the recipient already protects
         // this note locally, keep that protection (re-seal with the cached
@@ -605,48 +602,50 @@ pub async fn import_blob_detailed(
         } else {
             None
         };
-        if prev.note_salt.is_some() && effective_pw.is_none() {
-            // Locally protected and we have no password to re-protect the new
-            // content with — refuse to overwrite rather than silently expose it.
-            return Ok((prev.id, ImportOutcome::Updated));
+        // Locally protected with no password to re-protect the new content
+        // with: keep what is there rather than silently expose it.
+        if prev.note_salt.is_none() || effective_pw.is_some() {
+            let mut row = NoteRow {
+                // Preserve where the recipient filed it; a re-send must not move it.
+                folder_id: prev.folder_id.clone(),
+                sort_order: prev.sort_order,
+                id: prev.id.clone(),
+                kind: blob.kind,
+                title_nonce: title_nonce.to_vec(),
+                title_ct,
+                title_note_nonce: None,
+                nonce: content_nonce.to_vec(),
+                content_ct: vault_ct,
+                note_salt: None,
+                note_nonce: None,
+                created_at: prev.created_at,
+                updated_at: ts,
+                tags: tags_stored,
+                content_hint,
+                pinned: prev.pinned,
+                bg_color: prev.bg_color,
+                bg_image: prev.bg_image,
+                show_preview: prev.show_preview,
+                preview_text: None,
+                origin_device_id: blob.origin_device_id,
+                origin_note_id: blob.origin_note_id,
+                rc_salt: None,
+                rc_nonce: None,
+                rc_ct: None,
+            };
+            // Title and body are re-sealed together, so neither lands in the clear.
+            if let Some(pw) = &effective_pw {
+                let sealed = crate::crypto::note::seal_note(pw, &row.content_ct, &row.title_ct)?;
+                crate::notes::commands::apply_sealed(&mut row, sealed);
+            }
+            queries::note_update(&state.db, &row).await?;
+            if let Some(pw) = &effective_pw {
+                state.unlock_note(&prev.id, pw, &blob.title);
+            }
         }
-        let mut row = NoteRow {
-            // Preserve where the recipient filed it; a re-send must not move it.
-            folder_id: prev.folder_id.clone(),
-            sort_order: prev.sort_order,
-            id: prev.id.clone(),
-            kind: blob.kind,
-            title_nonce: title_nonce.to_vec(),
-            title_ct,
-            title_note_nonce: None,
-            nonce: content_nonce.to_vec(),
-            content_ct: vault_ct,
-            note_salt: None,
-            note_nonce: None,
-            created_at: prev.created_at,
-            updated_at: ts,
-            tags: tags_stored,
-            content_hint,
-            pinned: prev.pinned,
-            bg_color: prev.bg_color,
-            bg_image: prev.bg_image,
-            show_preview: prev.show_preview,
-            preview_text: None,
-            origin_device_id: blob.origin_device_id,
-            origin_note_id: blob.origin_note_id,
-            rc_salt: None,
-            rc_nonce: None,
-            rc_ct: None,
-        };
-        // Title and body are re-sealed together, so neither lands in the clear.
-        if let Some(pw) = &effective_pw {
-            let sealed = crate::crypto::note::seal_note(pw, &row.content_ct, &row.title_ct)?;
-            crate::notes::commands::apply_sealed(&mut row, sealed);
-        }
-        queries::note_update(&state.db, &row).await?;
-        if let Some(pw) = &effective_pw {
-            state.unlock_note(&prev.id, pw, &blob.title);
-        }
+        // Accepting a note is asking to see it, so one in Trash comes back.
+        // Only now: an import that failed above must not revive the note.
+        crate::trash::queries::restore(&state.db, std::slice::from_ref(&prev.id)).await?;
         return Ok((prev.id, ImportOutcome::Updated));
     }
 

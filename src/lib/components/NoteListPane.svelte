@@ -399,6 +399,7 @@
     if (!deleteTargets) return;
     const ids = deleteTargets;
     deleteTargets = null;
+    const wasSelection = selecting && ids.length === selected.size && ids.every(i => selected.has(i));
     try {
       await notesDelete(ids);
     } catch (e) {
@@ -408,8 +409,9 @@
     } finally {
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
-    // Done with the selection, however many it held; it named notes now in Trash.
-    if (selecting) { selecting = false; selected = new Set(); }
+    // Done with the selection once it went to Trash; a single row deleted while
+    // selecting leaves the selection alone.
+    if (wasSelection) { selecting = false; selected = new Set(); }
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }
