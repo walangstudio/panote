@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import {
@@ -36,6 +36,13 @@
   let filter = $state(get(listFilter));
   let selecting = $state(get(listSelecting));
   let selected = $state(get(listSelected));
+  // A note that leaves the list (trashed from anywhere, deleted, moved away)
+  // leaves the selection too, or batch actions would reach it.
+  $effect(() => {
+    const live = new Set($notes.map(n => n.id));
+    const current = untrack(() => selected);
+    if ([...current].some(id => !live.has(id))) selected = new Set([...current].filter(id => live.has(id)));
+  });
 
   $effect(() => { listFilter.set(filter); });
   $effect(() => { listSelecting.set(selecting); });
@@ -409,10 +416,8 @@
     } finally {
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
-    // Done with the selection once it went to Trash. A single row deleted while
-    // selecting leaves the rest selected, minus what is now in Trash.
+    // Done with the selection once it went to Trash.
     if (wasSelection) { selecting = false; selected = new Set(); }
-    else if (ids.some(i => selected.has(i))) selected = new Set([...selected].filter(i => !ids.includes(i)));
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }

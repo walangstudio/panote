@@ -587,6 +587,8 @@ test("a note that failed to load shows an error, not an editor", async ({ page }
   await page.goto("/note/note-3");
   await expect(page.getByText("Couldn't open this note")).toBeVisible();
   await expect(page.locator(".title-input")).toHaveCount(0);
+  await page.getByRole("link", { name: "Back to notes" }).click();
+  await expect(page).toHaveURL(/\/$/);
 });
 
 test("Back during an autosave leave is held, not replayed as a new navigation", async ({ page }) => {
@@ -610,4 +612,55 @@ test("Back during an autosave leave is held, not replayed as a new navigation", 
   await page.waitForURL(/note-2/, { timeout: 8000 });
   expect(updates).toContain("note-1");
   expect(await page.evaluate(() => history.length)).toBe(before + 1);
+});
+
+
+test("opening a note from the list loads it once, and re-clicking it keeps the editor", async ({ page }) => {
+  const gets: string[] = [];
+  await setupTauriMock(page, {
+    note_get: (args: { id: string }) => { gets.push(args.id); return { ...MOCK_NOTE_DETAIL, id: args.id }; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await expect(page.locator(".title-input")).toHaveValue("Meeting notes");
+  await page.waitForTimeout(500);
+  expect(gets.filter(g => g === "note-1").length).toBe(1);
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.waitForTimeout(500);
+  expect(gets.filter(g => g === "note-1").length).toBe(1);
+});
+
+test("Ctrl+S on a new note binds it without rebuilding the editor", async ({ page }) => {
+  const gets: string[] = [];
+  await setupTauriMock(page, {
+    note_get: (args: { id: string }) => { gets.push(args.id); return { ...MOCK_NOTE_DETAIL, id: args.id }; },
+    note_create: () => ({ ...MOCK_NOTES[0], id: "made-1" }),
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/new?kind=document");
+  await page.fill(".title-input", "Fresh");
+  await page.keyboard.press("Control+s");
+  await page.waitForURL(/made-1/);
+  await page.waitForTimeout(500);
+  expect(gets).not.toContain("made-1");
+  await expect(page.locator(".title-input")).toHaveValue("Fresh");
+});
+
+test("a note deleted from the editor leaves the list selection", async ({ page }) => {
+  await setupTauriMock(page, {
+    note_list: () => (deleted ? MOCK_NOTES.filter(n => n.id !== "note-1") : MOCK_NOTES),
+    notes_delete: () => { deleted = true; return null; },
+  });
+  let deleted = false;
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.getByRole("button", { name: "Select notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.locator(".note-card", { hasText: "Shopping list" }).first().click();
+  await expect(page.locator(".sel-count")).toContainText("2 selected");
+  await page.locator('.editor-header button[aria-label="More options"]').click();
+  await page.locator(".overflow-item", { hasText: "Delete" }).click();
+  await page.locator(".modal .btn-confirm").click();
+  await expect(page.locator(".sel-count")).toContainText("1 selected");
 });

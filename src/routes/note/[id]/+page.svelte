@@ -11,11 +11,16 @@
   /// an adoption cut short by a click cannot make a later visit reuse the editor.
   let adopting: string | null = null;
 
-  afterNavigate(({ type, to }) => {
-    if (type === "enter") return;
+  // SvelteKit also calls this for the navigation that mounted the route; that
+  // editor is already the right one.
+  let mounted = false;
+  afterNavigate(({ from, to }) => {
+    if (!mounted) { mounted = true; return; }
     const adopted = adopting !== null && to?.params?.id === adopting;
     adopting = null;
-    if (!adopted) key++;
+    // A navigation to the URL already open (re-clicking the note) keeps the editor.
+    const same = from?.url.pathname === to?.url.pathname && from?.url.search === to?.url.search;
+    if (!adopted && !same) key++;
   });
 </script>
 

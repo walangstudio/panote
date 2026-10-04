@@ -141,7 +141,7 @@
 
   /// The note itself differs from what was last saved.
   const edited = $derived(
-    // While the next note loads, the editor still shows the last one: nothing is edited.
+    // Nothing is edited until the note has loaded.
     !justSaved && !loading && (
       title !== savedTitle ||
       JSON.stringify(content) !== savedContent ||
@@ -155,8 +155,8 @@
   let leaving = $state(false);
 
   beforeNavigate(({ cancel, to, type }) => {
-    // Autosave binding a new note to its real id is not leaving it, mid-leave or not.
-    if (adoptedId && to?.url.pathname === `/note/${adoptedId}`) return;
+    // Binding a new note to its real id is not leaving it, mid-leave or not.
+    if (adoptedId && type === "goto" && to?.url.pathname === `/note/${adoptedId}`) return;
     // Mid-leave, every navigation waits for the save. An unload is held too: the
     // browser asks, and the save in flight gets to finish. A click becomes the
     // leave's destination; Back and Forward are just held, since replaying them as
@@ -258,16 +258,21 @@
       const { ok, created } = await persist(false);
       if (!ok) return false;
       [savedTitle, savedContent, savedTags] = snapshot;
-      if (created && !destroyed) {
-        id = created.id;
-        adoptedId = created.id;
-        onadopt?.(created.id);
-        await goto(`/note/${created.id}`, { replaceState: true, keepFocus: true, noScroll: true });
-        // Spent: a later visit to this id is an ordinary navigation again.
-        adoptedId = null;
-      }
+      if (created) await adopt(created.id);
       return true;
     }));
+  }
+
+  /// Binds this editor to a new note's real id without rebuilding it, so the
+  /// cursor and undo history survive. Only the navigation started here is let
+  /// through as an adoption; a click on the new row is an ordinary navigation.
+  async function adopt(newId: string) {
+    if (destroyed) return;
+    id = newId;
+    adoptedId = newId;
+    onadopt?.(newId);
+    await goto(`/note/${newId}`, { replaceState: true, keepFocus: true, noScroll: true });
+    adoptedId = null;
   }
 
   function flushOnHide() {
@@ -419,6 +424,12 @@
   function discardAndNavigate() {
     const target = pendingNavUrl;
     pendingNavUrl = null;
+    // Discarding on the way to the note already open: reload it as saved.
+    if (target && isThisNote(target)) {
+      tagInput = "";
+      void openNote();
+      return;
+    }
     justSaved = true;
     if (target) {
       goto(target);
@@ -427,16 +438,16 @@
     }
   }
 
-  onMount(() => void openNote(id, kindParam));
+  onMount(() => void openNote());
 
   // Runs once per editor instance, so every field below starts at its default.
-  async function openNote(noteId: string, newKind: NoteKind) {
-    if (noteId === "new") {
-      kind = newKind;
+  async function openNote() {
+    if (isNew) {
+      kind = kindParam;
       title = "";
       tags = [];
       showPreview = true;
-      content = defaultContent(newKind);
+      content = defaultContent(kindParam);
       savedTitle = title;
       savedContent = JSON.stringify(content);
       savedTags = JSON.stringify(tags);
@@ -448,11 +459,8 @@
   }
 
   async function loadNote() {
-    // Clicking through the list fires overlapping loads; only the newest may win.
-    const requested = id;
     try {
-      const note = await noteGet(requested);
-      if (requested !== id) return;
+      const note = await noteGet(id);
       loadFailed = false;
       kind = note.kind;
       title = note.title;
@@ -479,13 +487,12 @@
       // Offer any unsaved work from a previous session rather than applying it —
       // the user decides whether the draft or the saved note is the real one.
       try {
-        const d = await noteDraftGet(requested);
-        if (requested === id && d && (d.title !== title || JSON.stringify(d.content) !== savedContent)) {
+        const d = await noteDraftGet(id);
+        if (d && (d.title !== title || JSON.stringify(d.content) !== savedContent)) {
           pendingDraft = d;
         }
       } catch { /* a missing or unreadable draft must not block opening the note */ }
     } catch (e) {
-      if (requested !== id) return;
       if (String(e) === LOCKED) {
         locked = true;
         hasPassword = true;
@@ -494,7 +501,6 @@
         loadFailed = true;
       }
     }
-    if (requested !== id) return;
     loading = false;
   }
 
@@ -607,7 +613,9 @@
       goto("/");
     } else if (created) {
       // Bind the editor to the real note, or the next save creates a duplicate.
-      goto(`/note/${created.id}`, { replaceState: true });
+      rebaseline();
+      justSaved = false;
+      await adopt(created.id);
     } else {
       // Staying put: clear dirty by re-baselining instead of navigating away.
       rebaseline();
@@ -624,10 +632,20 @@
     // Read after the save: a click made while it ran replaced the target.
     const target = pendingNavUrl;
     pendingNavUrl = null;
-    justSaved = true;
+    leaving = false;
     if (destroyed) return;
+    // Saving on the way to the note already open: there is nowhere to go, and the
+    // editor stays, now clean.
+    if (target && isThisNote(target)) return;
+    justSaved = true;
     if (target) goto(target);
     else history.back();
+  }
+
+  /// `url` is this editor's own note, so going there would change nothing.
+  function isThisNote(url: string) {
+    const to = new URL(url, location.href);
+    return to.pathname === location.pathname && to.search === location.search;
   }
 
   async function unlockForSave(v: { password: string }) {
@@ -757,7 +775,10 @@
   <div class="loading">Loading…</div>
 {:else if loadFailed}
   <!-- Nothing of the note is here, so there is nothing to edit or save over it. -->
-  <div class="loading" role="alert">Couldn't open this note: {error}</div>
+  <div class="loading" role="alert">
+    <span>Couldn't open this note: {error}</span>
+    <a href="/">Back to notes</a>
+  </div>
 {:else if locked}
   <div class="lock-gate">
     <div class="lock-gate-circle">

@@ -255,7 +255,7 @@ describe("saving", () => {
 
     expect(noteCreate).toHaveBeenCalled();
     // Without the rebind the next save would create a duplicate.
-    expect(goto).toHaveBeenCalledWith("/note/created-1", { replaceState: true });
+    expect(goto).toHaveBeenCalledWith("/note/created-1", expect.objectContaining({ replaceState: true }));
   });
 
   it("accepts Cmd+S as well as Ctrl+S", async () => {
