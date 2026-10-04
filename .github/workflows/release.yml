@@ -39,8 +39,11 @@ jobs:
           [ "$version" = "$app" ] || { echo "::error::tag $TAG does not match app version $app"; exit 1; }
           awk -v h="## [$version]" 'index($0, h) == 1 { f = 1; next } /^## \[/ { f = 0 } f' CHANGELOG.md > notes.md
           [ -s notes.md ] || { echo "::error::CHANGELOG.md has no [$version] section"; exit 1; }
-          gh release create "$TAG" --draft --verify-tag --title "Panote $version" --notes-file notes.md
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          # The id comes from the create response: a fresh draft is not listed straight away,
+          # and an empty id makes every build job skip its upload.
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$TAG" -f name="Panote $version" \
+            -F draft=true -F body=@notes.md --jq .id)
+          [ -n "$id" ] || { echo "::error::draft release was not created"; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   desktop:
