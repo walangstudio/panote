@@ -36,9 +36,11 @@
   let filter = $state(get(listFilter));
   let selecting = $state(get(listSelecting));
   let selected = $state(get(listSelected));
-  // A note that leaves the list (trashed from anywhere, deleted, moved away)
-  // leaves the selection too, or batch actions would reach it.
+  // A note trashed or deleted from anywhere leaves the selection too, or batch
+  // actions would reach it. Only judged against the full list: with the page cap
+  // hit, a missing id may just be unloaded.
   $effect(() => {
+    if ($notes.length < $totalNotes) return;
     const live = new Set($notes.map(n => n.id));
     const current = untrack(() => selected);
     if ([...current].some(id => !live.has(id))) selected = new Set([...current].filter(id => live.has(id)));
@@ -416,8 +418,9 @@
     } finally {
       await Promise.all([refreshNotes(), refreshFolders()]);
     }
-    // Done with the selection once it went to Trash.
+    // Done with the selection once it went to Trash; otherwise just drop what left.
     if (wasSelection) { selecting = false; selected = new Set(); }
+    else if (ids.some(i => selected.has(i))) selected = new Set([...selected].filter(i => !ids.includes(i)));
     // The deleted note may be the one open in the detail pane.
     if (desktop && ids.includes(activeId)) goto("/");
   }

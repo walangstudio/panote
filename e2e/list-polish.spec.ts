@@ -648,11 +648,13 @@ test("Ctrl+S on a new note binds it without rebuilding the editor", async ({ pag
 });
 
 test("a note deleted from the editor leaves the list selection", async ({ page }) => {
+  let deleted = false;
   await setupTauriMock(page, {
     note_list: () => (deleted ? MOCK_NOTES.filter(n => n.id !== "note-1") : MOCK_NOTES),
+    // Like the backend, the count leaves Trash out.
+    note_count: () => (deleted ? MOCK_NOTES.length - 1 : MOCK_NOTES.length),
     notes_delete: () => { deleted = true; return null; },
   });
-  let deleted = false;
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/note/note-1");
   await page.getByRole("button", { name: "Select notes" }).first().click();
@@ -663,4 +665,74 @@ test("a note deleted from the editor leaves the list selection", async ({ page }
   await page.locator(".overflow-item", { hasText: "Delete" }).click();
   await page.locator(".modal .btn-confirm").click();
   await expect(page.locator(".sel-count")).toContainText("1 selected");
+});
+
+
+test("a new note saved on the way to a fresh new note gets created, and the fresh one starts blank", async ({ page }) => {
+  let creates = 0;
+  await setupTauriMock(page, {
+    get_autosave: true,
+    note_create: () => { creates++; return { ...MOCK_NOTES[0], id: "made-1" }; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/new?kind=document");
+  await page.fill(".title-input", "First new note");
+  await page.locator(".compose-btn").click();
+  await page.locator('[role="dialog"][aria-label="New note"]').getByText("Document").click();
+  await expect.poll(() => creates).toBe(1);
+  await expect(page.locator(".title-input")).toHaveValue("");
+  await expect(page).toHaveURL(/\/note\/new/);
+});
+
+test("Discard means the edits are gone, not offered back as a draft", async ({ page }) => {
+  let draft: unknown = null;
+  await setupTauriMock(page, {
+    note_draft_save: (args: { draft: { title: string } }) => {
+      draft = { ...args.draft, updated_at: 1700000000 };
+      return null;
+    },
+    note_draft_get: () => draft,
+    note_draft_discard: () => { draft = null; return null; },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Throw this away");
+  await expect.poll(() => draft !== null, { timeout: 3000 }).toBe(true);
+  await page.locator(".note-card", { hasText: "Meeting notes" }).first().click();
+  await page.locator(".modal .btn-alt", { hasText: "Discard" }).click();
+  await expect(page.locator(".title-input")).toHaveValue("Meeting notes");
+  await expect(page.locator(".draft-banner")).toHaveCount(0);
+});
+
+test("text typed while a save is running is still unsaved afterwards", async ({ page }) => {
+  await setupTauriMock(page, {
+    note_update: async () => {
+      await new Promise(r => setTimeout(r, 1000));
+      return MOCK_NOTES[0];
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-1");
+  await page.fill(".title-input", "Saved part");
+  await page.keyboard.press("Control+s");
+  await page.fill(".title-input", "Saved part, then more");
+  await page.waitForTimeout(1500);
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await expect(page.locator(".modal")).toContainText("Unsaved changes");
+});
+
+test("clicking a note that failed to load tries again", async ({ page }) => {
+  let attempts = 0;
+  await setupTauriMock(page, {
+    note_get: (args: { id: string }) => {
+      if (args.id !== "note-3") return { ...MOCK_NOTE_DETAIL, id: args.id };
+      attempts++;
+      return attempts === 1 ? reject("database is locked") : { ...MOCK_NOTE_DETAIL, id: "note-3", title: "Draft" };
+    },
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/note/note-3");
+  await expect(page.getByText("Couldn't open this note")).toBeVisible();
+  await page.locator(".note-card", { hasText: "Draft" }).first().click();
+  await expect(page.locator(".title-input")).toHaveValue("Draft");
 });

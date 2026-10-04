@@ -10,20 +10,23 @@
   /// The id an adoption is moving to. Spent by the next navigation either way, so
   /// an adoption cut short by a click cannot make a later visit reuse the editor.
   let adopting: string | null = null;
+  /// The editor asked to be replaced on the next navigation, same URL or not.
+  let renew = false;
 
   // SvelteKit also calls this for the navigation that mounted the route; that
   // editor is already the right one.
   let mounted = false;
   afterNavigate(({ from, to }) => {
     if (!mounted) { mounted = true; return; }
-    const adopted = adopting !== null && to?.params?.id === adopting;
+    const adopted = adopting !== null && to?.url.pathname === `/note/${adopting}` && !to.url.search;
     adopting = null;
-    // A navigation to the URL already open (re-clicking the note) keeps the editor.
+    // Re-clicking the note already open keeps its editor, unless it asked otherwise.
     const same = from?.url.pathname === to?.url.pathname && from?.url.search === to?.url.search;
-    if (!adopted && !same) key++;
+    if (!adopted && (!same || renew)) key++;
+    renew = false;
   });
 </script>
 
 {#key key}
-  <NoteEditor onadopt={(id) => (adopting = id)} />
+  <NoteEditor onadopt={(id) => (adopting = id)} onrenew={() => (renew = true)} />
 {/key}

@@ -31,7 +31,10 @@
 
   /// Told before autosave moves the URL to a new note's real id, so the route
   /// keeps this editor for what is the same note.
-  let { onadopt }: { onadopt?: (id: string) => void } = $props();
+  /// `onrenew` asks the route for a fresh editor on the coming navigation, even if
+  /// it lands on this same URL: after a save or discard on the way out, or to
+  /// retry a note that failed to load.
+  let { onadopt, onrenew }: { onadopt?: (id: string) => void; onrenew?: () => void } = $props();
 
   // This editor's note, fixed when it is built. The route builds a new editor for
   // every other note, so reading the live URL here would let a write still in
@@ -155,8 +158,12 @@
   let leaving = $state(false);
 
   beforeNavigate(({ cancel, to, type }) => {
-    // Binding a new note to its real id is not leaving it, mid-leave or not.
-    if (adoptedId && type === "goto" && to?.url.pathname === `/note/${adoptedId}`) return;
+    // Binding a new note to its real id is not leaving it, mid-leave or not. Only
+    // adopt's own navigation qualifies: it carries no query and runs with the flag up.
+    if (adoptNav && to?.url.pathname === `/note/${adoptedId}` && !to.url.search) return;
+    // A note that failed to load has nothing to lose; any visit, even to itself,
+    // gets a fresh editor that tries again.
+    if (loadFailed) { onrenew?.(); return; }
     // Mid-leave, every navigation waits for the save. An unload is held too: the
     // browser asks, and the save in flight gets to finish. A click becomes the
     // leave's destination; Back and Forward are just held, since replaying them as
@@ -271,9 +278,18 @@
     id = newId;
     adoptedId = newId;
     onadopt?.(newId);
-    await goto(`/note/${newId}`, { replaceState: true, keepFocus: true, noScroll: true });
-    adoptedId = null;
+    // beforeNavigate runs only after SvelteKit resolves the route, so the flag stays
+    // up until this navigation settles. Anything else matching it in that window is
+    // a plain visit to this same note, which this editor already is.
+    adoptNav = true;
+    try {
+      await goto(`/note/${newId}`, { replaceState: true, keepFocus: true, noScroll: true });
+    } finally {
+      adoptNav = false;
+      adoptedId = null;
+    }
   }
+  let adoptNav = false;
 
   function flushOnHide() {
     if ($autosave && dirty && (document.visibilityState === "hidden" || !document.hasFocus())) void flushAutosave();
@@ -296,6 +312,19 @@
   function closeWindow() {
     justSaved = true;
     void getCurrentWindow().destroy();
+  }
+
+  async function discardAndClose() {
+    await dropDraft();
+    closeWindow();
+  }
+
+  /// "Discard" means the edits are gone. The draft holding them would otherwise
+  /// offer them straight back the next time the note opens.
+  async function dropDraft() {
+    if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+    if (isNew) return;
+    try { await noteDraftDiscard(id); } catch { /* nothing to discard */ }
   }
 
   async function saveAndClose() {
@@ -421,16 +450,13 @@
     clearMatches();
   });
 
-  function discardAndNavigate() {
+  async function discardAndNavigate() {
     const target = pendingNavUrl;
     pendingNavUrl = null;
-    // Discarding on the way to the note already open: reload it as saved.
-    if (target && isThisNote(target)) {
-      tagInput = "";
-      void openNote();
-      return;
-    }
     justSaved = true;
+    await dropDraft();
+    if (destroyed) return;
+    onrenew?.();
     if (target) {
       goto(target);
     } else {
@@ -606,21 +632,20 @@
   }
 
   async function save() {
-    const { ok, created } = await persist();
+    addTag();
+    // Taken before the write: anything typed while it runs is still unsaved after.
+    const snapshot = [title, JSON.stringify(content), JSON.stringify(tags)];
+    const { ok, created } = await persist(false);
     if (!ok || destroyed) return;
-    justSaved = true;
     if (!$isDesktop) {
+      justSaved = true;
       goto("/");
-    } else if (created) {
-      // Bind the editor to the real note, or the next save creates a duplicate.
-      rebaseline();
-      justSaved = false;
-      await adopt(created.id);
-    } else {
-      // Staying put: clear dirty by re-baselining instead of navigating away.
-      rebaseline();
-      justSaved = false;
+      return;
     }
+    // Staying put: what was written is the new baseline.
+    [savedTitle, savedContent, savedTags] = snapshot;
+    // Bind the editor to the real note, or the next save creates a duplicate.
+    if (created) await adopt(created.id);
   }
 
   /// "Save" from the unsaved-changes prompt: persist, then continue to wherever
@@ -632,20 +657,12 @@
     // Read after the save: a click made while it ran replaced the target.
     const target = pendingNavUrl;
     pendingNavUrl = null;
-    leaving = false;
-    if (destroyed) return;
-    // Saving on the way to the note already open: there is nowhere to go, and the
-    // editor stays, now clean.
-    if (target && isThisNote(target)) return;
     justSaved = true;
+    if (destroyed) return;
+    // Wherever this goes, even this same URL, the next editor starts clean.
+    onrenew?.();
     if (target) goto(target);
     else history.back();
-  }
-
-  /// `url` is this editor's own note, so going there would change nothing.
-  function isThisNote(url: string) {
-    const to = new URL(url, location.href);
-    return to.pathname === location.pathname && to.search === location.search;
   }
 
   async function unlockForSave(v: { password: string }) {
@@ -775,8 +792,8 @@
   <div class="loading">Loading…</div>
 {:else if loadFailed}
   <!-- Nothing of the note is here, so there is nothing to edit or save over it. -->
-  <div class="loading" role="alert">
-    <span>Couldn't open this note: {error}</span>
+  <div class="loading load-failed">
+    <span role="alert">Couldn't open this note: {error}</span>
     <a href="/">Back to notes</a>
   </div>
 {:else if locked}
@@ -1083,7 +1100,7 @@
     message="Save this note before closing?"
     confirmLabel={saving ? "Saving…" : "Save"}
     altLabel="Discard"
-    onalt={closeWindow}
+    onalt={discardAndClose}
     onconfirm={saveAndClose}
     oncancel={() => closePrompt = false}
   />
@@ -1166,6 +1183,7 @@
     display: flex; align-items: center; justify-content: center;
     height: 100%; color: var(--muted);
   }
+  .load-failed { flex-direction: column; gap: 0.75rem; text-align: center; padding: 1rem; }
 
   /* ── Lock gate ── */
   .lock-gate {
