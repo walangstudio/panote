@@ -107,6 +107,10 @@ pub struct NoteMetadata {
     pub bg_image: Option<String>,
     pub show_preview: bool,
     pub preview_text: Option<String>,
+    /// Which folder the note sits in; None means the root.
+    pub folder_id: Option<String>,
+    /// Position under the Custom sort, as saved by notes_reorder.
+    pub sort_order: i64,
 }
 
 /// Full note returned by note_get.
@@ -120,6 +124,7 @@ pub struct NoteDetail {
     pub created_at: i64,
     pub updated_at: i64,
     pub has_note_password: bool,
+    pub has_recovery: bool,
     pub pinned: bool,
     pub bg_color: Option<String>,
     pub bg_image: Option<String>,
@@ -142,4 +147,7 @@ pub struct NoteInput {
     pub bg_image: Option<String>,
     #[serde(default)]
     pub show_preview: Option<bool>,
+    /// Only read on create; a save never moves a note.
+    #[serde(default)]
+    pub folder_id: Option<String>,
 }

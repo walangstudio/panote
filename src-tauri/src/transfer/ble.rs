@@ -11,10 +11,10 @@ use crate::{
     state::{AppState, Peer, TransportKind},
     transfer::blob::TransferBlob,
 };
+#[cfg(debug_assertions)]
+use btleplug::api::WriteType;
 use btleplug::{
-    api::{
-        Central, Manager as _, Peripheral as _, ScanFilter, WriteType,
-    },
+    api::{Central, Manager as _, Peripheral as _, ScanFilter},
     platform::{Manager, Peripheral},
 };
 use std::time::Duration;
@@ -52,15 +52,22 @@ pub fn chunk_payload(data: &[u8]) -> Vec<Vec<u8>> {
 /// Tolerates out-of-order delivery.
 pub fn reassemble_chunks(packets: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(!packets.is_empty(), "no packets to reassemble");
-    let mut indexed: Vec<(u16, &[u8])> = packets
-        .iter()
-        .map(|p| {
-            let seq = u16::from_be_bytes([p[0], p[1]]);
-            (seq, &p[3..])
-        })
-        .collect();
+    let mut indexed: Vec<(u16, &[u8])> = Vec::with_capacity(packets.len());
+    for p in packets {
+        // N5: a short/malformed packet must error, not panic on indexing.
+        anyhow::ensure!(
+            p.len() >= 3,
+            "packet too short: {} bytes (need >= 3)",
+            p.len()
+        );
+        let seq = u16::from_be_bytes([p[0], p[1]]);
+        indexed.push((seq, &p[3..]));
+    }
     indexed.sort_by_key(|(seq, _)| *seq);
-    let data: Vec<u8> = indexed.into_iter().flat_map(|(_, d)| d.iter().copied()).collect();
+    let data: Vec<u8> = indexed
+        .into_iter()
+        .flat_map(|(_, d)| d.iter().copied())
+        .collect();
     Ok(data)
 }
 
@@ -130,22 +137,30 @@ async fn find_peripheral(peer_id: &str) -> anyhow::Result<Peripheral> {
 }
 
 /// Send a note to a BLE peripheral in 512-byte GATT chunks.
-pub async fn send_note(
-    state: &AppState,
-    note_id: &str,
-    peer_id: &str,
-) -> Result<(), String> {
+// ponytail: BLE has no encryption envelope of its own — it relies on GATT
+// link-layer security only, and BLE receive is stubbed/incomplete anyway.
+// Disabled outside debug builds until an envelope matching the LAN path
+// (TLS 1.3 + TOFU) exists; upgrade path is wrapping `blob` the same way
+// `lan::send_note` wraps it before it ever reaches the radio.
+#[cfg(not(debug_assertions))]
+pub async fn send_note(_state: &AppState, _note_id: &str, _peer_id: &str) -> Result<(), String> {
+    Err("BLE transfer is disabled: no encryption envelope for the send path yet".into())
+}
+
+#[cfg(debug_assertions)]
+pub async fn send_note(state: &AppState, note_id: &str, peer_id: &str) -> Result<(), String> {
     let blob = build_blob(state, note_id)
         .await
         .map_err(|e| e.to_string())?;
 
     let chunks = chunk_payload(&blob);
-    let peripheral = find_peripheral(peer_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let peripheral = find_peripheral(peer_id).await.map_err(|e| e.to_string())?;
 
     peripheral.connect().await.map_err(|e| e.to_string())?;
-    peripheral.discover_services().await.map_err(|e| e.to_string())?;
+    peripheral
+        .discover_services()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let chars = peripheral.characteristics();
     let note_send_char = chars
@@ -174,15 +189,28 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         .ok_or_else(|| anyhow::anyhow!("note not found"))?;
 
     if row.note_salt.is_some() {
-        anyhow::bail!("cannot transfer a per-note-password note over BLE without the per-note password");
+        anyhow::bail!(
+            "cannot transfer a per-note-password note over BLE without the per-note password"
+        );
     }
 
-    let title = String::from_utf8(decrypt_with_vault(&vault_key, &row.title_nonce, &row.title_ct)?)?;
-    let content: serde_json::Value =
-        serde_json::from_slice(&decrypt_with_vault(&vault_key, &row.nonce, &row.content_ct)?)?;
-    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
+    let title = String::from_utf8(decrypt_with_vault(
+        &vault_key,
+        &row.title_nonce,
+        &row.title_ct,
+        row.id.as_bytes(),
+    )?)?;
+    let content: serde_json::Value = serde_json::from_slice(&decrypt_with_vault(
+        &vault_key,
+        &row.nonce,
+        &row.content_ct,
+        row.id.as_bytes(),
+    )?)?;
+    let tags = crate::notes::commands::decrypt_tags(&vault_key, &row.id, &row.tags)?;
 
     TransferBlob {
+        // The Bluetooth path does not carry folders; the note arrives at the root.
+        folder_path: Vec::new(),
         id: row.id.clone(),
         kind: row.kind,
         title,
@@ -192,7 +220,6 @@ async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> 
         updated_at: row.updated_at,
         origin_device_id: row.origin_device_id,
         origin_note_id: row.origin_note_id,
-        note_password: None,
     }
     .encode()
 }

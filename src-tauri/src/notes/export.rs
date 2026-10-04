@@ -22,24 +22,65 @@
 // past version gets a permanent fixture test in the test module below.
 
 use crate::{
-    crypto::note::decrypt_with_vault,
     db::queries::{self, NoteRow},
     state::{now_secs, AppState},
-    transfer::commands::{import_blob_detailed, ImportOutcome},
     transfer::blob::TransferBlob,
+    transfer::commands::{import_blob_detailed, ImportOutcome},
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 pub const FORMAT_TAG: &str = "panote-export";
+
+/// A password-protected note's content, re-encrypted for the backup file.
+///
+/// The at-rest ciphertext can't simply be copied out: it is wrapped under this
+/// device's key, which the importing device does not have. So the content is
+/// decrypted and re-encrypted under a key derived from the note's own password
+/// (Argon2id over a fresh salt), which travels with the file and nothing else.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SecretBlobV1 {
+    /// base64 Argon2id salt.
+    pub salt: String,
+    /// base64 ChaCha20-Poly1305 nonce.
+    pub nonce: String,
+    /// base64 ciphertext of the note's content JSON.
+    pub ct: String,
+    /// base64 nonce and ciphertext of the note's title, under the same key.
+    /// Absent in files written before titles were sealed, which carry the real
+    /// title on the entry instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_ct: Option<String>,
+}
+
+/// Bound as AAD so a blob cannot be swapped between entries in the file.
+const SECRET_AAD_PREFIX: &[u8] = b"panote-export-secret-v1:";
+
+fn secret_aad(note_id: &str) -> Vec<u8> {
+    [SECRET_AAD_PREFIX, note_id.as_bytes()].concat()
+}
+
+/// Distinct from the content's, so the title and content blobs can't be swapped.
+const SECRET_TITLE_AAD_PREFIX: &[u8] = b"panote-export-secret-title-v1:";
+
+fn secret_title_aad(note_id: &str) -> Vec<u8> {
+    [SECRET_TITLE_AAD_PREFIX, note_id.as_bytes()].concat()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NoteExportEntryV1 {
     pub id: String,
     pub kind: String,
     pub title: String,
+    /// Null for protected notes — their content lives in `secret` instead.
     pub content: serde_json::Value,
+    /// Present only for password-protected notes. See [`SecretBlobV1`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<SecretBlobV1>,
     pub tags: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -57,7 +98,9 @@ pub struct NoteExportEntryV1 {
     pub show_preview: bool,
 }
 
-fn default_show_preview() -> bool { true }
+fn default_show_preview() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ExportFileV1 {
@@ -71,14 +114,135 @@ pub struct ExportFileV1 {
     pub notes: Vec<NoteExportEntryV1>,
 }
 
+/// v2 shares v1's *shape* exactly — what changed is the semantics of a document
+/// note's `content.body`, not the file schema — so there is no frozen struct copy
+/// to make here. A future change that alters fields must follow the rules at the
+/// top of this module and define a real `ExportFileV3`.
+///
+/// v1 → v2: coloured text moved off KaTeX inline math and onto an inline span.
+/// v1 wrote `$\textcolor{#hex}{\text{...}}$`; v2 writes
+/// `<span style="color:#hex">...</span>`, which is what the rich editor round-trips.
+pub type ExportFileV2 = ExportFileV1;
+
 /// Internal unified representation after any version upgrades.
-type ExportFile = ExportFileV1;
+type ExportFile = ExportFileV2;
+
+/// Reverse `escapeLatexText` from the old markdown editor, so text that was
+/// escaped to survive inside `\text{}` comes back as the user originally typed it.
+fn unescape_latex_text(s: &str) -> String {
+    s.replace("\\textbackslash{}", "\\")
+        .replace("\\textasciitilde{}", "~")
+        .replace("\\textasciicircum{}", "^")
+        .replace("\\{", "{")
+        .replace("\\}", "}")
+        .replace("\\$", "$")
+        .replace("\\&", "&")
+        .replace("\\#", "#")
+        .replace("\\%", "%")
+        .replace("\\_", "_")
+}
+
+/// Rewrite every `$\textcolor{#hex}{\text{...}}$` run in `body` as an inline span.
+/// Hand-rolled rather than regex-driven because the inner text can contain the
+/// braces we are scanning for, so we have to track nesting depth.
+fn migrate_color_syntax(body: &str) -> String {
+    const OPEN: &str = "$\\textcolor{";
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+
+    while let Some(at) = rest.find(OPEN) {
+        let (before, tail) = rest.split_at(at);
+        let after_open = &tail[OPEN.len()..];
+
+        // colour, up to the closing brace
+        let Some(close) = after_open.find('}') else {
+            break;
+        };
+        let color = &after_open[..close];
+        let after_color = &after_open[close + 1..];
+
+        // must be followed by the literal `{\text{`
+        const TEXT_OPEN: &str = "{\\text{";
+        if !after_color.starts_with(TEXT_OPEN) || !is_hex_color(color) {
+            // Not a colour run we wrote; copy the marker through untouched.
+            out.push_str(before);
+            out.push_str(OPEN);
+            rest = after_open;
+            continue;
+        }
+        let inner_start = &after_color[TEXT_OPEN.len()..];
+
+        // Walk to the brace that closes `\text{`, honouring nesting and escapes.
+        let mut depth = 1usize;
+        let mut end = None;
+        let bytes = inner_start.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 1, // skip the escaped char
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let Some(end) = end else { break };
+
+        let inner = &inner_start[..end];
+        // after the inner text we expect `}$` closing the group and the math
+        let tail_after = &inner_start[end + 1..];
+        let Some(stripped) = tail_after.strip_prefix("}$") else {
+            out.push_str(before);
+            out.push_str(OPEN);
+            rest = after_open;
+            continue;
+        };
+
+        out.push_str(before);
+        out.push_str(&format!(
+            "<span style=\"color:{}\">{}</span>",
+            color,
+            unescape_latex_text(inner)
+        ));
+        rest = stripped;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_hex_color(s: &str) -> bool {
+    let h = s.strip_prefix('#').unwrap_or("");
+    !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Upgrade a v1 file in place. Only `document` notes carry markdown bodies.
+fn v1_to_v2(mut file: ExportFileV1) -> ExportFileV2 {
+    for note in &mut file.notes {
+        if note.kind != "document" {
+            continue;
+        }
+        if let Some(body) = note.content.get("body").and_then(|b| b.as_str()) {
+            let migrated = migrate_color_syntax(body);
+            if migrated != body {
+                note.content["body"] = serde_json::Value::String(migrated);
+            }
+        }
+    }
+    file.format_version = CURRENT_FORMAT_VERSION;
+    file
+}
 
 /// Parse export bytes, detect the version, and upgrade to the current schema.
 /// Rejects unknown formats and versions newer than this build.
 pub fn parse_export(bytes: &[u8]) -> anyhow::Result<ExportFile> {
-    let raw: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| anyhow::anyhow!("not a valid JSON file: {e}"))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| anyhow::anyhow!("not a valid JSON file: {e}"))?;
 
     if raw.get("format").and_then(|v| v.as_str()) != Some(FORMAT_TAG) {
         anyhow::bail!("not a panote export file (missing or wrong 'format' tag)");
@@ -93,7 +257,12 @@ pub fn parse_export(bytes: &[u8]) -> anyhow::Result<ExportFile> {
         1 => {
             let v1: ExportFileV1 = serde_json::from_value(raw)
                 .map_err(|e| anyhow::anyhow!("malformed v1 export: {e}"))?;
-            Ok(v1)
+            Ok(v1_to_v2(v1))
+        }
+        2 => {
+            let v2: ExportFileV2 = serde_json::from_value(raw)
+                .map_err(|e| anyhow::anyhow!("malformed v2 export: {e}"))?;
+            Ok(v2)
         }
         n if n > CURRENT_FORMAT_VERSION => anyhow::bail!(
             "this backup was made by a newer version of panote (export format v{n}). \
@@ -133,6 +302,10 @@ pub async fn notes_export(
     app_version: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    export_impl(&state, app_version).await
+}
+
+async fn export_impl(state: &AppState, app_version: String) -> Result<String, String> {
     let key = &state.device_key;
     let rows = queries::note_list(&state.db)
         .await
@@ -140,31 +313,31 @@ pub async fn notes_export(
 
     let mut entries = Vec::with_capacity(rows.len());
     let mut locked = 0usize;
-    for mut row in rows {
-        // Protected notes carry a password layer over the vault ciphertext. Peel
-        // it with the session-cached password. A note that can't be peeled (not
-        // unlocked this session) is counted, not silently dropped — exporting it
-        // in plaintext anyway would defeat the password, so we fail loudly below.
-        if row.note_salt.is_some() {
-            let password = state.note_password(&row.id);
-            match crate::crypto::note::peel_vault_ct(
-                row.note_salt.as_deref(),
-                row.note_nonce.as_deref(),
-                &row.content_ct,
-                password.as_deref(),
-            ) {
-                Ok(vault_ct) => {
-                    row.content_ct = vault_ct;
-                    row.note_salt = None;
-                    row.note_nonce = None;
-                }
-                Err(_) => {
-                    locked += 1;
-                    continue;
-                }
+    for row in rows {
+        // Protected notes carry a password layer over the vault ciphertext. Open
+        // it with the session-cached password so content and title can be
+        // re-sealed under that same password for the file: a backup must never
+        // contain a protected note in the clear. A note that can't be opened (not
+        // unlocked this session) is counted, not silently dropped, and fails
+        // loudly below.
+        let note_password = match (&row.note_salt, state.note_password(&row.id)) {
+            (Some(_), None) => {
+                locked += 1;
+                continue;
             }
-        }
-        let entry = row_to_entry(key, &row).map_err(|e| e.to_string())?;
+            (Some(_), pw) => pw,
+            (None, _) => None,
+        };
+        let (title, content_bytes) = match crate::notes::commands::open_row(state, &row) {
+            Ok(opened) => opened,
+            Err(e) if e == crate::notes::commands::LOCKED => {
+                locked += 1;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let entry = row_to_entry(key, &row, title, &content_bytes, note_password.as_deref())
+            .map_err(|e| e.to_string())?;
         entries.push(entry);
     }
     if locked > 0 {
@@ -179,7 +352,7 @@ pub async fn notes_export(
         .await
         .ok();
 
-    let file = ExportFileV1 {
+    let file = ExportFileV2 {
         format: FORMAT_TAG.into(),
         format_version: CURRENT_FORMAT_VERSION,
         app_version,
@@ -198,7 +371,17 @@ pub async fn notes_export(
 pub async fn notes_import(
     contents: String,
     resolution: ImportResolution,
+    secret_password: Option<String>,
     state: State<'_, AppState>,
+) -> Result<ImportSummary, String> {
+    import_impl(&state, &contents, resolution, secret_password.as_deref()).await
+}
+
+async fn import_impl(
+    state: &AppState,
+    contents: &str,
+    resolution: ImportResolution,
+    secret_password: Option<&str>,
 ) -> Result<ImportSummary, String> {
     let file = parse_export(contents.as_bytes()).map_err(|e| e.to_string())?;
 
@@ -209,8 +392,35 @@ pub async fn notes_import(
         errors: Vec::new(),
     };
 
-    for entry in file.notes {
-        match import_entry(&state, entry, resolution).await {
+    for mut entry in file.notes {
+        // A sealed note needs its password before anything else can happen; a
+        // failure here is reported, never swallowed into a half-imported note.
+        if let Some(blob) = entry.secret.take() {
+            let Some(pw) = secret_password else {
+                summary.errors.push(format!(
+                    "\"{}\" is password-protected — supply its password to import it",
+                    entry.title
+                ));
+                continue;
+            };
+            match open_secret(&entry.id, &blob, pw) {
+                Ok((content, title)) => {
+                    entry.content = content;
+                    // Older files carry the real title on the entry instead.
+                    if let Some(title) = title {
+                        entry.title = title;
+                    }
+                }
+                Err(_) => {
+                    summary.errors.push(format!(
+                        "\"{}\" could not be decrypted — wrong password?",
+                        entry.title
+                    ));
+                    continue;
+                }
+            }
+        }
+        match import_entry(state, entry, resolution).await {
             Ok(ImportEntryResult::Inserted) => summary.imported += 1,
             Ok(ImportEntryResult::Updated) => summary.updated += 1,
             Ok(ImportEntryResult::Skipped) => summary.skipped += 1,
@@ -223,18 +433,79 @@ pub async fn notes_import(
 
 // ----- Helpers -----
 
-fn row_to_entry(key: &[u8; 32], row: &NoteRow) -> anyhow::Result<NoteExportEntryV1> {
-    let title_bytes = decrypt_with_vault(key, &row.title_nonce, &row.title_ct)?;
-    let title = String::from_utf8(title_bytes)?;
-    let content_bytes = decrypt_with_vault(key, &row.nonce, &row.content_ct)?;
-    let content: serde_json::Value = serde_json::from_slice(&content_bytes)?;
-    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
+/// Re-encrypt a protected note's content and title under its own password so
+/// the backup never carries either in the clear.
+fn seal_secret(
+    note_id: &str,
+    content_json: &[u8],
+    title: &str,
+    password: &str,
+) -> anyhow::Result<SecretBlobV1> {
+    let salt = crate::crypto::vault::random_salt();
+    let key = crate::crypto::vault::derive_key(password, &salt)?;
+    let (nonce, ct) = crate::crypto::vault::encrypt(&key, content_json, &secret_aad(note_id))?;
+    let (title_nonce, title_ct) =
+        crate::crypto::vault::encrypt(&key, title.as_bytes(), &secret_title_aad(note_id))?;
+    Ok(SecretBlobV1 {
+        salt: STANDARD.encode(salt),
+        nonce: STANDARD.encode(nonce),
+        ct: STANDARD.encode(ct),
+        title_nonce: Some(STANDARD.encode(title_nonce)),
+        title_ct: Some(STANDARD.encode(title_ct)),
+    })
+}
+
+/// Reverse of [`seal_secret`]: (content, title). The title is `None` for a file
+/// written before titles were sealed. Wrong password surfaces as an error,
+/// never as silently dropped content.
+fn open_secret(
+    note_id: &str,
+    blob: &SecretBlobV1,
+    password: &str,
+) -> anyhow::Result<(serde_json::Value, Option<String>)> {
+    let salt = STANDARD.decode(&blob.salt)?;
+    let nonce = STANDARD.decode(&blob.nonce)?;
+    let ct = STANDARD.decode(&blob.ct)?;
+    let key = crate::crypto::vault::derive_key(password, &salt)?;
+    let plain = crate::crypto::vault::decrypt(&key, &nonce, &ct, &secret_aad(note_id))?;
+    let title = match (&blob.title_nonce, &blob.title_ct) {
+        (Some(n), Some(t)) => {
+            let (n, t) = (STANDARD.decode(n)?, STANDARD.decode(t)?);
+            let bytes = crate::crypto::vault::decrypt(&key, &n, &t, &secret_title_aad(note_id))?;
+            Some(String::from_utf8(bytes)?)
+        }
+        _ => None,
+    };
+    Ok((serde_json::from_slice(&plain)?, title))
+}
+
+/// `password` is `Some` for protected notes: their content and title are sealed
+/// under it rather than written out in the clear, and the entry's own title is
+/// the locked placeholder.
+fn row_to_entry(
+    key: &[u8; 32],
+    row: &NoteRow,
+    title: String,
+    content_bytes: &[u8],
+    password: Option<&str>,
+) -> anyhow::Result<NoteExportEntryV1> {
+    let tags = crate::notes::commands::decrypt_tags(key, &row.id, &row.tags)?;
+
+    let (title, content, secret) = match password {
+        Some(pw) => (
+            crate::notes::commands::LOCKED_TITLE.to_string(),
+            serde_json::Value::Null,
+            Some(seal_secret(&row.id, content_bytes, &title, pw)?),
+        ),
+        None => (title, serde_json::from_slice(content_bytes)?, None),
+    };
 
     Ok(NoteExportEntryV1 {
         id: row.id.clone(),
         kind: row.kind.clone(),
         title,
         content,
+        secret,
         tags,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -261,16 +532,27 @@ async fn import_entry(
 ) -> anyhow::Result<ImportEntryResult> {
     // Skip/KeepBoth need a pre-check; Overwrite can go straight through import_blob_detailed.
     if resolution != ImportResolution::Overwrite && !entry.origin_device_id.is_empty() {
-        let existing = queries::note_find_by_origin(
-            &state.db,
-            &entry.origin_device_id,
-            &entry.origin_note_id,
-        )
-        .await?;
+        let existing =
+            queries::note_find_by_origin(&state.db, &entry.origin_device_id, &entry.origin_note_id)
+                .await?;
 
-        if existing.is_some() {
+        if let Some(existing) = existing {
             match resolution {
-                ImportResolution::Skip => return Ok(ImportEntryResult::Skipped),
+                ImportResolution::Skip => {
+                    // Keep the copy we have. One sitting in Trash comes back out,
+                    // since importing a note is asking to see it, and that change
+                    // is reported as an update rather than hidden in "skipped".
+                    let revived = crate::trash::queries::restore(
+                        &state.db,
+                        std::slice::from_ref(&existing.id),
+                    )
+                    .await?;
+                    return Ok(if revived > 0 {
+                        ImportEntryResult::Updated
+                    } else {
+                        ImportEntryResult::Skipped
+                    });
+                }
                 ImportResolution::KeepBoth => {
                     // Strip origin so import_blob_detailed treats it as a fresh note
                     // with a newly-minted local origin (attributed to this device).
@@ -296,6 +578,8 @@ async fn insert_as_blob(
     // transfer blob doesn't carry. For updates we intentionally preserve the
     // existing row's extras to match transfer semantics.
     let blob = TransferBlob {
+        // A backup file carries no folder; import lands notes at the root.
+        folder_path: Vec::new(),
         id: entry.id.clone(),
         kind: entry.kind.clone(),
         title: entry.title.clone(),
@@ -305,12 +589,20 @@ async fn insert_as_blob(
         updated_at: entry.updated_at,
         origin_device_id: entry.origin_device_id.clone(),
         origin_note_id: entry.origin_note_id.clone(),
-        note_password: None,
     };
 
     let (local_id, outcome) = import_blob_detailed(state, &state.device_key, blob).await?;
 
     if matches!(outcome, ImportOutcome::Inserted) {
+        // A backup file is untrusted input. note_create/note_update validate
+        // bg_image, but this path bypassed them entirely, so a crafted file could
+        // smuggle an oversized image or a disallowed MIME straight into the DB.
+        // Drop an invalid image rather than failing the whole note — the rest of
+        // the note is still worth importing.
+        let bg_image = match crate::notes::commands::validate_bg_image(&entry.bg_image) {
+            Ok(()) => entry.bg_image.clone(),
+            Err(_) => None,
+        };
         // Apply inserted-only extras (pinned, bg_color, bg_image, show_preview,
         // content_hint). Use a targeted UPDATE to avoid rewriting ciphertext.
         sqlx::query(
@@ -318,7 +610,7 @@ async fn insert_as_blob(
         )
         .bind(entry.pinned as i32)
         .bind(&entry.bg_color)
-        .bind(&entry.bg_image)
+        .bind(&bg_image)
         .bind(entry.show_preview as i32)
         .bind(&entry.content_hint)
         .bind(&local_id)
@@ -335,11 +627,7 @@ async fn insert_as_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        crypto::vault::derive_key,
-        db::init_pool,
-        state::AppState,
-    };
+    use crate::{crypto::vault::derive_key, db::init_pool, state::AppState};
     use serde_json::json;
 
     async fn test_state() -> AppState {
@@ -361,6 +649,7 @@ mod tests {
                 kind: "document".into(),
                 title: "Hello".into(),
                 content: json!({ "body": "world" }),
+                secret: None,
                 tags: vec!["greetings".into()],
                 created_at: 1699999000,
                 updated_at: 1700000000,
@@ -373,6 +662,258 @@ mod tests {
                 show_preview: true,
             }],
         }
+    }
+
+    fn body_of(f: &ExportFile) -> String {
+        f.notes[0].content["body"].as_str().unwrap().to_string()
+    }
+
+    fn v1_with_body(body: &str) -> Vec<u8> {
+        let mut f = sample_v1();
+        f.notes[0].content = json!({ "body": body });
+        serde_json::to_vec(&f).unwrap()
+    }
+
+    #[test]
+    fn v1_colored_text_becomes_a_span() {
+        let bytes = v1_with_body("hi $\\textcolor{#3182ce}{\\text{blue bit}}$ there");
+        let parsed = parse_export(&bytes).unwrap();
+        assert_eq!(
+            body_of(&parsed),
+            "hi <span style=\"color:#3182ce\">blue bit</span> there"
+        );
+    }
+
+    #[test]
+    fn v1_migration_handles_multiple_runs_and_unescapes() {
+        // `_` and `$` were LaTeX-escaped on the way in; they must come back plain.
+        let bytes = v1_with_body(
+            "$\\textcolor{#e53e3e}{\\text{a\\_b}}$ and $\\textcolor{#27ae60}{\\text{5\\$}}$",
+        );
+        let parsed = parse_export(&bytes).unwrap();
+        assert_eq!(
+            body_of(&parsed),
+            "<span style=\"color:#e53e3e\">a_b</span> and <span style=\"color:#27ae60\">5$</span>"
+        );
+    }
+
+    /// Real maths must survive untouched — only our colour runs get rewritten.
+    #[test]
+    fn v1_migration_leaves_other_math_alone() {
+        let src = "cost is $x^2 + y$ and $\\textcolor{notahex}{\\text{q}}$";
+        let parsed = parse_export(&v1_with_body(src)).unwrap();
+        assert_eq!(body_of(&parsed), src);
+    }
+
+    /// Non-document kinds have structured content, not a markdown body.
+    #[test]
+    fn v1_migration_skips_non_document_kinds() {
+        let mut f = sample_v1();
+        f.notes[0].kind = "checklist".into();
+        f.notes[0].content = json!({ "body": "$\\textcolor{#e53e3e}{\\text{x}}$" });
+        let parsed = parse_export(&serde_json::to_vec(&f).unwrap()).unwrap();
+        assert_eq!(body_of(&parsed), "$\\textcolor{#e53e3e}{\\text{x}}$");
+    }
+
+    #[test]
+    fn v2_parses_without_modification() {
+        let mut f = sample_v1();
+        f.format_version = 2;
+        f.notes[0].content = json!({ "body": "<span style=\"color:#3182ce\">kept</span>" });
+        let parsed = parse_export(&serde_json::to_vec(&f).unwrap()).unwrap();
+        assert_eq!(
+            body_of(&parsed),
+            "<span style=\"color:#3182ce\">kept</span>"
+        );
+    }
+
+    #[test]
+    fn export_writes_the_current_version() {
+        assert_eq!(CURRENT_FORMAT_VERSION, 2);
+    }
+
+    // ---- Protected notes must never appear in the clear in a backup ----
+
+    const SECRET_BODY: &str = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI";
+    const SECRET_TITLE: &str = "Prod AWS root";
+
+    fn sealed_entry(password: &str) -> NoteExportEntryV1 {
+        let content = json!({ "body": SECRET_BODY });
+        let bytes = serde_json::to_vec(&content).unwrap();
+        let mut e = sample_v1().notes.remove(0);
+        e.id = "secret-note".into();
+        e.title = crate::notes::commands::LOCKED_TITLE.into();
+        e.content = serde_json::Value::Null;
+        e.secret = Some(seal_secret(&e.id, &bytes, SECRET_TITLE, password).unwrap());
+        e
+    }
+
+    #[test]
+    fn sealed_content_is_not_recoverable_from_the_file() {
+        let entry = sealed_entry("correct horse");
+        let mut f = sample_v1();
+        f.notes = vec![entry];
+        let text = serde_json::to_string(&f).unwrap();
+        assert!(
+            !text.contains(SECRET_BODY),
+            "the backup must not contain the note body in the clear"
+        );
+        assert!(!text.contains("correct horse"), "nor the password");
+    }
+
+    #[test]
+    fn sealed_content_round_trips_with_the_right_password() {
+        let entry = sealed_entry("correct horse");
+        let opened = open_secret(
+            "secret-note",
+            entry.secret.as_ref().unwrap(),
+            "correct horse",
+        )
+        .unwrap();
+        assert_eq!(opened.0["body"], SECRET_BODY);
+    }
+
+    /// The title is as sensitive as the body: sealed with it, placeholder on
+    /// the entry.
+    #[test]
+    fn the_sealed_title_is_not_in_the_file_and_round_trips() {
+        let entry = sealed_entry("correct horse");
+        assert_eq!(entry.title, crate::notes::commands::LOCKED_TITLE);
+        let mut f = sample_v1();
+        f.notes = vec![entry.clone()];
+        assert!(!serde_json::to_string(&f).unwrap().contains(SECRET_TITLE));
+        let (_, title) = open_secret(
+            "secret-note",
+            entry.secret.as_ref().unwrap(),
+            "correct horse",
+        )
+        .unwrap();
+        assert_eq!(title.as_deref(), Some(SECRET_TITLE));
+    }
+
+    /// Files written before titles were sealed carry no title in the blob; the
+    /// entry's own title is the real one and must still be used.
+    #[tokio::test]
+    async fn a_secret_blob_without_a_title_still_imports_the_entry_title() {
+        let state = test_state().await;
+        let mut entry = sealed_entry("pw");
+        entry.title = "Old backup title".into();
+        let blob = entry.secret.as_mut().unwrap();
+        blob.title_nonce = None;
+        blob.title_ct = None;
+        let mut f = sample_v1();
+        f.format_version = 2;
+        f.notes = vec![entry];
+        let contents = serde_json::to_string(&f).unwrap();
+
+        let summary = import_impl(&state, &contents, ImportResolution::Overwrite, Some("pw"))
+            .await
+            .unwrap();
+        assert_eq!((summary.imported, summary.errors.len()), (1, 0));
+        let listed = crate::notes::commands::list_impl(&state, None, None)
+            .await
+            .unwrap();
+        assert_eq!(listed[0].title, "Old backup title");
+    }
+
+    /// Export a protected note from one device and import it on another: the
+    /// file never shows the title, and the importer gets it back with the password.
+    #[tokio::test]
+    async fn a_protected_title_survives_export_and_import_sealed() {
+        let alice = test_state().await;
+        let bytes = serde_json::to_vec(&sample_v1()).unwrap();
+        let contents = String::from_utf8(bytes).unwrap();
+        let mut entry = parse_export(contents.as_bytes()).unwrap().notes.remove(0);
+        entry.title = SECRET_TITLE.into();
+        entry.content = json!({ "body": SECRET_BODY });
+        insert_as_blob(&alice, entry).await.unwrap();
+        let id = queries::note_list(&alice.db).await.unwrap()[0].id.clone();
+        crate::notes::commands::protect_impl(&alice, &id, "pw")
+            .await
+            .unwrap();
+
+        let file = export_impl(&alice, "test".into()).await.unwrap();
+        assert!(
+            !file.contains(SECRET_TITLE),
+            "the title must not be in the backup"
+        );
+        assert!(!file.contains(SECRET_BODY));
+
+        alice.lock_note(&id);
+        assert!(
+            export_impl(&alice, "test".into()).await.is_err(),
+            "locked notes block export"
+        );
+
+        let bob = AppState::new(
+            init_pool(":memory:").await.unwrap(),
+            derive_key("bob", &[0u8; 16]).unwrap(),
+            "device-b".into(),
+        );
+        let summary = import_impl(&bob, &file, ImportResolution::Overwrite, Some("pw"))
+            .await
+            .unwrap();
+        assert_eq!((summary.imported, summary.errors.len()), (1, 0));
+        let listed = crate::notes::commands::list_impl(&bob, None, None)
+            .await
+            .unwrap();
+        assert_eq!(listed[0].title, SECRET_TITLE);
+
+        let wrong = test_state().await;
+        let summary = import_impl(&wrong, &file, ImportResolution::Overwrite, Some("nope"))
+            .await
+            .unwrap();
+        assert_eq!(summary.imported, 0);
+        assert!(
+            !summary.errors[0].contains(SECRET_TITLE),
+            "errors must not leak it either"
+        );
+    }
+
+    #[test]
+    fn sealed_content_rejects_the_wrong_password() {
+        let entry = sealed_entry("correct horse");
+        assert!(
+            open_secret("secret-note", entry.secret.as_ref().unwrap(), "wrong").is_err(),
+            "a wrong password must fail, not return garbage"
+        );
+    }
+
+    /// AAD binds each blob to its note id, so an attacker with write access to
+    /// the file cannot move one note's secret onto another entry.
+    #[test]
+    fn sealed_content_is_bound_to_its_note_id() {
+        let entry = sealed_entry("correct horse");
+        assert!(
+            open_secret(
+                "a-different-note",
+                entry.secret.as_ref().unwrap(),
+                "correct horse"
+            )
+            .is_err(),
+            "a blob must not decrypt under another note's id"
+        );
+    }
+
+    /// Each seal draws a fresh salt and nonce, so identical content does not
+    /// produce identical ciphertext.
+    #[test]
+    fn sealing_twice_produces_different_ciphertext() {
+        let a = sealed_entry("pw").secret.unwrap();
+        let b = sealed_entry("pw").secret.unwrap();
+        assert_ne!(a.salt, b.salt);
+        assert_ne!(a.ct, b.ct);
+    }
+
+    #[test]
+    fn unprotected_notes_carry_no_secret_blob() {
+        let f = sample_v1();
+        assert!(f.notes[0].secret.is_none());
+        let text = serde_json::to_string(&f).unwrap();
+        assert!(
+            !text.contains("\"secret\""),
+            "field should be omitted, not null"
+        );
     }
 
     #[test]
@@ -396,11 +937,13 @@ mod tests {
         assert!(err.contains("newer version"), "got: {err}");
     }
 
+    /// A v1 backup — the format every note exported before the rich editor —
+    /// must still import, and come back tagged as the current version.
     #[test]
-    fn parse_accepts_current_v1() {
+    fn parse_upgrades_v1_to_current() {
         let bytes = serde_json::to_vec(&sample_v1()).unwrap();
         let parsed = parse_export(&bytes).unwrap();
-        assert_eq!(parsed.format_version, 1);
+        assert_eq!(parsed.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(parsed.notes.len(), 1);
         assert_eq!(parsed.notes[0].title, "Hello");
     }
@@ -448,6 +991,50 @@ mod tests {
         assert_eq!(rows.len(), 1);
     }
 
+    /// A backup file is untrusted. note_create/note_update validate bg_image,
+    /// but this path bypassed them, so a crafted file could smuggle a disallowed
+    /// MIME or an oversized image straight into the database.
+    #[tokio::test]
+    async fn import_drops_a_bg_image_that_fails_validation() {
+        let state = test_state().await;
+        let mut f = sample_v1();
+        // Explicitly blocked elsewhere: SVG can carry script.
+        f.notes[0].bg_image = Some("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".into());
+        let contents = String::from_utf8(serde_json::to_vec(&f).unwrap()).unwrap();
+
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
+        }
+
+        let rows = queries::note_list(&state.db).await.unwrap();
+        assert_eq!(rows.len(), 1, "the note itself should still import");
+        assert!(
+            rows[0].bg_image.is_none(),
+            "an invalid bg_image must not reach the database: {:?}",
+            rows[0].bg_image
+        );
+    }
+
+    #[tokio::test]
+    async fn import_keeps_a_valid_bg_image() {
+        let state = test_state().await;
+        let mut f = sample_v1();
+        let png = "data:image/png;base64,iVBORw0KGgo=";
+        f.notes[0].bg_image = Some(png.into());
+        let contents = String::from_utf8(serde_json::to_vec(&f).unwrap()).unwrap();
+
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
+        }
+
+        let rows = queries::note_list(&state.db).await.unwrap();
+        assert_eq!(rows[0].bg_image.as_deref(), Some(png));
+    }
+
     #[tokio::test]
     async fn import_twice_overwrite_is_idempotent() {
         let state = test_state().await;
@@ -455,11 +1042,15 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         // Second run: should update, not insert.
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Updated));
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
@@ -472,11 +1063,50 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::Skip).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::Skip)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Skipped));
+        }
+        assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
+    }
+
+    /// Importing a backup is asking to see its notes: a match that sits in Trash
+    /// comes back instead of being skipped there until the 30-day purge.
+    #[tokio::test]
+    async fn import_skip_brings_a_trashed_match_back() {
+        let state = test_state().await;
+        let bytes = serde_json::to_vec(&sample_v1()).unwrap();
+        let contents = String::from_utf8(bytes).unwrap();
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
+        }
+        let ids: Vec<String> = queries::note_list(&state.db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        crate::trash::queries::trash(&state.db, &ids, 1)
+            .await
+            .unwrap();
+        assert!(queries::note_list(&state.db).await.unwrap().is_empty());
+
+        for entry in parse_export(contents.as_bytes()).unwrap().notes {
+            let res = import_entry(&state, entry, ImportResolution::Skip)
+                .await
+                .unwrap();
+            assert!(
+                matches!(res, ImportEntryResult::Updated),
+                "a revived note is reported"
+            );
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 1);
     }
@@ -488,10 +1118,14 @@ mod tests {
         let contents = String::from_utf8(bytes).unwrap();
 
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            import_entry(&state, entry, ImportResolution::Overwrite).await.unwrap();
+            import_entry(&state, entry, ImportResolution::Overwrite)
+                .await
+                .unwrap();
         }
         for entry in parse_export(contents.as_bytes()).unwrap().notes {
-            let res = import_entry(&state, entry, ImportResolution::KeepBoth).await.unwrap();
+            let res = import_entry(&state, entry, ImportResolution::KeepBoth)
+                .await
+                .unwrap();
             assert!(matches!(res, ImportEntryResult::Inserted));
         }
         assert_eq!(queries::note_list(&state.db).await.unwrap().len(), 2);

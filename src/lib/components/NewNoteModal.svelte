@@ -1,90 +1,117 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
+  import { trapFocus } from "$lib/trapFocus";
+  import { newNoteHref } from "$lib/stores/listState";
 
-  interface Props { onclose: () => void; }
-  let { onclose }: Props = $props();
+  interface Props {
+    onclose: () => void;
+    /// A folder is created where the list already is, so the caller owns it.
+    onnewfolder?: () => void;
+  }
+  let { onclose, onnewfolder }: Props = $props();
+
+  let previouslyFocused: HTMLElement | null = null;
+  let kindButtons: (HTMLButtonElement | undefined)[] = $state([]);
 
   const kinds = [
-    { id: "document", icon: "edit_note", label: "Document", color: "accent", desc: "Text, markdown, or code" },
-    { id: "checklist", icon: "checklist", label: "Checklist", color: "tertiary", desc: "To-do items" },
-    { id: "kanban", icon: "view_kanban", label: "Kanban", color: "tertiary", desc: "Board view" },
-    { id: "table", icon: "table_chart", label: "Table", color: "secondary", desc: "Parsed data table" },
+    { id: "document", icon: "edit_note", label: "Document", color: "accent", desc: "Markdown, plain or code" },
+    { id: "checklist", icon: "checklist", label: "Checklist", color: "tertiary", desc: "Tick off tasks" },
+    { id: "kanban", icon: "view_kanban", label: "Kanban", color: "tertiary", desc: "Columns of cards" },
+    { id: "table", icon: "table_chart", label: "Table", color: "secondary", desc: "Rows and columns" },
+    // A folder is not a note kind, so `pick` routes it separately.
+    { id: "folder", icon: "create_new_folder", label: "Folder", color: "secondary", desc: "Group notes together" },
   ] as const;
 
   function pick(id: string) {
     onclose();
-    goto(`/note/new?kind=${id}`);
+    // A folder is created where you are, not by navigating to an editor.
+    if (id === "folder") { onnewfolder?.(); return; }
+    goto(newNoteHref(id));
   }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") { e.preventDefault(); onclose(); }
+  }
+  onMount(() => {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    window.addEventListener("keydown", onKey);
+    kindButtons[0]?.focus();
+  });
+  onDestroy(() => {
+    window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
+  });
 </script>
 
-<div class="backdrop" role="presentation" onclick={onclose}></div>
-<div class="modal" role="dialog" aria-modal="true">
-  <button class="close" onclick={onclose} aria-label="Close">
-    <span class="material-symbols-outlined">close</span>
-  </button>
-  <h2>New Note</h2>
-  <p class="subtitle">Choose a note type</p>
-  <div class="grid">
-    {#each kinds as k}
-      <button class="kind-card" onclick={() => pick(k.id)}>
-        <span class="kind-icon {k.color}">
-          <span class="material-symbols-outlined">{k.icon}</span>
-        </span>
-        <span class="kind-label">{k.label}</span>
-        <span class="kind-desc">{k.desc}</span>
-      </button>
-    {/each}
+<div class="overlay">
+  <div class="backdrop" role="presentation" onclick={onclose}></div>
+  <div class="modal" role="dialog" aria-modal="true" aria-label="New note" use:trapFocus>
+    <h2>New note</h2>
+    <div class="list">
+      {#each kinds as k, i}
+        <button class="kind-row" bind:this={kindButtons[i]} onclick={() => pick(k.id)}>
+          <span class="kind-icon {k.color}">
+            <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">{k.icon}</span>
+          </span>
+          <span class="kind-text">
+            <span class="kind-label">{k.label}</span>
+            <span class="kind-desc">{k.desc}</span>
+          </span>
+        </button>
+      {/each}
+    </div>
+    <div class="actions">
+      <button class="btn-cancel" onclick={onclose}>Cancel</button>
+    </div>
   </div>
 </div>
 
 <style>
-  .backdrop {
+  .overlay {
     position: fixed; inset: 0; z-index: 100;
-    background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center; padding: 1.1rem;
+  }
+  .backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    animation: panote-fade-in 0.15s ease;
   }
   .modal {
-    position: fixed; z-index: 101;
-    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    position: relative; z-index: 101;
     background: var(--surface-glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--border);
-    border-radius: var(--radius-lg); padding: 1.75rem;
+    border-radius: var(--radius-lg); padding: 1.5rem 1.6rem;
     width: min(400px, 92vw);
     box-shadow: 0 16px 48px var(--shadow-color-hover);
+    animation: panote-pop-in 0.18s ease;
   }
-  .close {
-    position: absolute; top: 0.75rem; right: 0.75rem;
-    background: var(--accent-muted); border: none; border-radius: var(--radius-full);
-    color: var(--muted); cursor: pointer;
-    width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
-    transition: all 0.15s ease;
+  h2 { margin: 0 0 0.8rem; font-size: 1.1rem; font-weight: 700; }
+  .list { display: flex; flex-direction: column; gap: 0.5rem; }
+  .kind-row {
+    display: flex; align-items: center; gap: 0.85rem; width: 100%; text-align: left;
+    padding: 0.7rem 0.8rem; border-radius: var(--radius);
+    border: 1px solid var(--border); background: transparent;
+    cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease;
   }
-  .close:hover { background: var(--accent); color: var(--on-accent); }
-  h2 { margin: 0 0 0.25rem; font-size: 1.1rem; font-weight: 700; }
-  .subtitle { color: var(--muted); font-size: 0.85rem; margin: 0 0 1rem; }
-  .grid {
-    display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem;
-  }
-  .kind-card {
-    display: flex; flex-direction: column; align-items: center; gap: 0.4rem;
-    padding: 1rem 0.5rem; border-radius: var(--radius);
-    border: 1px solid var(--border); background: var(--surface);
-    cursor: pointer; transition: all 0.2s ease;
-  }
-  .kind-card:hover {
-    background: var(--hover);
-    box-shadow: 0 4px 16px var(--shadow-color-hover);
-    transform: translateY(-2px);
-    border-color: var(--accent-muted);
-  }
+  .kind-row:hover { border-color: var(--accent); background: var(--hover); }
   .kind-icon {
-    width: 44px; height: 44px; border-radius: 12px;
+    width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
   }
   .kind-icon.accent { background: var(--accent-surface); color: var(--accent); }
   .kind-icon.secondary { background: var(--secondary-surface); color: var(--secondary); }
   .kind-icon.tertiary { background: var(--tertiary-surface); color: var(--tertiary); }
-  .kind-label { font-weight: 700; font-size: 0.9rem; color: var(--text); }
-  .kind-desc { font-size: 0.72rem; color: var(--muted); }
-  /* Last item (kanban) spans full width when odd count */
-  .kind-card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .kind-icon .material-symbols-outlined { font-size: 22px; }
+  .kind-text { display: flex; flex-direction: column; min-width: 0; }
+  .kind-label { font-weight: 700; font-size: 0.95rem; color: var(--text); }
+  .kind-desc { font-size: 0.78rem; color: var(--muted); }
+  .actions { display: flex; justify-content: flex-end; margin-top: 1rem; }
+  .btn-cancel {
+    padding: 0.55rem 1rem; border-radius: var(--radius-full);
+    border: 1px solid var(--border); background: transparent;
+    color: var(--muted); cursor: pointer; font-weight: 600; font-family: inherit;
+    transition: all 0.15s ease;
+  }
+  .btn-cancel:hover { border-color: var(--accent); color: var(--accent); }
 </style>

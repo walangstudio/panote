@@ -31,6 +31,12 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 sha2 = "0.10"
+base64 = "0.22"
+zeroize = "1.8"
+# PAKE for E2E transfer: the pairing code becomes the SPAKE2 password.
+spake2 = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
 
 # LAN transfer
 mdns-sd = "0.11"

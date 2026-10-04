@@ -9,12 +9,28 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 pub fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// How long a note stays unlocked without being used. Short enough that walking
+/// away from an unlocked credential note re-locks it; long enough not to
+/// interrupt an editing session.
+pub const UNLOCK_TIMEOUT_SECS: i64 = 15 * 60;
+
+/// A cached note password, and the note's title, which is sealed under that
+/// password at rest. The `Zeroizing` wrappers scrub both when the entry is
+/// dropped, so expiring an entry actually clears it from memory.
+#[derive(Debug)]
+pub struct UnlockEntry {
+    pub password: Zeroizing<String>,
+    pub title: Zeroizing<String>,
+    pub touched_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -78,9 +94,185 @@ pub struct AppState {
     pub receiving: Arc<AtomicBool>,
     /// Handle to the listener task so it can be aborted on toggle-off.
     pub listener_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Passwords for notes unlocked this session (note_id -> password).
-    /// In-memory only — cleared on app exit, so protected notes re-prompt on restart.
-    pub unlocked: Arc<Mutex<HashMap<String, String>>>,
+    /// Passwords for notes unlocked this session (note_id -> entry).
+    /// In-memory only — cleared on app exit, so protected notes re-prompt on
+    /// restart — and additionally expired after `UNLOCK_TIMEOUT_SECS` of
+    /// inactivity, so an unlocked credential note doesn't stay open all day.
+    pub unlocked: Arc<Mutex<HashMap<String, UnlockEntry>>>,
+    /// Recent transfer-offer timestamps per peer address, for rate-limiting (N2).
+    pub offer_attempts: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+    /// Consecutive failed pairing-passphrase attempts per peer address, for lockout (K5).
+    pub passphrase_failures: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+impl AppState {
+    pub fn new(db: SqlitePool, device_key: [u8; 32], device_uuid: String) -> Self {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        Self {
+            db,
+            device_key,
+            device_uuid,
+            peers: Arc::new(Mutex::new(Vec::new())),
+            pending_transfers: Arc::new(Mutex::new(HashMap::new())),
+            tofu: Arc::new(TofuVerifier::new(provider)),
+            outbound_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_offers: Arc::new(Mutex::new(HashMap::new())),
+            offer_responses: Arc::new(Mutex::new(HashMap::new())),
+            receiving: Arc::new(AtomicBool::new(false)),
+            listener_task: Arc::new(Mutex::new(None)),
+            unlocked: Arc::new(Mutex::new(HashMap::new())),
+            offer_attempts: Arc::new(Mutex::new(HashMap::new())),
+            passphrase_failures: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Cap on distinct peer keys tracked by `offer_attempts` / `passphrase_failures`.
+    /// Without this, a spray of one-off source IPs would grow both maps for
+    /// the process lifetime (unbounded memory) since neither is otherwise
+    /// pruned by key count — only by the offer-window retention inside a
+    /// single key's own timestamp list.
+    // ponytail: a real DoS is better mitigated by K10's inbound connection
+    // semaphore than by this map cap; this just bounds worst-case memory.
+    const MAX_TRACKED_PEERS: usize = 1024;
+
+    /// Rate-limit transfer-offer creation per peer address (N2): at most
+    /// `MAX_OFFERS_PER_WINDOW` offers per `OFFER_WINDOW_SECS` per peer.
+    /// Records the attempt and returns whether it's still within budget.
+    pub fn allow_offer_attempt(&self, peer_addr: &str) -> bool {
+        const OFFER_WINDOW_SECS: i64 = 60;
+        const MAX_OFFERS_PER_WINDOW: usize = 10;
+
+        let now = now_secs();
+        let mut attempts = self.offer_attempts.lock().unwrap();
+
+        // Opportunistically drop peers whose whole window has expired so the
+        // map doesn't grow unbounded across many distinct source IPs.
+        attempts.retain(|_, timestamps| {
+            timestamps.retain(|&t| now - t < OFFER_WINDOW_SECS);
+            !timestamps.is_empty()
+        });
+
+        if !attempts.contains_key(peer_addr) && attempts.len() >= Self::MAX_TRACKED_PEERS {
+            // Still too many distinct peers after pruning stale ones — evict
+            // the least-recently-active entry rather than grow forever.
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, v)| v.iter().max().copied().unwrap_or(i64::MIN))
+                .map(|(k, _)| k.clone())
+            {
+                attempts.remove(&oldest);
+            }
+        }
+
+        let entry = attempts.entry(peer_addr.to_string()).or_default();
+        if entry.len() >= MAX_OFFERS_PER_WINDOW {
+            return false;
+        }
+        entry.push(now);
+        true
+    }
+
+    /// Whether `peer_addr` is locked out of pairing-passphrase attempts (K5).
+    pub fn passphrase_locked_out(&self, peer_addr: &str) -> bool {
+        const MAX_FAILURES: u32 = 5;
+        *self
+            .passphrase_failures
+            .lock()
+            .unwrap()
+            .get(peer_addr)
+            .unwrap_or(&0)
+            >= MAX_FAILURES
+    }
+
+    pub fn record_passphrase_failure(&self, peer_addr: &str) {
+        let mut failures = self.passphrase_failures.lock().unwrap();
+        if !failures.contains_key(peer_addr) && failures.len() >= Self::MAX_TRACKED_PEERS {
+            // No timestamps here to pick a true least-recently-used entry —
+            // evict an arbitrary one so the map can't grow unbounded across
+            // many distinct source IPs. Good enough for a cap, not a real LRU.
+            if let Some(k) = failures.keys().next().cloned() {
+                failures.remove(&k);
+            }
+        }
+        *failures.entry(peer_addr.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn reset_passphrase_failures(&self, peer_addr: &str) {
+        self.passphrase_failures.lock().unwrap().remove(peer_addr);
+    }
+
+    /// Record the password that unlocked a note, and its title for the list.
+    /// Expires after [`UNLOCK_TIMEOUT_SECS`] of inactivity.
+    pub fn unlock_note(&self, note_id: &str, password: &str, title: &str) {
+        self.unlocked.lock().unwrap().insert(
+            note_id.to_string(),
+            UnlockEntry {
+                password: Zeroizing::new(password.to_string()),
+                title: Zeroizing::new(title.to_string()),
+                touched_at: now_secs(),
+            },
+        );
+    }
+
+    /// Return the cached unlock password for a note, if it hasn't expired.
+    /// Every call also sweeps the whole map, so entries that are never asked
+    /// for again don't linger in memory past the timeout.
+    pub fn note_password(&self, note_id: &str) -> Option<String> {
+        let mut map = self.unlocked.lock().unwrap();
+        let cutoff = now_secs() - UNLOCK_TIMEOUT_SECS;
+        // Dropping the entry zeroizes its password.
+        map.retain(|_, e| e.touched_at > cutoff);
+        let entry = map.get_mut(note_id)?;
+        // Inactivity timeout, so using a note keeps it open.
+        entry.touched_at = now_secs();
+        Some(entry.password.to_string())
+    }
+
+    /// The cached title of an unlocked note. Sweeps like [`Self::note_password`]
+    /// but does not count as use: the list refreshing must not keep a note open.
+    pub fn note_title(&self, note_id: &str) -> Option<String> {
+        let mut map = self.unlocked.lock().unwrap();
+        let cutoff = now_secs() - UNLOCK_TIMEOUT_SECS;
+        map.retain(|_, e| e.touched_at > cutoff);
+        map.get(note_id).map(|e| e.title.to_string())
+    }
+
+    /// Forget a note's cached password (re-locks it for this session).
+    pub fn lock_note(&self, note_id: &str) {
+        self.unlocked.lock().unwrap().remove(note_id);
+    }
+
+    pub fn add_pending(&self, transfer: PendingTransfer) {
+        self.pending_transfers
+            .lock()
+            .unwrap()
+            .insert(transfer.transfer_id.clone(), transfer);
+    }
+
+    pub fn peek_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
+        self.pending_transfers
+            .lock()
+            .unwrap()
+            .get(transfer_id)
+            .cloned()
+    }
+
+    pub fn take_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
+        self.pending_transfers.lock().unwrap().remove(transfer_id)
+    }
+
+    pub fn list_pending(&self) -> Vec<PendingTransfer> {
+        self.pending_transfers
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn is_receiving(&self) -> bool {
+        self.receiving.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +284,86 @@ mod tests {
         let pool = init_pool(":memory:").await.unwrap();
         let key = derive_key("key", &[0u8; 16]).unwrap();
         AppState::new(pool, key, "test-device-uuid".into())
+    }
+
+    /// Backdate a cached unlock so the timeout can be exercised without waiting.
+    fn age_unlock(state: &AppState, note_id: &str, secs: i64) {
+        state
+            .unlocked
+            .lock()
+            .unwrap()
+            .get_mut(note_id)
+            .expect("note should be unlocked")
+            .touched_at -= secs;
+    }
+
+    #[tokio::test]
+    async fn unlocked_note_password_is_readable() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        assert_eq!(state.note_password("n1").as_deref(), Some("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn unlock_expires_after_the_timeout() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS + 1);
+        assert!(
+            state.note_password("n1").is_none(),
+            "a stale unlock must not hand back the password"
+        );
+    }
+
+    /// Inactivity timeout: using a note keeps it open, so a long editing
+    /// session doesn't get locked out mid-edit.
+    #[tokio::test]
+    async fn using_a_note_extends_its_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+        // The read above should have reset the clock.
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        assert!(state.note_password("n1").is_some());
+    }
+
+    /// Entries nobody asks for again must still be dropped, or an unlocked
+    /// credential note would sit in memory for the life of the process.
+    #[tokio::test]
+    async fn any_access_sweeps_other_expired_entries() {
+        let state = test_state().await;
+        state.unlock_note("stale", "old-secret", "title");
+        state.unlock_note("fresh", "new-secret", "title");
+        age_unlock(&state, "stale", UNLOCK_TIMEOUT_SECS + 1);
+
+        assert!(state.note_password("fresh").is_some());
+        assert!(
+            !state.unlocked.lock().unwrap().contains_key("stale"),
+            "expired entry should have been swept from memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_the_cached_title_does_not_extend_the_unlock() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "Bank");
+        assert_eq!(state.note_title("n1").as_deref(), Some("Bank"));
+        age_unlock(&state, "n1", UNLOCK_TIMEOUT_SECS - 5);
+        state.note_title("n1");
+        age_unlock(&state, "n1", 10);
+        assert!(
+            state.note_title("n1").is_none(),
+            "reading the title must not extend the unlock"
+        );
+    }
+
+    #[tokio::test]
+    async fn locking_forgets_the_password() {
+        let state = test_state().await;
+        state.unlock_note("n1", "hunter2", "title");
+        state.lock_note("n1");
+        assert!(state.note_password("n1").is_none());
     }
 
     fn sample_transfer(id: &str) -> PendingTransfer {
@@ -111,7 +383,11 @@ mod tests {
         state.add_pending(sample_transfer("t1"));
         let peeked = state.peek_pending("t1");
         assert!(peeked.is_some());
-        assert_eq!(state.list_pending().len(), 1, "transfer must still be present after peek");
+        assert_eq!(
+            state.list_pending().len(),
+            1,
+            "transfer must still be present after peek"
+        );
     }
 
     #[tokio::test]
@@ -127,65 +403,22 @@ mod tests {
         let state = test_state().await;
         assert!(state.peek_pending("no-such-id").is_none());
     }
-}
 
-impl AppState {
-    pub fn new(db: SqlitePool, device_key: [u8; 32], device_uuid: String) -> Self {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        Self {
-            db,
-            device_key,
-            device_uuid,
-            peers: Arc::new(Mutex::new(Vec::new())),
-            pending_transfers: Arc::new(Mutex::new(HashMap::new())),
-            tofu: Arc::new(TofuVerifier::new(provider)),
-            outbound_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pending_offers: Arc::new(Mutex::new(HashMap::new())),
-            offer_responses: Arc::new(Mutex::new(HashMap::new())),
-            receiving: Arc::new(AtomicBool::new(false)),
-            listener_task: Arc::new(Mutex::new(None)),
-            unlocked: Arc::new(Mutex::new(HashMap::new())),
+    #[tokio::test]
+    async fn offer_attempts_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.allow_offer_attempt(&format!("10.0.0.{i}"));
         }
+        assert!(state.offer_attempts.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
     }
 
-    /// Record the password that unlocked a note for the rest of the session.
-    pub fn unlock_note(&self, note_id: &str, password: &str) {
-        self.unlocked
-            .lock()
-            .unwrap()
-            .insert(note_id.to_string(), password.to_string());
-    }
-
-    /// Return the cached unlock password for a note, if any.
-    pub fn note_password(&self, note_id: &str) -> Option<String> {
-        self.unlocked.lock().unwrap().get(note_id).cloned()
-    }
-
-    /// Forget a note's cached password (re-locks it for this session).
-    pub fn lock_note(&self, note_id: &str) {
-        self.unlocked.lock().unwrap().remove(note_id);
-    }
-
-    pub fn add_pending(&self, transfer: PendingTransfer) {
-        self.pending_transfers
-            .lock()
-            .unwrap()
-            .insert(transfer.transfer_id.clone(), transfer);
-    }
-
-    pub fn peek_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
-        self.pending_transfers.lock().unwrap().get(transfer_id).cloned()
-    }
-
-    pub fn take_pending(&self, transfer_id: &str) -> Option<PendingTransfer> {
-        self.pending_transfers.lock().unwrap().remove(transfer_id)
-    }
-
-    pub fn list_pending(&self) -> Vec<PendingTransfer> {
-        self.pending_transfers.lock().unwrap().values().cloned().collect()
-    }
-
-    pub fn is_receiving(&self) -> bool {
-        self.receiving.load(Ordering::Relaxed)
+    #[tokio::test]
+    async fn passphrase_failures_map_is_capped_across_many_distinct_peers() {
+        let state = test_state().await;
+        for i in 0..(AppState::MAX_TRACKED_PEERS + 50) {
+            state.record_passphrase_failure(&format!("10.0.0.{i}"));
+        }
+        assert!(state.passphrase_failures.lock().unwrap().len() <= AppState::MAX_TRACKED_PEERS);
     }
 }

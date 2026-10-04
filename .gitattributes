@@ -1,0 +1,2 @@
+# sqlx checksums migration bytes; CRLF checkouts would reject existing databases.
+src-tauri/src/db/migrations/*.sql text eol=lf

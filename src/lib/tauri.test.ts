@@ -5,7 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import {
   noteCreate,
-  noteDelete,
+  notesDelete,
   noteGet,
   noteList,
   noteUpdate,
@@ -39,9 +39,9 @@ describe("tauri bindings", () => {
     expect(invoke).toHaveBeenCalledWith("note_update", { id: "id1", input });
   });
 
-  it("noteDelete → note_delete", async () => {
-    await noteDelete("id1");
-    expect(invoke).toHaveBeenCalledWith("note_delete", { id: "id1" });
+  it("notesDelete → notes_delete", async () => {
+    await notesDelete(["id1"]);
+    expect(invoke).toHaveBeenCalledWith("notes_delete", { ids: ["id1"] });
   });
 
   it("noteList → note_list", async () => {

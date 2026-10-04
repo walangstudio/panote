@@ -2,10 +2,12 @@
   import { onMount } from "svelte";
   import { getDeviceName, setDeviceName, startReceiving, stopReceiving, isReceiving, deviceIps, notesExport, notesImport, type ImportResolution, type ImportSummary } from "$lib/tauri";
   import { getVersion } from "@tauri-apps/api/app";
-  import { toggleDarkMode, theme } from "$lib/stores/theme";
+  import { theme, resolvedTheme } from "$lib/stores/theme";
+  import { autosave, setAutosave } from "$lib/stores/autosave";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
+  import PasswordModal from "$lib/components/PasswordModal.svelte";
 
   let appVersion = $state("");
   let deviceName = $state("");
@@ -18,6 +20,8 @@
   let exporting = $state(false);
   let importing = $state(false);
   let pendingImportContents = $state<string | null>(null);
+  /// Set while waiting for the password that unseals protected notes in a backup.
+  let sealedImportContents = $state<string | null>(null);
   let importResolution = $state<ImportResolution>("overwrite");
   let statusMessage = $state("");
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -63,14 +67,36 @@
     }
   }
 
-  async function confirmImport() {
+  /// A backup seals password-protected notes, so importing one needs that
+  /// password before anything can be read.
+  function fileHasSealedNotes(contents: string): boolean {
+    try {
+      const parsed = JSON.parse(contents);
+      return Array.isArray(parsed?.notes) && parsed.notes.some((n: unknown) =>
+        !!(n as { secret?: unknown })?.secret,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function confirmImport() {
     const contents = pendingImportContents;
-    pendingImportContents = null;
     if (!contents) return;
+    pendingImportContents = null;
+    if (fileHasSealedNotes(contents)) {
+      // Collect the password first; the import runs from the modal's submit.
+      sealedImportContents = contents;
+      return;
+    }
+    void runImport(contents);
+  }
+
+  async function runImport(contents: string, secretPassword?: string) {
     importing = true;
     statusMessage = "";
     try {
-      const summary: ImportSummary = await notesImport(contents, importResolution);
+      const summary: ImportSummary = await notesImport(contents, importResolution, secretPassword);
       const parts: string[] = [];
       if (summary.imported) parts.push(`${summary.imported} new`);
       if (summary.updated) parts.push(`${summary.updated} updated`);
@@ -118,144 +144,192 @@
   }
 </script>
 
-<div class="page">
-  <div class="page-header">
+<div class="settings-page">
+  <!-- Glass sticky header -->
+  <div class="settings-header">
     <button class="menu-btn" onclick={() => $sidebarOpen = true} aria-label="Open menu">
       <span class="material-symbols-outlined">menu</span>
     </button>
-    <h1>Settings</h1>
+    <span class="header-title">Settings</span>
   </div>
 
-  <section class="card">
-    <h2 class="section-title">Appearance</h2>
-    <button class="setting-row" onclick={toggleDarkMode}>
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">{$theme === "candy-dark" ? "light_mode" : "dark_mode"}</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">{$theme === "candy-dark" ? "Switch to light mode" : "Switch to dark mode"}</span>
-        <span class="setting-desc">Currently using {$theme === "candy-dark" ? "dark" : "light"} theme</span>
-      </div>
-      <span class="material-symbols-outlined chevron">chevron_right</span>
-    </button>
-  </section>
+  <div class="settings-body">
 
-  <section class="card">
-    <h2 class="section-title">Device</h2>
-    <div class="setting-row">
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">smartphone</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">Device name</span>
-        {#if editingName}
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            class="name-input"
-            bind:value={nameInput}
-            onkeydown={(e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") editingName = false; }}
-            onblur={saveName}
-            autofocus
-          />
-        {:else}
-          <button class="name-value" onclick={() => { nameInput = deviceName; editingName = true; }}>
-            {deviceName || "Tap to set"}
+    <!-- Device -->
+    <div class="settings-group">
+      <div class="group-label">Device</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon"><span class="material-symbols-outlined">smartphone</span></span>
+          <div class="row-body">
+            <span class="row-title">Device name</span>
+            {#if editingName}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="name-input"
+                bind:value={nameInput}
+                onkeydown={(e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") editingName = false; }}
+                onblur={saveName}
+                autofocus
+              />
+            {:else}
+              <button class="name-value" onclick={() => { nameInput = deviceName; editingName = true; }}>
+                {deviceName || "Tap to set"}
+              </button>
+            {/if}
+          </div>
+          {#if !editingName}
+            <span class="material-symbols-outlined row-chevron">chevron_right</span>
+          {/if}
+        </div>
+      </div>
+    </div>
+
+    <!-- LAN Transfer -->
+    <div class="settings-group">
+      <div class="group-label">LAN Transfer</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon"><span class="material-symbols-outlined">wifi_tethering</span></span>
+          <div class="row-body">
+            <span class="row-title">Receive notes</span>
+            <span class="row-sub">{receiving ? "Active — other devices can send" : "Accept incoming notes on this network"}</span>
+          </div>
+          <button
+            class="toggle-pill"
+            class:on={receiving}
+            role="switch"
+            aria-checked={receiving}
+            aria-label="Toggle receiving"
+            onclick={toggleReceive}
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+        {#if receiving && myIps.length > 0}
+          <div class="row-divider"></div>
+          <div class="row">
+            <span class="row-icon"><span class="material-symbols-outlined">lan</span></span>
+            <div class="row-body">
+              <span class="row-title">IP Addresses</span>
+              <span class="row-sub mono">{myIps.join(", ")}</span>
+            </div>
+          </div>
+          <div class="row-divider"></div>
+          <button class="row actionable" onclick={() => showQr = true}>
+            <span class="row-icon"><span class="material-symbols-outlined">qr_code_2</span></span>
+            <div class="row-body">
+              <span class="row-title">Show QR code</span>
+              <span class="row-sub">Let sender scan to connect</span>
+            </div>
+            <span class="material-symbols-outlined row-chevron">chevron_right</span>
           </button>
         {/if}
       </div>
     </div>
-  </section>
 
-  <section class="card">
-    <h2 class="section-title">Transfer</h2>
-    <button class="setting-row" onclick={toggleReceive}>
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">download</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">Receive notes</span>
-        <span class="setting-desc">{receiving ? "Active — other devices can send" : "Off"}</span>
-      </div>
-      <span class="toggle-pill" class:active={receiving}>
-        <span class="toggle-knob"></span>
-      </span>
-    </button>
-    {#if receiving && myIps.length > 0}
-      <div class="setting-row">
-        <span class="setting-icon">
-          <span class="material-symbols-outlined">lan</span>
-        </span>
-        <div class="setting-text">
-          <span class="setting-label">IP Addresses</span>
-          <span class="setting-desc mono">{myIps.join(", ")}</span>
-        </div>
-      </div>
-      <button class="setting-row" onclick={() => showQr = true}>
-        <span class="setting-icon">
-          <span class="material-symbols-outlined">qr_code_2</span>
-        </span>
-        <div class="setting-text">
-          <span class="setting-label">Show QR code</span>
-          <span class="setting-desc">Let sender scan to connect</span>
-        </div>
-        <span class="material-symbols-outlined chevron">chevron_right</span>
-      </button>
-    {/if}
-  </section>
-
-  <section class="card">
-    <h2 class="section-title">Data</h2>
-    <button class="setting-row" onclick={doExport} disabled={exporting}>
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">file_download</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">Export all notes</span>
-        <span class="setting-desc">{exporting ? "Exporting…" : "Download a backup JSON file"}</span>
-      </div>
-      <span class="material-symbols-outlined chevron">chevron_right</span>
-    </button>
-    <button class="setting-row" onclick={triggerImportPicker} disabled={importing}>
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">file_upload</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">Import from file</span>
-        <span class="setting-desc">{importing ? "Importing…" : "Restore notes from a backup"}</span>
-      </div>
-      <span class="material-symbols-outlined chevron">chevron_right</span>
-    </button>
-    {#if statusMessage}
-      <div class="setting-row">
-        <span class="setting-icon">
-          <span class="material-symbols-outlined">info</span>
-        </span>
-        <div class="setting-text">
-          <span class="setting-desc">{statusMessage}</span>
-        </div>
-      </div>
-    {/if}
-    <input
-      bind:this={fileInput}
-      type="file"
-      accept="application/json,.json"
-      style="display:none"
-      onchange={onFilePicked}
-    />
-  </section>
-
-  <section class="card">
-    <h2 class="section-title">About</h2>
-    <div class="setting-row">
-      <span class="setting-icon">
-        <span class="material-symbols-outlined">info</span>
-      </span>
-      <div class="setting-text">
-        <span class="setting-label">Panote</span>
-        <span class="setting-desc">{appVersion ? `Version ${appVersion}` : "Loading…"}</span>
+    <!-- Data -->
+    <div class="settings-group">
+      <div class="group-label">Data</div>
+      <div class="group-card">
+        <button class="row actionable" onclick={doExport} disabled={exporting}>
+          <span class="row-icon"><span class="material-symbols-outlined">file_download</span></span>
+          <div class="row-body">
+            <span class="row-title">Export all notes</span>
+            <span class="row-sub">{exporting ? "Exporting…" : "Download a backup JSON file"}</span>
+          </div>
+          <span class="material-symbols-outlined row-chevron">chevron_right</span>
+        </button>
+        <div class="row-divider"></div>
+        <button class="row actionable" onclick={triggerImportPicker} disabled={importing}>
+          <span class="row-icon"><span class="material-symbols-outlined">file_upload</span></span>
+          <div class="row-body">
+            <span class="row-title">Import from file</span>
+            <span class="row-sub">{importing ? "Importing…" : "Restore notes from a backup"}</span>
+          </div>
+          <span class="material-symbols-outlined row-chevron">chevron_right</span>
+        </button>
+        {#if statusMessage}
+          <div class="row-divider"></div>
+          <div class="row">
+            <span class="row-icon"><span class="material-symbols-outlined">info</span></span>
+            <div class="row-body">
+              <span class="row-sub">{statusMessage}</span>
+            </div>
+          </div>
+        {/if}
+        <input
+          bind:this={fileInput}
+          type="file"
+          accept="application/json,.json"
+          style="display:none"
+          onchange={onFilePicked}
+        />
       </div>
     </div>
-  </section>
+
+    <!-- Editing -->
+    <div class="settings-group">
+      <div class="group-label">Editing</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon"><span class="material-symbols-outlined">save</span></span>
+          <div class="row-body">
+            <span class="row-title">Autosave</span>
+            <span class="row-sub">{$autosave ? "Notes save as you edit" : "Save with Ctrl+S or the Save button"}</span>
+          </div>
+          <button
+            class="toggle-pill"
+            class:on={$autosave}
+            role="switch"
+            aria-checked={$autosave}
+            aria-label="Autosave"
+            onclick={() => setAutosave(!$autosave)}
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Appearance -->
+    <div class="settings-group">
+      <div class="group-label">Appearance</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon">
+            <span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">
+              {$resolvedTheme === "candy-dark" ? "dark_mode" : "light_mode"}
+            </span>
+          </span>
+          <div class="row-body">
+            <label class="row-title" for="theme-select">Theme</label>
+            <span class="row-sub">{$resolvedTheme === "candy-dark" ? "Candy dark" : "Candy light"}</span>
+          </div>
+          <select id="theme-select" class="theme-select" bind:value={$theme}>
+            <option value="candy-light">Light</option>
+            <option value="candy-dark">Dark</option>
+            <option value="system">System</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- About -->
+    <div class="settings-group">
+      <div class="group-label">About</div>
+      <div class="group-card">
+        <div class="row">
+          <span class="row-icon"><span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">info</span></span>
+          <div class="row-body">
+            <span class="row-title">Panote</span>
+            <span class="row-sub">{appVersion ? `Version ${appVersion} · offline-first, encrypted` : "Loading…"}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 {#if showQr}
@@ -273,86 +347,231 @@
   />
 {/if}
 
+{#if sealedImportContents !== null}
+  <PasswordModal
+    mode="unlock"
+    title="Password-protected notes"
+    onsubmit={async (v) => {
+      const contents = sealedImportContents!;
+      sealedImportContents = null;
+      await runImport(contents, v.password);
+    }}
+    onclose={() => (sealedImportContents = null)}
+  />
+{/if}
+
 <style>
-  .page {
-    padding: 1.5rem 2rem 2rem;
-    max-width: 600px; margin: 0 auto;
+  .settings-page {
+    min-height: 100%;
   }
-  .page-header {
-    display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem;
+
+  /* ── Glass sticky header ── */
+  .settings-header {
+    position: sticky;
+    top: 0;
+    z-index: 15;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0.7rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-glass);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
   }
+
   .menu-btn {
-    background: none; border: none; cursor: pointer; color: var(--text-secondary);
-    display: flex; align-items: center; padding: 0.25rem; border-radius: var(--radius-full);
-    flex-shrink: 0; transition: all 0.15s ease;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    border-radius: var(--radius-full);
+    flex-shrink: 0;
+    transition: color 0.15s ease, background 0.15s ease;
   }
   .menu-btn:hover { color: var(--accent); background: var(--accent-muted); }
-  h1 {
-    font-size: 1.5rem; font-weight: 900; margin: 0;
+  .menu-btn .material-symbols-outlined { font-size: 22px; }
+
+  .header-title {
+    font-size: 1.1rem;
+    font-weight: 700;
     color: var(--text);
   }
-  .card {
-    background: var(--surface); border-radius: var(--radius);
-    border: 1px solid var(--border);
+
+  /* ── Body ── */
+  .settings-body {
+    padding: 1.1rem 0.9rem 3rem;
+  }
+
+  /* ── Group ── */
+  .settings-group {
+    margin-bottom: 22px;
+  }
+
+  .group-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 1.1rem;
+    margin-bottom: 8px;
+  }
+
+  .group-card {
+    background: var(--surface);
+    border-radius: var(--radius);
     box-shadow: 0 4px 16px var(--shadow-color);
-    margin-bottom: 1rem; overflow: hidden;
+    overflow: hidden;
   }
-  .section-title {
-    font-size: 0.75rem; color: var(--muted); text-transform: uppercase;
-    letter-spacing: 0.05em; font-weight: 600;
-    padding: 0.75rem 1rem 0; margin: 0;
+
+  /* ── Row divider ── */
+  .row-divider {
+    height: 1px;
+    background: var(--border);
+    margin-left: calc(1rem + 36px);
   }
-  .setting-row {
-    display: flex; align-items: center; gap: 0.75rem;
-    padding: 0.85rem 1rem; width: 100%; text-align: left;
-    background: none; border: none; cursor: pointer;
-    color: var(--text); transition: background 0.1s ease;
+
+  /* ── Row ── */
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0.85rem 1rem;
+    cursor: default;
   }
-  .setting-row:hover { background: var(--hover); }
-  .setting-icon {
-    width: 40px; height: 40px; border-radius: 12px;
-    background: var(--accent-surface); color: var(--accent);
-    display: flex; align-items: center; justify-content: center;
+
+  button.row,
+  .row.actionable {
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.1s ease;
+  }
+  button.row:hover,
+  .row.actionable:hover { background: var(--hover); }
+  button.row:disabled,
+  .row.actionable:disabled { opacity: 0.55; cursor: default; }
+
+  .row-icon {
+    font-size: 22px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    width: 22px;
+  }
+  .row-icon .material-symbols-outlined { font-size: 22px; }
+
+  .row-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .row-title {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .row-sub {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 1px;
+  }
+
+  .row-chevron {
+    font-size: 20px;
+    color: var(--muted);
     flex-shrink: 0;
   }
-  .setting-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .setting-label { font-weight: 600; font-size: 0.9rem; }
-  .setting-desc { font-size: 0.78rem; color: var(--muted); }
-  .mono { font-family: monospace; font-size: 0.8rem; }
-  .chevron { color: var(--muted); margin-left: auto; }
 
+  /* ── Toggle pill (40×22) ── */
   .toggle-pill {
-    width: 40px; height: 22px; border-radius: 11px;
-    background: var(--surface-container); border: 1px solid var(--border);
-    position: relative; flex-shrink: 0;
-    transition: all 0.2s ease;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    position: relative;
+    flex-shrink: 0;
+    background: var(--surface-container);
+    transition: background 0.15s ease;
   }
-  .toggle-pill.active { background: var(--accent); border-color: var(--accent); }
+  .toggle-pill.on { background: var(--accent); }
+
   .toggle-knob {
-    position: absolute; top: 2px; left: 2px;
-    width: 16px; height: 16px; border-radius: 50%;
+    position: absolute;
+    top: 3px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: var(--radius-full);
     background: var(--muted);
-    transition: all 0.2s ease;
+    transition: left 0.15s ease, background 0.15s ease;
   }
-  .toggle-pill.active .toggle-knob {
-    left: 20px; background: var(--on-accent);
+  .toggle-pill.on .toggle-knob {
+    left: 20px;
+    background: var(--on-accent);
   }
 
-  .name-input {
-    padding: 0.35rem 0.6rem; font-size: 0.85rem;
-    border: 1px solid var(--accent); border-radius: var(--radius-full);
-    background: var(--input-bg); color: var(--text); outline: none;
-    width: 100%; max-width: 220px;
+  /* ── Theme select (Appearance row) ── */
+  .theme-select {
+    padding: 0.35rem 0.8rem;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    background: transparent;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    flex-shrink: 0;
+    transition: background 0.1s ease;
   }
+  .theme-select:hover { background: var(--accent-muted); }
+
+  /* ── Device name inline edit ── */
+  .name-input {
+    padding: 0.35rem 0.6rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-full);
+    background: var(--input-bg);
+    color: var(--text);
+    outline: none;
+    width: 100%;
+    max-width: 220px;
+    margin-top: 2px;
+  }
+
   .name-value {
-    background: none; border: none; padding: 0; cursor: pointer;
-    color: var(--accent); font-size: 0.85rem; text-align: left;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 0.85rem;
+    text-align: left;
     font-weight: 500;
+    margin-top: 1px;
   }
   .name-value:hover { text-decoration: underline; }
 
+  .mono { font-family: monospace; font-size: 0.8rem; }
+
   @media (max-width: 640px) {
-    .page { padding: 1rem 0.75rem calc(1rem + env(safe-area-inset-bottom, 0px)); }
-    h1 { font-size: 1.3rem; }
+    .settings-body { padding: 0.9rem 0.6rem calc(2rem + env(safe-area-inset-bottom, 0px)); }
   }
 </style>

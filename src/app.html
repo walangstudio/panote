@@ -1,14 +1,32 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en" data-theme="candy-light">
   <head>
     <meta charset="utf-8" />
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
+    <!-- interactive-widget=resizes-content is added at runtime for TOUCH devices
+         only (see +layout.svelte) - it is an on-screen-keyboard setting and a
+         desktop window has no on-screen keyboard. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&display=swap" rel="stylesheet" />
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
+    <!-- Self-hosted: this app never touches the network. Regenerate with scripts/fetch-fonts.ps1. -->
+    <link href="%sveltekit.assets%/fonts/fonts.css" rel="stylesheet" />
     <title>Panote</title>
+    <script>
+      // Painted before hydration so a dark user never sees the light theme
+      // first. Must agree with localInitial() in src/lib/stores/theme.ts.
+      (() => {
+        let stored = null;
+        try { stored = localStorage.getItem("panote-theme"); } catch {}
+        document.documentElement.dataset.theme =
+          stored === "candy-light" || stored === "candy-dark" ? stored
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "candy-dark" : "candy-light";
+      })();
+    </script>
     <style>
       [data-theme="candy-light"] {
+        /* Native controls (select popups, file inputs, scrollbars, date pickers)
+           are painted by the UA and ignore our variables â€” without this the dark
+           theme rendered <option> text black on a dark background. */
+        color-scheme: light;
         --bg: #fef7ff;
         --bg-gradient: linear-gradient(135deg, #fef7ff 0%, #ffd6ee 50%, #eedcff 100%);
         --surface: #ffffff;
@@ -18,7 +36,9 @@
         --hover: #fdf0f8;
         --text: #2e1a28;
         --text-secondary: #604868;
-        --muted: #907898;
+        /* Darkened from #907898 (3.4-3.9:1) to clear WCAG AA's 4.5:1 for
+           normal text against both --surface and --surface-container. */
+        --muted: #67546e;
         --border: #e8d8ec;
         --input-bg: #ffffff;
         --accent: #e040a0;
@@ -41,6 +61,7 @@
         --radius-full: 9999px;
       }
       [data-theme="candy-dark"] {
+        color-scheme: dark;
         --bg: #1a1625;
         --bg-gradient: linear-gradient(135deg, #1a1625 0%, #2a1530 50%, #1e1a30 100%);
         --surface: #2b2538;
@@ -50,7 +71,9 @@
         --hover: #3a3350;
         --text: #e6e0ec;
         --text-secondary: #b8a8c8;
-        --muted: #8a7a98;
+        /* Lightened from #8a7a98 (3.4-3.7:1) to clear WCAG AA's 4.5:1 for
+           normal text against both --surface and --surface-container. */
+        --muted: #a99db3;
         --border: #4a4260;
         --input-bg: #241e32;
         --accent: #f06cb8;
@@ -83,11 +106,45 @@
         background: var(--bg-gradient), var(--bg);
         color: var(--text);
       }
+      /* Android's WebView reports safe-area insets as 0 even under Android 15's
+         edge-to-edge default, so the inset above collapses and the status bar's
+         clock and battery sit on top of the app's own chrome. `max` keeps the
+         real inset where one is reported (iOS notches) and falls back to a floor
+         where it is not. Touch only: a desktop window has no status bar to clear. */
+      @media (hover: none) {
+        body {
+          padding-top: max(env(safe-area-inset-top, 0px), 28px);
+          /* Same story at the bottom: reported as 0, so the footer sat under the
+             gesture bar and squeezed the tag row against it. */
+          padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+        }
+      }
+      /* Keyboard height. Android overwrites this inline from MainActivity, which
+         is the only source that works there. This fallback covers everyone else:
+         a real value where the VirtualKeyboard API exists, 0 otherwise. */
+      :root { --kb: env(keyboard-inset-height, 0px); }
       button { font-family: inherit; }
       a { color: var(--accent); }
       .material-symbols-outlined {
         font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
         vertical-align: middle;
+      }
+      @keyframes panote-fade-in { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes panote-pop-in {
+        from { opacity: 0; transform: scale(0.96) translateY(6px); }
+        to { opacity: 1; transform: none; }
+      }
+      @keyframes panote-slide-down {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: none; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+          scroll-behavior: auto !important;
+        }
       }
     </style>
     %sveltekit.head%

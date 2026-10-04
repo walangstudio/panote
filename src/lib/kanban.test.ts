@@ -52,4 +52,10 @@ describe("moveColumn", () => {
     moveColumn(cols, "a", "b");
     expect(cols[0].id).toBe("a");
   });
+
+  it("appends to the end when toColId is not found", () => {
+    const cols = [makeCol("a", []), makeCol("b", []), makeCol("c", [])];
+    const result = moveColumn(cols, "a", "missing");
+    expect(result.map(c => c.id)).toEqual(["b", "c", "a"]);
+  });
 });

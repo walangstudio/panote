@@ -36,25 +36,41 @@ test("search is case-insensitive", async ({ page }) => {
 test("empty state shows message when no notes match search", async ({ page }) => {
   await page.goto("/");
   await page.fill(".search", "zzz-no-match");
-  await expect(page.getByText("No notes yet")).toBeVisible();
+  // "No notes yet" is the empty-library wording; a search that matches nothing
+  // says so specifically, because the two mean different things to the reader.
+  await expect(page.getByText("No notes match your search.")).toBeVisible();
 });
 
-test("new note button shows kind picker", async ({ page }) => {
+// The kind <select> is gone. Desktop composes from the pane header into a modal
+// listing the kinds; touch fans the same choices out of a FAB. Both are covered
+// because they are separate markup, and the default viewport only renders one.
+test("new note button shows the kind options", async ({ page }) => {
   await page.goto("/");
-  await page.click(".new-btn");
-  await expect(page.locator(".kind-picker")).toBeVisible();
-  await expect(page.locator("#kind-select")).toBeVisible();
+  await page.click(".compose-btn");
+  await expect(page.locator(".modal")).toBeVisible();
+  await expect(page.locator(".kind-row", { hasText: "Document" })).toBeVisible();
 });
 
-test("cancel hides kind picker", async ({ page }) => {
+test("cancel hides the kind options", async ({ page }) => {
   await page.goto("/");
-  await page.click(".new-btn");
+  await page.click(".compose-btn");
+  await expect(page.locator(".modal")).toBeVisible();
   await page.click(".btn-cancel");
-  await expect(page.locator(".kind-picker")).not.toBeVisible();
+  await expect(page.locator(".modal")).toHaveCount(0);
 });
 
-test("note card links to editor", async ({ page }) => {
+test("touch layout offers the same kinds from the FAB", async ({ page }) => {
+  await page.setViewportSize({ width: 500, height: 900 });
   await page.goto("/");
-  const href = await page.locator(".note-card").first().getAttribute("href");
-  expect(href).toMatch(/\/note\//);
+  await page.click(".fab");
+  await expect(page.locator(".fab-options")).toBeVisible();
+  await expect(page.locator(".fab-option", { hasText: "Document" })).toBeVisible();
+});
+
+// The card is a div with a click handler now, not an anchor, so there is no href
+// to read - assert the navigation it performs instead.
+test("note card opens the editor", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".note-card").first().click();
+  await expect(page).toHaveURL(/\/note\/note-/);
 });

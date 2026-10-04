@@ -43,7 +43,7 @@
       status = "error";
       return;
     }
-    if (!payload.ip) {
+    if (!payload.ip || typeof payload.ip !== "string" || (payload.port !== undefined && typeof payload.port !== "number")) {
       errorMsg = "QR code missing IP address.";
       status = "error";
       return;

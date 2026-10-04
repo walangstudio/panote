@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { goto } from "$app/navigation";
   import {
     slugifyColumn,
@@ -10,9 +10,7 @@
   import TableImportModal from "$lib/components/TableImportModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
 
-  let { content = $bindable({ columns: [], rows: [] }) } = $props<{
-    content: TableContent;
-  }>();
+  let { content = $bindable({ columns: [], rows: [] }) }: { content: TableContent } = $props();
 
   let showColumnSetup = $state(false);
   let showAddRow = $state(false);
@@ -25,6 +23,60 @@
 
   // Column setup state
   let setupNames = $state<string[]>([]);
+  let setupTypes = $state<string[]>([]);
+
+  // ---- Masked (secret) columns ----
+
+  /// Which "rowId:colId" cells are currently revealed. Reveals are per-cell and
+  /// never persisted — reopening the note re-hides everything.
+  let revealed = $state(new Set<string>());
+  let copied = $state<string | null>(null);
+  let clipboardTimer: ReturnType<typeof setTimeout> | null = null;
+  let copiedResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /// How long a copied secret is allowed to sit on the clipboard.
+  const CLIPBOARD_CLEAR_MS = 30_000;
+
+  const isRevealed = (rowId: string, colId: string) => revealed.has(`${rowId}:${colId}`);
+
+  function toggleReveal(rowId: string, colId: string) {
+    const key = `${rowId}:${colId}`;
+    const next = new Set(revealed);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    revealed = next;
+  }
+
+  /// Fixed-width mask so the dots never leak the secret's length.
+  const maskOf = (val: string) => (val ? "••••••••" : "");
+
+  async function copySecret(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      return; // clipboard unavailable; nothing copied, so nothing to clear
+    }
+    copied = value;
+    if (copiedResetTimer) clearTimeout(copiedResetTimer);
+    copiedResetTimer = setTimeout(() => (copied = null), 1500);
+
+    if (clipboardTimer) clearTimeout(clipboardTimer);
+    clipboardTimer = setTimeout(async () => {
+      try {
+        // Only clear if the secret is still there — never clobber something the
+        // user copied in the meantime.
+        const current = await navigator.clipboard.readText();
+        if (current === value) await navigator.clipboard.writeText("");
+      } catch { /* readText can be denied; leaving it is better than clobbering */ }
+    }, CLIPBOARD_CLEAR_MS);
+  }
+
+  onDestroy(() => {
+    // clipboardTimer deliberately outlives the component: navigating away within
+    // the 30s window must not strand a copied secret on the OS clipboard. Only
+    // the icon-state timer, which touches nothing after unmount, is cancelled.
+    if (copiedResetTimer) clearTimeout(copiedResetTimer);
+  });
 
   // Add row form state
   let newRowCells = $state<Record<string, string>>({});
@@ -43,15 +95,20 @@
     setupNames = content.columns.length > 0
       ? content.columns.map((c: TableColumn) => c.name)
       : [""];
+    setupTypes = content.columns.length > 0
+      ? content.columns.map((c: TableColumn) => c.type ?? "text")
+      : ["text"];
     showColumnSetup = true;
   }
 
   function addSetupColumn() {
     setupNames = [...setupNames, ""];
+    setupTypes = [...setupTypes, "text"];
   }
 
   function removeSetupColumn(i: number) {
     setupNames = setupNames.filter((_, idx) => idx !== i);
+    setupTypes = setupTypes.filter((_, idx) => idx !== i);
   }
 
   function moveColumn(i: number, dir: -1 | 1) {
@@ -60,16 +117,23 @@
     const arr = [...setupNames];
     [arr[i], arr[j]] = [arr[j], arr[i]];
     setupNames = arr;
+    // Types must travel with their column, or reordering silently unmasks one.
+    const types = [...setupTypes];
+    [types[i], types[j]] = [types[j], types[i]];
+    setupTypes = types;
   }
 
   function finishColumnSetup() {
-    const names = setupNames.map((n) => n.trim()).filter(Boolean);
-    if (names.length === 0) return;
+    // Keep names and types aligned while dropping the blanks.
+    const kept = setupNames
+      .map((n, i) => ({ name: n.trim(), type: setupTypes[i] ?? "text" }))
+      .filter((c) => c.name.length > 0);
+    if (kept.length === 0) return;
     const ids: string[] = [];
-    const newCols: TableColumn[] = names.map((name) => {
+    const newCols: TableColumn[] = kept.map(({ name, type }) => {
       const id = slugifyColumn(name, ids);
       ids.push(id);
-      return { id, name };
+      return type === "masked" ? { id, name, type } : { id, name };
     });
 
     // Preserve existing row data for columns that still exist
@@ -117,13 +181,19 @@
 
   // ---- Import ----
 
-  function handleImport(rows: Record<string, string>[]) {
+  function handleImport(rows: Record<string, string>[], maskedColumnIds: string[] = []) {
     const newRows: TableRow[] = rows.map((cells) => ({
       id: crypto.randomUUID(),
       cells,
     }));
-    content.rows = [...content.rows, ...newRows];
-    content = { ...content };
+    // Importing credentials must not land them in a plain column — a column the
+    // parser flagged as secret becomes masked. Never un-masks an existing one.
+    const columns = maskedColumnIds.length
+      ? content.columns.map((c: TableColumn) =>
+          maskedColumnIds.includes(c.id) ? { ...c, type: "masked" } : c,
+        )
+      : content.columns;
+    content = { ...content, columns, rows: [...content.rows, ...newRows] };
     showImport = false;
   }
 
@@ -164,6 +234,10 @@
   }
 
   function handleRowKey(e: KeyboardEvent, id: string) {
+    // A key pressed on a nested button or link belongs to that control. Handling
+    // it here would preventDefault the control's own activation, which left the
+    // reveal/copy buttons unreachable by keyboard.
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       openRow(id);
@@ -223,7 +297,43 @@
               {#each content.columns as col}
                 {@const val = row.cells[col.id] ?? ""}
                 <td>
-                  {#if isUrl(val)}
+                  {#if col.type === "masked"}
+                    <div class="secret-cell">
+                      <!-- Hidden from AT while masked: the dots are decoration, and
+                           a screen reader would otherwise read eight bullets. -->
+                      <span
+                        class="cell-text secret-value"
+                        aria-hidden={isRevealed(row.id, col.id) ? undefined : "true"}
+                      >
+                        {isRevealed(row.id, col.id) ? val : maskOf(val)}
+                      </span>
+                      {#if val}
+                        <span class="sr-only">
+                          {isRevealed(row.id, col.id) ? "Value shown" : "Value hidden"}
+                        </span>
+                        <button
+                          class="secret-btn"
+                          aria-label={isRevealed(row.id, col.id) ? "Hide value" : "Show value"}
+                          title={isRevealed(row.id, col.id) ? "Hide" : "Show"}
+                          onclick={(e) => { e.stopPropagation(); toggleReveal(row.id, col.id); }}
+                        >
+                          <span class="material-symbols-outlined" style="font-size: 16px;">
+                            {isRevealed(row.id, col.id) ? "visibility_off" : "visibility"}
+                          </span>
+                        </button>
+                        <button
+                          class="secret-btn"
+                          aria-label="Copy value"
+                          title="Copy (clipboard clears automatically)"
+                          onclick={(e) => { e.stopPropagation(); copySecret(val); }}
+                        >
+                          <span class="material-symbols-outlined" style="font-size: 16px;">
+                            {copied === val ? "check" : "content_copy"}
+                          </span>
+                        </button>
+                      {/if}
+                    </div>
+                  {:else if isUrl(val)}
                     <div class="url-cell">
                       <a
                         href={val}
@@ -293,6 +403,15 @@
             bind:value={setupNames[i]}
             onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); addSetupColumn(); } }}
           />
+          <select
+            class="col-type-select"
+            bind:value={setupTypes[i]}
+            aria-label="Column type for {setupNames[i] || `column ${i + 1}`}"
+            title="Masked columns hide their value behind dots"
+          >
+            <option value="text">Text</option>
+            <option value="masked">Masked</option>
+          </select>
           <button
             class="col-del"
             onclick={() => removeSetupColumn(i)}
@@ -564,6 +683,39 @@
   }
   .col-name-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); }
   .col-name-input::placeholder { color: var(--muted); }
+  .col-type-select {
+    flex-shrink: 0; padding: 0.35rem 0.4rem;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--input-bg); color: var(--text);
+    font-size: 0.8rem; font-family: inherit; outline: none;
+  }
+  .col-type-select:focus { border-color: var(--accent); }
+
+  /* Masked cells: fixed-width dots, with reveal/copy on the row. */
+  .secret-cell { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .secret-value { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.06em; }
+  .secret-btn {
+    position: relative;
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0;
+    border: none; background: none; border-radius: var(--radius-sm);
+    color: var(--muted); cursor: pointer;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  /* Touch target stays 44px (iOS minimum) while the button keeps its 24px look,
+     so rows don't grow. */
+  .secret-btn::before {
+    content: ""; position: absolute;
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 44px; height: 44px;
+  }
+  .secret-btn:hover { background: var(--hover); color: var(--accent); }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
   .col-del {
     background: none; border: none; cursor: pointer; color: var(--muted);
     padding: 4px; border-radius: var(--radius-full);

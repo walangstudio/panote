@@ -123,6 +123,9 @@ pub struct NoteRow {
     pub kind: String,
     pub title_nonce: Vec<u8>,
     pub title_ct: Vec<u8>,
+    /// Nonce of the title's password layer (migration 0016); `None` when the
+    /// title is under the device key only.
+    pub title_note_nonce: Option<Vec<u8>>,
     pub nonce: Vec<u8>,
     pub content_ct: Vec<u8>,
     pub note_salt: Option<Vec<u8>>,
@@ -138,6 +141,12 @@ pub struct NoteRow {
     pub preview_text: Option<String>,
     pub origin_device_id: String,
     pub origin_note_id: String,
+    /// Optional recovery-code wrap of the vault ciphertext (migration 0011).
+    pub folder_id: Option<String>,
+    pub sort_order: i64,
+    pub rc_salt: Option<Vec<u8>>,
+    pub rc_nonce: Option<Vec<u8>>,
+    pub rc_ct: Option<Vec<u8>>,
 }
 
 fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
@@ -148,6 +157,7 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         kind: r.get("kind"),
         title_nonce: r.get("title_nonce"),
         title_ct: r.get("title_ct"),
+        title_note_nonce: r.get("title_note_nonce"),
         nonce: r.get("nonce"),
         content_ct: r.get("content_ct"),
         note_salt: r.get("note_salt"),
@@ -156,29 +166,98 @@ fn row_to_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
         updated_at: r.get("updated_at"),
         tags: r.get("tags"),
         content_hint: r.get("content_hint"),
-        pinned: { let v: i32 = r.get("pinned"); v != 0 },
+        pinned: {
+            let v: i32 = r.get("pinned");
+            v != 0
+        },
         bg_color: r.get("bg_color"),
         bg_image: r.get("bg_image"),
-        show_preview: { let v: i32 = r.get("show_preview"); v != 0 },
+        show_preview: {
+            let v: i32 = r.get("show_preview");
+            v != 0
+        },
         preview_text: r.get("preview_text"),
-        origin_device_id: origin_device_id.unwrap_or_else(|| String::new()),
+        origin_device_id: origin_device_id.unwrap_or_default(),
         origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
+        folder_id: r.get("folder_id"),
+        sort_order: r.get("sort_order"),
+        rc_salt: r.get("rc_salt"),
+        rc_nonce: r.get("rc_nonce"),
+        rc_ct: r.get("rc_ct"),
         id,
     }
 }
 
 const SELECT_COLS: &str =
-    "id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id";
+    "id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id, sort_order";
 
-pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
+/// The list view decrypts only the title and tags, so the body ciphertext and
+/// the recovery wrap are pure read amplification — they scale with note size
+/// and get dropped on the floor. Fetch neither.
+const LIST_COLS: &str =
+    "id, kind, title_nonce, title_ct, note_salt, created_at, updated_at, tags, content_hint, pinned, bg_color, show_preview, preview_text, origin_device_id, origin_note_id, folder_id, sort_order";
+
+/// Maps a `LIST_COLS` row. The columns the list never reads are left empty;
+/// only `note_list_page` may use this.
+fn row_to_list_note(r: sqlx::sqlite::SqliteRow) -> NoteRow {
+    let folder_id: Option<String> = r.get("folder_id");
+    let sort_order: i64 = r.get("sort_order");
+    let origin_device_id: Option<String> = r.get("origin_device_id");
+    let origin_note_id: Option<String> = r.get("origin_note_id");
+    let id: String = r.get("id");
+    NoteRow {
+        folder_id,
+        sort_order,
+        kind: r.get("kind"),
+        title_nonce: r.get("title_nonce"),
+        title_ct: r.get("title_ct"),
+        // Not selected: the list never opens a protected title.
+        title_note_nonce: None,
+        nonce: Vec::new(),
+        content_ct: Vec::new(),
+        note_salt: r.get("note_salt"),
+        note_nonce: None,
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+        tags: r.get("tags"),
+        content_hint: r.get("content_hint"),
+        pinned: {
+            let v: i32 = r.get("pinned");
+            v != 0
+        },
+        bg_color: r.get("bg_color"),
+        // Not selected. A background is a base64 data URI that dwarfs everything
+        // else in the row — measured at 143x the size of ALL note bodies put
+        // together — and the list re-runs on every save, pin and delete. Fetched
+        // once via `note_bg_images` and cached instead. See [`row_to_list_note`].
+        bg_image: None,
+        show_preview: {
+            let v: i32 = r.get("show_preview");
+            v != 0
+        },
+        preview_text: r.get("preview_text"),
+        origin_device_id: origin_device_id.unwrap_or_default(),
+        origin_note_id: origin_note_id.unwrap_or_else(|| id.clone()),
+        rc_salt: None,
+        rc_nonce: None,
+        rc_ct: None,
+        id,
+    }
+}
+
+pub async fn note_insert<'e>(
+    pool: impl sqlx::SqliteExecutor<'e>,
+    row: &NoteRow,
+) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO notes (id, kind, title_nonce, title_ct, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notes (id, kind, title_nonce, title_ct, title_note_nonce, nonce, content_ct, note_salt, note_nonce, created_at, updated_at, tags, content_hint, pinned, bg_color, bg_image, show_preview, preview_text, origin_device_id, origin_note_id, rc_salt, rc_nonce, rc_ct, folder_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.kind)
     .bind(&row.title_nonce)
     .bind(&row.title_ct)
+    .bind(&row.title_note_nonce)
     .bind(&row.nonce)
     .bind(&row.content_ct)
     .bind(&row.note_salt)
@@ -194,6 +273,10 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.preview_text)
     .bind(&row.origin_device_id)
     .bind(&row.origin_note_id)
+    .bind(&row.rc_salt)
+    .bind(&row.rc_nonce)
+    .bind(&row.rc_ct)
+    .bind(&row.folder_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -201,11 +284,12 @@ pub async fn note_insert(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
 
 pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=? WHERE id=?",
+        "UPDATE notes SET kind=?, title_nonce=?, title_ct=?, title_note_nonce=?, nonce=?, content_ct=?, note_salt=?, note_nonce=?, updated_at=?, tags=?, content_hint=?, pinned=?, bg_color=?, bg_image=?, show_preview=?, preview_text=?, origin_device_id=?, origin_note_id=?, rc_salt=?, rc_nonce=?, rc_ct=? WHERE id=?",
     )
     .bind(&row.kind)
     .bind(&row.title_nonce)
     .bind(&row.title_ct)
+    .bind(&row.title_note_nonce)
     .bind(&row.nonce)
     .bind(&row.content_ct)
     .bind(&row.note_salt)
@@ -220,6 +304,9 @@ pub async fn note_update(pool: &SqlitePool, row: &NoteRow) -> anyhow::Result<()>
     .bind(&row.preview_text)
     .bind(&row.origin_device_id)
     .bind(&row.origin_note_id)
+    .bind(&row.rc_salt)
+    .bind(&row.rc_nonce)
+    .bind(&row.rc_ct)
     .bind(&row.id)
     .execute(pool)
     .await?;
@@ -243,14 +330,6 @@ pub async fn note_find_by_origin(
     Ok(row.map(row_to_note))
 }
 
-pub async fn note_delete(pool: &SqlitePool, id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM notes WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub async fn note_pin(pool: &SqlitePool, id: &str, pinned: bool) -> anyhow::Result<()> {
     sqlx::query("UPDATE notes SET pinned = ? WHERE id = ?")
         .bind(pinned as i32)
@@ -260,12 +339,99 @@ pub async fn note_pin(pool: &SqlitePool, id: &str, pinned: bool) -> anyhow::Resu
     Ok(())
 }
 
+/// Write an explicit order for one level. Positions come from the sequence, so
+/// the caller sends the ids as the user arranged them and never computes indices.
+pub async fn notes_set_order(pool: &SqlitePool, ids: &[String]) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    for (i, id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE notes SET sort_order = ? WHERE id = ?")
+            .bind(i as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn note_get(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<NoteRow>> {
     let row = sqlx::query(&format!("SELECT {SELECT_COLS} FROM notes WHERE id = ?"))
         .bind(id)
         .fetch_optional(pool)
         .await?;
     Ok(row.map(row_to_note))
+}
+
+/// `note_get`, but `None` for a note in Trash.
+pub async fn note_get_live(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<NoteRow>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE id = ? AND deleted_at IS NULL"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(row_to_note))
+}
+
+/// Notes directly in `folder_id`, leaving Trash out.
+pub async fn live_notes_in(pool: &SqlitePool, folder_id: &str) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE folder_id = ? AND deleted_at IS NULL"
+    ))
+    .bind(folder_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_note).collect())
+}
+
+// ----- Drafts -----
+
+/// A note's unsaved edits. Encrypted like note content; see 0013_note_drafts.sql.
+pub struct DraftRow {
+    pub nonce: Vec<u8>,
+    pub ct: Vec<u8>,
+    pub updated_at: i64,
+}
+
+pub async fn draft_upsert(
+    pool: &SqlitePool,
+    note_id: &str,
+    nonce: &[u8],
+    ct: &[u8],
+    updated_at: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO note_drafts (note_id, nonce, ct, updated_at) VALUES (?, ?, ?, ?) \
+         ON CONFLICT(note_id) DO UPDATE SET nonce = excluded.nonce, ct = excluded.ct, \
+         updated_at = excluded.updated_at",
+    )
+    .bind(note_id)
+    .bind(nonce)
+    .bind(ct)
+    .bind(updated_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn draft_get(pool: &SqlitePool, note_id: &str) -> anyhow::Result<Option<DraftRow>> {
+    let row = sqlx::query("SELECT nonce, ct, updated_at FROM note_drafts WHERE note_id = ?")
+        .bind(note_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| DraftRow {
+        nonce: r.get("nonce"),
+        ct: r.get("ct"),
+        updated_at: r.get("updated_at"),
+    }))
+}
+
+pub async fn draft_delete(pool: &SqlitePool, note_id: &str) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM note_drafts WHERE note_id = ?")
+        .bind(note_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // ----- Device identity -----
@@ -292,6 +458,16 @@ pub async fn device_identity_insert(
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO device_identity (id, cert_der, key_der) VALUES (1, ?, ?)")
         .bind(cert_der)
+        .bind(key_der)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Overwrite the stored `key_der` in place, leaving `cert_der` untouched.
+/// Used to re-encrypt a legacy plaintext key the first time it's read (K7).
+pub async fn device_identity_update_key(pool: &SqlitePool, key_der: &[u8]) -> anyhow::Result<()> {
+    sqlx::query("UPDATE device_identity SET key_der = ? WHERE id = 1")
         .bind(key_der)
         .execute(pool)
         .await?;
@@ -403,7 +579,9 @@ pub async fn known_peer_record_transfer(
     Ok(())
 }
 
-pub async fn known_peers_list_history(pool: &SqlitePool) -> anyhow::Result<Vec<KnownPeerHistoryRow>> {
+pub async fn known_peers_list_history(
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<KnownPeerHistoryRow>> {
     let rows = sqlx::query(
         "SELECT peer_id, display_name, last_transfer_at FROM known_peers \
          WHERE last_transfer_at IS NOT NULL ORDER BY last_transfer_at DESC",
@@ -418,6 +596,66 @@ pub async fn known_peers_list_history(pool: &SqlitePool) -> anyhow::Result<Vec<K
             last_transfer_at: r.get("last_transfer_at"),
         })
         .collect())
+}
+
+/// Lists every live note, newest-first. Used by export/import, which must see the
+/// full set — do not add pagination here; see `note_list_page` for the
+/// bounded variant used by the frontend list view (K14).
+pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_note).collect())
+}
+
+/// Lists notes, bounded by `limit`/`offset` (K14) so the frontend list view
+/// can't force decrypting every note in the database at once.
+///
+/// Ordered `pinned DESC` first, then newest: pinning is the user saying "this
+/// one matters", so a pinned note must never be the one that falls outside the
+/// window. Before this, pinning a note older than the newest 500 made it vanish
+/// from the Pinned section entirely.
+///
+/// Returned rows carry no body ciphertext — see [`row_to_list_note`].
+pub async fn note_list_page(
+    pool: &SqlitePool,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<Vec<NoteRow>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {LIST_COLS} FROM notes WHERE deleted_at IS NULL ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
+    ))
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_list_note).collect())
+}
+
+/// Every note that has a background image, as `(id, data_uri)`.
+///
+/// Deliberately separate from the list query: backgrounds are large and change
+/// rarely, so they are fetched once and cached rather than re-serialised through
+/// IPC every time a note is saved, pinned or deleted.
+pub async fn note_bg_images(pool: &SqlitePool) -> anyhow::Result<Vec<(String, String)>> {
+    let rows = sqlx::query("SELECT id, bg_image FROM notes WHERE bg_image IS NOT NULL AND bg_image <> '' AND deleted_at IS NULL")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.get("id"), r.get("bg_image")))
+        .collect())
+}
+
+/// Total notes, so the list can say how many it is NOT showing. Counting is
+/// cheap — no decryption, no row payload.
+pub async fn note_count(pool: &SqlitePool) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM notes WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.get("n"))
 }
 
 #[cfg(test)]
@@ -478,8 +716,12 @@ mod tests {
     #[tokio::test]
     async fn record_transfer_upsert_updates_display_name_and_timestamp() {
         let pool = pool().await;
-        known_peer_record_transfer(&pool, "192.168.1.5", "Old name", 1000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.5", "New name", 2000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "Old name", 1000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "New name", 2000)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].display_name.as_deref(), Some("New name"));
@@ -490,9 +732,13 @@ mod tests {
     async fn record_transfer_does_not_overwrite_fingerprint() {
         let pool = pool().await;
         let fp = [0xabu8; 32];
-        known_peer_upsert(&pool, "192.168.1.5", &fp, 500).await.unwrap();
+        known_peer_upsert(&pool, "192.168.1.5", &fp, 500)
+            .await
+            .unwrap();
         // record_transfer must not zero out the fingerprint
-        known_peer_record_transfer(&pool, "192.168.1.5", "Alice", 1000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.5", "Alice", 1000)
+            .await
+            .unwrap();
         let row = known_peer_get(&pool, "192.168.1.5").await.unwrap().unwrap();
         assert_eq!(row.fingerprint, fp);
     }
@@ -510,28 +756,30 @@ mod tests {
     async fn list_history_excludes_tofu_only_peers() {
         let pool = pool().await;
         // Insert a TOFU-only peer (fingerprint set, no transfer)
-        known_peer_upsert(&pool, "192.168.1.10", &[0u8; 32], 100).await.unwrap();
+        known_peer_upsert(&pool, "192.168.1.10", &[0u8; 32], 100)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
-        assert!(rows.is_empty(), "TOFU-only peer should not appear in transfer history");
+        assert!(
+            rows.is_empty(),
+            "TOFU-only peer should not appear in transfer history"
+        );
     }
 
     #[tokio::test]
     async fn list_history_ordered_by_last_transfer_at_desc() {
         let pool = pool().await;
-        known_peer_record_transfer(&pool, "192.168.1.1", "A", 1000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.2", "B", 3000).await.unwrap();
-        known_peer_record_transfer(&pool, "192.168.1.3", "C", 2000).await.unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.1", "A", 1000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.2", "B", 3000)
+            .await
+            .unwrap();
+        known_peer_record_transfer(&pool, "192.168.1.3", "C", 2000)
+            .await
+            .unwrap();
         let rows = known_peers_list_history(&pool).await.unwrap();
         let timestamps: Vec<_> = rows.iter().map(|r| r.last_transfer_at.unwrap()).collect();
         assert_eq!(timestamps, vec![3000, 2000, 1000]);
     }
-}
-
-pub async fn note_list(pool: &SqlitePool) -> anyhow::Result<Vec<NoteRow>> {
-    let rows = sqlx::query(&format!(
-        "SELECT {SELECT_COLS} FROM notes ORDER BY updated_at DESC"
-    ))
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(row_to_note).collect())
 }

@@ -29,6 +29,9 @@ export interface TableContent {
 export interface ParseResult {
   columns: string[];
   rows: Record<string, string>[];
+  /// Column names the importer should create as masked, e.g. the password
+  /// column of a browser credential export.
+  masked?: string[];
 }
 
 export interface ImportParser {
@@ -63,12 +66,32 @@ function normalizeUrl(raw: string): string {
 
 // ---- CSV / PSV shared logic ----
 
+function splitLines(input: string): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === '"') inQuotes = !inQuotes;
+    if (ch === "\n" && !inQuotes) {
+      lines.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  lines.push(current);
+  return lines;
+}
+
 function parseSeparated(
   input: string,
   separator: string,
   options?: Record<string, unknown>,
 ): ParseResult {
-  const lines = input.split("\n").filter((l) => l.trim().length > 0);
+  const lines = (separator === "," ? splitLines(input) : input.split("\n")).filter(
+    (l) => l.trim().length > 0,
+  );
   if (lines.length === 0) return { columns: [], rows: [] };
 
   const splitLine = (line: string): string[] => {
@@ -163,10 +186,32 @@ export const psvParser: ImportParser = {
   parse: (input, options) => parseSeparated(input, "|", options),
 };
 
+/// Flatten a nested object into dotted paths: {a:{b:1}} -> {"a.b":"1"}.
+/// Depth-capped because the input can be an imported file.
+function flattenObject(
+  obj: Record<string, unknown>,
+  prefix = "",
+  depth = 0,
+  out: Record<string, string> = {},
+): Record<string, string> {
+  if (depth > 20) return out;
+  for (const [key, val] of Object.entries(obj)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      flattenObject(val as Record<string, unknown>, path, depth + 1, out);
+    } else if (Array.isArray(val)) {
+      out[path] = val.map((v) => (v == null ? "" : String(v))).join(", ");
+    } else {
+      out[path] = val == null ? "" : String(val);
+    }
+  }
+  return out;
+}
+
 export const jsonParser: ImportParser = {
   id: "json",
   name: "JSON",
-  description: "Array of objects",
+  description: "Array of objects, or a key/value object",
   icon: "data_object",
   parse(input: string): ParseResult {
     let data: unknown;
@@ -174,6 +219,13 @@ export const jsonParser: ImportParser = {
       data = JSON.parse(input);
     } catch {
       return { columns: [], rows: [] };
+    }
+    // A bare object is a key/value map, not a table — one row per entry.
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const flat = flattenObject(data as Record<string, unknown>);
+      const rows = Object.entries(flat).map(([Key, Value]) => ({ Key, Value }));
+      if (rows.length === 0) return { columns: [], rows: [] };
+      return { columns: ["Key", "Value"], rows };
     }
     if (!Array.isArray(data)) return { columns: [], rows: [] };
 
@@ -228,6 +280,94 @@ export const kvParser: ImportParser = {
   },
 };
 
+/// Strip one layer of matching quotes and expand the escapes dotenv understands.
+/// Only double quotes get escape expansion — single quotes are literal, per the
+/// usual dotenv semantics.
+function unquoteEnvValue(raw: string): string {
+  const v = raw.trim();
+  if (v.length >= 2 && v[0] === '"' && v.endsWith('"')) {
+    return v
+      .slice(1, -1)
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+  if (v.length >= 2 && v[0] === "'" && v.endsWith("'")) return v.slice(1, -1);
+  // Unquoted: an unescaped # starts a trailing comment.
+  const hash = v.search(/\s#/);
+  return (hash === -1 ? v : v.slice(0, hash)).trim();
+}
+
+export const envParser: ImportParser = {
+  id: "env",
+  name: ".env",
+  description: "KEY=VALUE lines",
+  icon: "key",
+  parse(input: string): ParseResult {
+    const rows: Record<string, string>[] = [];
+    for (const rawLine of input.split("\n")) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const withoutExport = line.replace(/^export\s+/, "");
+      const eq = withoutExport.indexOf("=");
+      if (eq <= 0) continue;
+      const key = withoutExport.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(key)) continue;
+      rows.push({ Key: key, Value: unquoteEnvValue(withoutExport.slice(eq + 1)) });
+    }
+    if (rows.length === 0) return { columns: [], rows: [] };
+    // Env files are secrets by default — mask the values, they can be unmasked.
+    return { columns: ["Key", "Value"], rows, masked: ["Value"] };
+  },
+};
+
+export const iniParser: ImportParser = {
+  id: "ini",
+  name: "INI config",
+  description: "[section] key=value",
+  icon: "settings",
+  parse(input: string): ParseResult {
+    const rows: Record<string, string>[] = [];
+    let section = "";
+    for (const rawLine of input.split("\n")) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+      const header = /^\[(.+)\]$/.exec(line);
+      if (header) {
+        section = header[1].trim();
+        continue;
+      }
+      const sep = line.search(/[=:]/);
+      if (sep <= 0) continue;
+      rows.push({
+        Section: section,
+        Key: line.slice(0, sep).trim(),
+        Value: unquoteEnvValue(line.slice(sep + 1)),
+      });
+    }
+    if (rows.length === 0) return { columns: [], rows: [] };
+    return { columns: ["Section", "Key", "Value"], rows };
+  },
+};
+
+/// Column names browsers use for the secret in their CSV exports.
+const PASSWORD_COLUMN_RE = /^(password|passwd|pwd|secret)$/i;
+
+export const passwordCsvParser: ImportParser = {
+  id: "password-csv",
+  name: "Password CSV",
+  description: "Browser credential export",
+  icon: "password",
+  parse(input: string, options?: Record<string, unknown>): ParseResult {
+    // Browser exports always carry a header row; don't let auto-detection guess.
+    const result = parseSeparated(input, ",", { ...options, hasHeader: true });
+    const masked = result.columns.filter((c) => PASSWORD_COLUMN_RE.test(c.trim()));
+    return { ...result, masked };
+  },
+};
+
 const URL_GLOBAL_RE = /(?:https?:\/\/|[~\-]\/)[^\s]+/g;
 
 export const urlDescParser: ImportParser = {
@@ -275,6 +415,12 @@ export const urlDescParser: ImportParser = {
 
 // ---- Custom regex parser factory ----
 
+// ponytail: length/line caps limit ReDoS blast radius but don't bound catastrophic-backtracking
+// time on a single line; a real fix needs a worker/WASM regex engine with a timeout.
+const MAX_CUSTOM_PATTERN_LENGTH = 200;
+const MAX_CUSTOM_PARSER_LINE_LENGTH = 2000;
+const MAX_CUSTOM_PARSER_LINES = 5000;
+
 export function makeCustomParser(def: CustomParserDef): ImportParser {
   return {
     id: def.id,
@@ -282,12 +428,31 @@ export function makeCustomParser(def: CustomParserDef): ImportParser {
     description: `Custom regex: ${def.pattern}`,
     icon: "code",
     parse(input: string): ParseResult {
-      const re = new RegExp(def.pattern);
-      const lines = input.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      if (def.pattern.length > MAX_CUSTOM_PATTERN_LENGTH) {
+        return { columns: [...def.columns], rows: [] };
+      }
+      let re: RegExp;
+      try {
+        re = new RegExp(def.pattern);
+      } catch {
+        return { columns: [...def.columns], rows: [] };
+      }
+
+      const lines = input
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .slice(0, MAX_CUSTOM_PARSER_LINES);
 
       const rows = lines.map((line) => {
-        const m = re.exec(line);
         const row: Record<string, string> = {};
+        const safeLine = line.slice(0, MAX_CUSTOM_PARSER_LINE_LENGTH);
+        let m: RegExpExecArray | null = null;
+        try {
+          m = re.exec(safeLine);
+        } catch {
+          m = null;
+        }
         for (const col of def.columns) {
           row[col] = m?.groups?.[col] ?? "";
         }
@@ -306,5 +471,8 @@ export const builtinImportParsers: ImportParser[] = [
   psvParser,
   jsonParser,
   kvParser,
+  envParser,
+  iniParser,
+  passwordCsvParser,
   urlDescParser,
 ];

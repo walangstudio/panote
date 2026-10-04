@@ -32,6 +32,6 @@ export function moveColumn(
   const [col] = cols.splice(from, 1);
   // re-find target after removal since indices may have shifted
   const to = cols.findIndex(c => c.id === toColId);
-  cols.splice(to, 0, col);
+  cols.splice(to < 0 ? cols.length : to, 0, col);
   return cols;
 }

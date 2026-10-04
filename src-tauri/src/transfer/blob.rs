@@ -20,12 +20,50 @@ pub struct TransferBlob {
     /// Sender's local id for this note. Pair with origin_device_id for dedup.
     #[serde(default)]
     pub origin_note_id: String,
-    /// Optional password the recipient should apply to lock this note on arrival.
-    /// Lets the sender protect the note on the destination without sharing their
-    /// own device password. Travels inside the encrypted payload only. Defaults
-    /// to None (note arrives unprotected, as before).
+    /// Folder path from the root, e.g. ["Work", "Clients"]. Empty means the note
+    /// is not in a folder — the ordinary case, and what every older sender emits.
+    ///
+    /// A path rather than an id: folder ids are device-local, so only the names
+    /// mean anything on the far side. Plaintext inside the already-encrypted blob,
+    /// like the title and tags.
     #[serde(default)]
-    pub note_password: Option<String>,
+    pub folder_path: Vec<String>,
+}
+
+/// Max allowed JSON nesting depth in a decoded blob (N4) — rejects deeply
+/// nested payloads before they reach the recursive `serde_json` deserializer,
+/// which could otherwise stack-overflow the receiver.
+const MAX_JSON_DEPTH: usize = 64;
+
+/// Scan raw JSON bytes and return the maximum `{}`/`[]` nesting depth,
+/// ignoring brackets inside string literals.
+fn max_json_depth(bytes: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                max_depth = max_depth.max(depth);
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max_depth
 }
 
 impl TransferBlob {
@@ -34,6 +72,10 @@ impl TransferBlob {
     }
 
     pub fn decode(bytes: &[u8]) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            max_json_depth(bytes) <= MAX_JSON_DEPTH,
+            "transfer blob JSON nesting too deep (max {MAX_JSON_DEPTH})"
+        );
         Ok(serde_json::from_slice(bytes)?)
     }
 }
@@ -54,7 +96,7 @@ mod tests {
             updated_at: 1700000001,
             origin_device_id: "device-a".into(),
             origin_note_id: "test-uuid-1234".into(),
-            note_password: None,
+            folder_path: vec!["Work".into(), "Clients".into()],
         }
     }
 
@@ -76,6 +118,23 @@ mod tests {
     }
 
     #[test]
+    fn decode_deeply_nested_content_rejected() {
+        // N4: 100 levels of nested arrays inside `content` must be rejected
+        // before serde_json's recursive deserializer ever touches it.
+        let nested = "[".repeat(100) + &"]".repeat(100);
+        let bad = format!(
+            r#"{{"id":"x","kind":"markdown","title":"t","content":{nested},"tags":[],"created_at":0,"updated_at":0}}"#
+        );
+        assert!(TransferBlob::decode(bad.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn decode_shallow_content_accepted() {
+        let blob = sample();
+        assert!(TransferBlob::decode(&blob.encode().unwrap()).is_ok());
+    }
+
+    #[test]
     fn decode_invalid_bytes_errors() {
         assert!(TransferBlob::decode(b"not json at all!!!").is_err());
     }
@@ -83,7 +142,8 @@ mod tests {
     #[test]
     fn decode_missing_field_errors() {
         // Missing 'content'
-        let bad = br#"{"id":"x","kind":"markdown","title":"t","tags":[],"created_at":0,"updated_at":0}"#;
+        let bad =
+            br#"{"id":"x","kind":"markdown","title":"t","tags":[],"created_at":0,"updated_at":0}"#;
         assert!(TransferBlob::decode(bad).is_err());
     }
 
@@ -123,7 +183,10 @@ mod tests {
 
     #[test]
     fn empty_tags_roundtrip() {
-        let blob = TransferBlob { tags: vec![], ..sample() };
+        let blob = TransferBlob {
+            tags: vec![],
+            ..sample()
+        };
         let recovered = TransferBlob::decode(&blob.encode().unwrap()).unwrap();
         assert!(recovered.tags.is_empty());
     }

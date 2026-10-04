@@ -1,0 +1,30 @@
+name: panote CodeQL config
+
+# Whole-test-file paths. `paths-ignore` works per file, so it deliberately does
+# NOT cover the `#[cfg(test)]` modules inside crypto/vault.rs and friends -
+# excluding those would stop scanning the real crypto alongside the fixtures.
+paths-ignore:
+  - e2e
+  - "**/*.test.ts"
+  - src-tauri/src/folders/tests.rs
+  - src-tauri/src/transfer/e2e_tests.rs
+
+query-filters:
+  # Measured on this codebase, the rule does not distinguish a weakness from a
+  # test fixture or from correct code:
+  #
+  #   - 38 of its 41 hits are test passwords ("pw", "hunter2"). A test that
+  #     protects a note and unlocks it needs a known password.
+  #   - It flags `let mut buf = [0u8; 32]` inside `random_salt()` - the zero
+  #     buffer that OsRng immediately overwrites. That is the correct
+  #     implementation being reported as a hard-coded salt.
+  #
+  # Rewriting the fixtures to satisfy it was tried and reverted: it cleared 8 of
+  # 41 and could not touch the rest. Every other rule still runs.
+  #
+  # What this gives up: a genuine hard-coded salt or password reaching
+  # production would no longer be caught here. The salts that matter are all
+  # `random_salt()` (crypto/note.rs, notes/export.rs, transfer/lan.rs) and
+  # passphrases come from the user or SPAKE2 - keep it that way by review.
+  - exclude:
+      id: rust/hard-coded-cryptographic-value

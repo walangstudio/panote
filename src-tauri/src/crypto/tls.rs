@@ -89,7 +89,10 @@ impl TofuVerifier {
     /// Pre-load a known peer fingerprint (e.g., from DB on startup).
     #[allow(dead_code)]
     pub fn preload(&self, hostname: &str, fingerprint: [u8; 32]) {
-        self.store.lock().unwrap().insert(hostname.to_string(), fingerprint);
+        self.store
+            .lock()
+            .unwrap()
+            .insert(hostname.to_string(), fingerprint);
     }
 
     /// Check if a fingerprint matches the stored one for `hostname`.
