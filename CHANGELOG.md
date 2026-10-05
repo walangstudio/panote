@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Panote is now licensed under the AGPL-3.0-or-later**, with the full text in `LICENSE`.
+  Releases up to and including 0.5.0 were MIT-licensed and remain available under those terms.
+
 ## [0.5.0] - 2026-10-04
 
 ### Added

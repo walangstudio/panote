@@ -3,6 +3,7 @@ name = "panote"
 version = "0.5.0"
 description = "Secure offline-first note-taking app with LAN/BLE transfer"
 authors = []
+license = "AGPL-3.0-or-later"
 edition = "2021"
 
 [lib]
