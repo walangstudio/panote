@@ -43,4 +43,4 @@ Be respectful and constructive. Harassment, personal attacks, and spam are not t
 
 ## License
 
-By contributing, you agree your contributions are licensed under the MIT License.
+By contributing, you agree your contributions are licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).

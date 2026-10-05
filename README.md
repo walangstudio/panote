@@ -7,7 +7,7 @@
 [![Version](https://img.shields.io/badge/version-0.5.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
-[![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square)](LICENSE)
 
 </div>
 
@@ -214,4 +214,6 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 
 ## License
 
-MIT
+Copyright (C) 2026 scr1p7k177y
+
+[GNU Affero General Public License v3.0 or later](LICENSE). Releases up to and including 0.5.0 were MIT-licensed and remain available under those terms.
