@@ -214,6 +214,6 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 
 ## License
 
-Copyright (C) 2026 scr1p7k177y
+Copyright (C) 2026 walangstudio
 
 [GNU Affero General Public License v3.0 or later](LICENSE). Releases up to and including 0.5.0 were MIT-licensed and remain available under those terms.
