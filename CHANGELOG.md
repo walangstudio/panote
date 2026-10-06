@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Send by screen.** Notes can move between devices with no network: the sender plays
+  them as moving QR codes and the receiver reads them with its camera (Settings → Receive
+  by camera). Both sides type the same passphrase, and the notes are encrypted with it
+  before they are drawn, since anyone filming the screen sees every frame. Missed frames
+  only slow the transfer down. Built on Decimen Optical Transfer; see Third-party code in
+  the README.
+
+### Fixed
+
+- **Scanning a QR code on Android can use the camera.** The app never declared the camera
+  permission, so the camera could not start there.
+
 ### Changed
 
 - **Panote is now licensed under the AGPL-3.0-or-later**, with the full text in `LICENSE`.

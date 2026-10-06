@@ -3044,6 +3044,7 @@ dependencies = [
  "base64 0.22.1",
  "btleplug",
  "chacha20poly1305",
+ "flate2",
  "hkdf",
  "hmac",
  "if-addrs 0.10.2",

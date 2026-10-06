@@ -145,6 +145,8 @@ pub fn run() {
             pending_transfers_list,
             note_receive_accept,
             note_receive_reject,
+            optical_pack,
+            optical_import,
             generate_pairing_code,
             known_peers_list,
             get_device_name,

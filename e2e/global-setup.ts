@@ -1,10 +1,13 @@
 import { chromium, type FullConfig } from "playwright/test";
 import { setupTauriMock } from "./mock";
+import { writeFakeCamera } from "./optical-fixture";
 
 // The dev server compiles the app on its first page load. Left to the first test,
 // that compile ate its 15s budget on a cold or busy machine, so whichever spec ran
 // first failed at random. Render the app once here, with no time limit that matters.
 export default async function globalSetup(config: FullConfig) {
+  // Before any browser launches: the camera spec hands this file to Chromium.
+  await writeFakeCamera();
   const baseURL = config.projects[0].use.baseURL!;
   const browser = await chromium.launch();
   const page = await browser.newPage();

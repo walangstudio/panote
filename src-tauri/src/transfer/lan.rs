@@ -758,7 +758,7 @@ pub async fn send_notes(
 /// For a protected note the session-cached password is used to peel the
 /// password layer; sending a locked note errors until it's unlocked. The blob
 /// carries plaintext (Model B) — the receiver chooses whether to protect it.
-async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn build_blob(state: &AppState, note_id: &str) -> anyhow::Result<Vec<u8>> {
     let row = queries::note_get(&state.db, note_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("note not found"))?;

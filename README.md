@@ -68,6 +68,7 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 - Sender generates a 6-character pairing code; receiver enters it to accept. Pairing uses SPAKE2, so the code never crosses the wire
 - Peers can also be paired by QR code, and recently-contacted devices are remembered
 - Folders and protected notes survive a transfer
+- **Send by screen**: no network at all. The sender plays the notes as moving QR codes and the receiver reads them with its camera (Settings → Receive by camera). Both sides type the same passphrase
 
 **Backup**
 
@@ -82,6 +83,8 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 **Receiving:** An incoming transfer appears as a toast notification. Enter the pairing code from the sender and tap **Accept**. The note is decrypted, re-encrypted with the local device key, and added to your notes list. Wrong code leaves the transfer pending so you can retry.
 
 Peers are discovered automatically via mDNS and UDP broadcast beacon. The beacon covers networks where router multicast filtering blocks mDNS (e.g., WiFi + Ethernet on the same segment).
+
+**By screen:** In the transfer dialog choose **Send by screen**, type a passphrase of at least 6 characters, and hold the screen up to the other device. There, open **Settings → Receive by camera**, point the camera at the codes, and type the same passphrase once they are received. Missed frames only slow it down: the stream is fountain-coded, so the receiver needs any set of frames that covers the payload, in any order.
 
 ---
 
@@ -209,6 +212,13 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 - Pairing codes are 6 characters from an unambiguous 32-character alphanumeric alphabet (≈30 bits). A peer is locked out after 5 wrong codes.
 - Peer display names and IDs received over the network are capped at 128 characters before storage.
 - BLE transport is stubbed and not yet functional. The btleplug peripheral role is unsupported on Windows, and the feature is deferred to a future release.
+- Screen transfer: anyone who can film the sender's screen captures every frame, so the payload is sealed before it is drawn (Argon2id over a fresh salt, ChaCha20-Poly1305). The passphrase is typed on both devices and never shown on screen.
+
+---
+
+## Third-party code
+
+Screen transfer uses [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer) v0.5.3 (AGPL-3.0-or-later, Copyright (c) 2026 Evan Crawley): its wire protocol, fountain code and decoder are vendored unmodified in `src/lib/vendor/decimen/`, and its send and receive loops are adapted in `src/lib/optical/`. The decoder is decimen-codec, a WebAssembly build of [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) (Apache-2.0); its source is at [bashalarmistalt/decimen-codec](https://github.com/bashalarmistalt/decimen-codec). Notices are in `src/lib/vendor/decimen/NOTICE` and `src/lib/vendor/decimen/vendor/decimen-codec/`.
 
 ---
 

@@ -31,9 +31,9 @@ $Icons = @(
   "keyboard_arrow_up", "lan", "light_mode", "link", "lock", "lock_open",
   "menu", "military_tech", "more_horiz", "more_vert", "note_add",
   "open_in_new", "palette",
-  "password", "push_pin", "qr_code_2", "qr_code_scanner",
+  "password", "photo_camera", "push_pin", "qr_code_2", "qr_code_scanner",
   "radio_button_checked", "radio_button_unchecked", "refresh", "save", "search",
-  "search_off", "send", "settings", "smartphone", "sticky_note_2",
+  "screen_share", "search_off", "send", "settings", "smartphone", "sticky_note_2",
   "swap_horiz", "swap_vert", "table_chart", "table_rows", "title", "trophy",
   "upload", "view_column", "view_kanban", "visibility", "visibility_off",
   "warning", "wifi_tethering"

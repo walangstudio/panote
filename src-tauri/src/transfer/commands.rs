@@ -507,6 +507,48 @@ pub fn note_receive_reject(transfer_id: String, state: State<'_, AppState>) {
     state.take_pending(&transfer_id);
 }
 
+// ---- Optical (screen to camera) ----
+
+/// Seal notes for an animated QR stream. Raw bytes back, not a JSON array.
+#[tauri::command]
+pub async fn optical_pack(
+    note_ids: Vec<String>,
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
+    super::optical::pack(&state, &note_ids, &passphrase)
+        .await
+        .map(tauri::ipc::Response::new)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn optical_import(
+    payload: Vec<u8>,
+    passphrase: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<super::optical::OpticalImportSummary, String> {
+    let (summary, result) = super::optical::import(&state, &payload, &passphrase).await;
+    let imported = summary.inserted + summary.updated;
+    // Notes already in stay in, so the list refreshes even when a later one failed.
+    if imported > 0 {
+        super::lan::TransferEvents::notes_received(
+            &app,
+            "camera",
+            summary.inserted,
+            summary.updated,
+        );
+    }
+    match result {
+        Ok(()) => Ok(summary),
+        Err(e) if imported > 0 => Err(format!(
+            "{e}. {imported} note(s) were imported before it stopped; receiving again finishes the rest."
+        )),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // ---- Transfer history ----
 
 #[derive(Debug, Serialize)]

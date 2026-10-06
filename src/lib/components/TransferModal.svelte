@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import {
     peersScan, notesSend, generatePairingCode, knownPeersList, peerAddManual, deviceIps,
-    noteList, noteUnlock,
+    noteList, noteUnlock, opticalPack,
     type Peer, type KnownPeer,
   } from "$lib/tauri";
   import { trapFocus } from "$lib/trapFocus";
+  import { frameSource, playStream } from "$lib/optical/sender";
   import QrShowModal from "./QrShowModal.svelte";
   import QrScanModal from "./QrScanModal.svelte";
 
@@ -15,7 +16,7 @@
   }
   let { noteIds, onclose }: Props = $props();
 
-  type Step = "peers" | "code" | "unlock" | "sending" | "done" | "error";
+  type Step = "peers" | "code" | "screen-pass" | "unlock" | "sending" | "streaming" | "done" | "error";
 
   let step = $state<Step>("peers");
   let livePeers = $state<Peer[]>([]);
@@ -34,7 +35,21 @@
   let unlockInput: HTMLInputElement | undefined = $state();
   let previouslyFocused: HTMLElement | null = null;
 
+  // Screen transfer: the passphrase is typed, never shown, because anything on
+  // this screen is visible to whoever films the stream.
+  let optical = $state(false);
+  let screenPass = $state("");
+  let screenPassInput: HTMLInputElement | undefined = $state();
+  let streamCanvas: HTMLCanvasElement | undefined = $state();
+  let stopStream: (() => void) | null = null;
+  let packing = $state(false);
+  let destroyed = false;
+  // Same floor as optical.rs MIN_PASSPHRASE_CHARS: a filmed stream can be
+  // attacked offline, unlike a LAN pairing code.
+  const MIN_SCREEN_PASS = 10;
+
   $effect(() => { if (step === "unlock") unlockInput?.focus(); });
+  $effect(() => { if (step === "screen-pass") screenPassInput?.focus(); });
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") { e.preventDefault(); onclose(); }
@@ -62,9 +77,24 @@
     await scan();
   });
   onDestroy(() => {
+    destroyed = true;
+    stopStream?.();
     window.removeEventListener("keydown", onKey);
     previouslyFocused?.focus?.();
   });
+
+  function chooseScreen() {
+    optical = true;
+    screenPass = "";
+    step = "screen-pass";
+  }
+
+  function backToPeers() {
+    stopStream?.();
+    stopStream = null;
+    optical = false;
+    step = "peers";
+  }
 
   async function scan() {
     scanning = true;
@@ -90,7 +120,8 @@
   }
 
   async function confirmSend() {
-    if (!selectedPeer) return;
+    if (!optical && !selectedPeer) return;
+    if (optical && (packing || [...screenPass].length < MIN_SCREEN_PASS)) return;
     // Unlock any protected notes first, one at a time (labeled by title).
     if (protectedQueue.length > 0) {
       unlockIdx = 0;
@@ -122,6 +153,7 @@
   }
 
   async function doSend() {
+    if (optical) return startStream();
     if (!selectedPeer) return;
     step = "sending";
     try {
@@ -130,6 +162,25 @@
     } catch (e) {
       errorMsg = String(e);
       step = "error";
+    }
+  }
+
+  async function startStream() {
+    if (packing) return;
+    packing = true;
+    try {
+      const source = await frameSource(await opticalPack(noteIds, screenPass));
+      screenPass = "";
+      if (destroyed) return; // closed while sealing: nothing left to paint on
+      step = "streaming";
+      await tick();
+      stopStream?.();
+      if (streamCanvas && !destroyed) stopStream = playStream(streamCanvas, source);
+    } catch (e) {
+      errorMsg = String(e);
+      step = "error";
+    } finally {
+      packing = false;
     }
   }
 
@@ -165,6 +216,8 @@
       code: "Pairing code ready. Share it with the recipient.",
       unlock: `Unlock note ${unlockIdx + 1} of ${protectedQueue.length} to continue.`,
       sending: "Waiting for the recipient to enter the code.",
+      "screen-pass": "Choose a passphrase for the screen transfer.",
+      streaming: "Showing the notes as moving QR codes.",
       done: "Transfer delivered.",
       error: "Transfer failed.",
     } as const)[step],
@@ -191,6 +244,10 @@
         <button class="qr-btn" onclick={() => scanQr = true}>
           <span class="material-symbols-outlined">qr_code_scanner</span>
           Scan QR code
+        </button>
+        <button class="qr-btn" onclick={chooseScreen}>
+          <span class="material-symbols-outlined">screen_share</span>
+          Send by screen
         </button>
       </div>
 
@@ -286,6 +343,44 @@
         <button class="btn-primary" onclick={confirmSend}>Send to peer</button>
       </div>
 
+    {:else if step === "screen-pass"}
+      <h2>Send by screen</h2>
+      <p class="muted">
+        This screen plays the {noteIds.length === 1 ? "note" : `${noteIds.length} notes`} as moving QR codes
+        for the other device's camera. No network needed.
+      </p>
+      <form onsubmit={(e) => { e.preventDefault(); confirmSend(); }}>
+        <label class="section-label" for="screen-pass">Passphrase</label>
+        <input
+          id="screen-pass"
+          class="manual-input pass-input"
+          type="password"
+          autocomplete="off"
+          placeholder="At least {MIN_SCREEN_PASS} characters"
+          bind:value={screenPass}
+          bind:this={screenPassInput}
+        />
+        <p class="muted hint">
+          Type the same passphrase on the receiving device. Anyone who films the
+          screen sees the codes, so the notes are encrypted with it.
+        </p>
+        <div class="actions">
+          <button type="button" class="btn-cancel" onclick={backToPeers}>Back</button>
+          <button type="submit" class="btn-primary" disabled={packing || [...screenPass].length < MIN_SCREEN_PASS}>{packing ? "Encrypting…" : "Start"}</button>
+        </div>
+      </form>
+
+    {:else if step === "streaming"}
+      <h2>Show this to the camera</h2>
+      <p class="muted">
+        On the other device open Settings, Receive by camera, and point it here.
+        Keep this open until that device says it received the notes.
+      </p>
+      <canvas class="stream" bind:this={streamCanvas} aria-label="Animated QR codes carrying the notes"></canvas>
+      <div class="actions">
+        <button class="btn-primary" onclick={onclose}>Done</button>
+      </div>
+
     {:else if step === "unlock"}
       <h2>Unlock to send</h2>
       <p class="muted">
@@ -306,7 +401,7 @@
         />
         {#if unlockError}<p class="muted" style="color: var(--danger, #e5484d);">{unlockError}</p>{/if}
         <div class="actions">
-          <button type="button" class="btn-cancel" onclick={() => step = "code"}>Cancel</button>
+          <button type="button" class="btn-cancel" onclick={() => step = optical ? "screen-pass" : "code"}>Cancel</button>
           <button type="submit" class="btn-primary" disabled={unlockBusy || !unlockPw}>Unlock</button>
         </div>
       </form>
@@ -335,7 +430,7 @@
       <h2>Failed</h2>
       <p class="error">{errorMsg}</p>
       <div class="actions">
-        <button class="btn-cancel" onclick={() => step = "peers"}>Try again</button>
+        <button class="btn-cancel" onclick={backToPeers}>Try again</button>
         <button class="btn-primary" onclick={onclose}>Close</button>
       </div>
     {/if}
@@ -461,7 +556,14 @@
   .manual-err { font-size: 0.78rem; color: var(--error); display: block; margin-top: 0.25rem; }
   .error { color: var(--error); font-size: 0.85rem; }
   .qr-actions {
-    display: flex; gap: 0.5rem; margin-bottom: 0.75rem;
+    display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;
+  }
+  .pass-input { font-family: inherit; width: 100%; margin-top: 0.35rem; box-sizing: border-box; }
+  .hint { font-size: 0.78rem; }
+  /* White quiet zone around the codes even in the dark theme: cameras need it. */
+  .stream {
+    display: block; width: min(100%, 60vh); aspect-ratio: 1;
+    margin: 0.75rem auto; background: #fff; border-radius: 4px;
   }
   .qr-btn {
     flex: 1; display: flex; align-items: center; justify-content: center; gap: 0.4rem;
