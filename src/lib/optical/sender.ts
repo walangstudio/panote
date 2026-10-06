@@ -91,8 +91,15 @@ export function playStream(canvas: HTMLCanvasElement, source: FrameSource): () =
   };
   paint();
   raf = requestAnimationFrame(tick);
+  // A screen that sleeps mid-stream ends the transfer. Best effort: without the
+  // API, or if refused, the stream runs anyway.
+  type WakeLock = { release(): Promise<void> };
+  const wake = (navigator as Navigator & { wakeLock?: { request(t: "screen"): Promise<WakeLock> } }).wakeLock
+    ?.request("screen")
+    .catch(() => undefined);
   return () => {
     stopped = true;
     cancelAnimationFrame(raf);
+    void wake?.then((lock) => lock?.release());
   };
 }
