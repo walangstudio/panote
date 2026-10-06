@@ -207,10 +207,11 @@ export const noteReceiveReject = (transferId: string) =>
   invoke<void>("note_receive_reject", { transferId });
 export const opticalPack = async (noteIds: string[], passphrase: string) =>
   new Uint8Array(await invoke<ArrayBuffer>("optical_pack", { noteIds, passphrase }));
-export const opticalImport = (payload: Uint8Array, passphrase: string) =>
+export const opticalImport = (payload: Uint8Array, passphrase: string, folderId: string | null = null) =>
   invoke<{ inserted: number; updated: number }>("optical_import", {
     payload: Array.from(payload),
     passphrase,
+    folderId,
   });
 export const generatePairingCode = () => invoke<string>("generate_pairing_code");
 export const knownPeersList = () => invoke<KnownPeer[]>("known_peers_list");

@@ -5,9 +5,12 @@
   import { OpticalReceiver } from "$lib/optical/receiver";
 
   interface Props {
+    /** Received notes land in this folder (their own subfolders nested inside); null is the root. */
+    folderId?: string | null;
+    folderName?: string;
     onclose: () => void;
   }
-  let { onclose }: Props = $props();
+  let { folderId = null, folderName, onclose }: Props = $props();
 
   type Step = "scanning" | "passphrase" | "done" | "error";
   let step = $state<Step>("scanning");
@@ -18,6 +21,7 @@
   let passphrase = $state("");
   let passError = $state("");
   let importing = $state(false);
+  let showPass = $state(false);
   let result = $state({ inserted: 0, updated: 0 });
   let payload: Uint8Array | null = null;
   let video: HTMLVideoElement | undefined = $state();
@@ -59,7 +63,7 @@
     importing = true;
     passError = "";
     try {
-      result = await opticalImport(payload, passphrase);
+      result = await opticalImport(payload, passphrase, folderId);
       step = "done";
     } catch (e) {
       passError = String(e) === "wrong passphrase" ? "Wrong passphrase." : String(e);
@@ -87,7 +91,7 @@
   </button>
 
   {#if step === "scanning"}
-    <h2 id="optical-title">Receive by camera</h2>
+    <h2 id="optical-title">{folderName ? `Receive into ${folderName}` : "Receive by camera"}</h2>
     <p class="muted">On the sending device choose Send by screen, then point this camera at its codes.</p>
   {:else if step === "passphrase"}
     <h2 id="optical-title">Enter the passphrase</h2>
@@ -119,15 +123,21 @@
     </div>
   {:else if step === "passphrase"}
     <form onsubmit={(e) => { e.preventDefault(); submitPassphrase(); }}>
-      <input
-        class="pass-input"
-        type="password"
-        autocomplete="off"
-        aria-label="Passphrase"
-        placeholder="Passphrase"
-        bind:value={passphrase}
-        bind:this={passInput}
-      />
+      <div class="pass-row">
+        <input
+          class="pass-input"
+          type={showPass ? "text" : "password"}
+          autocomplete="off"
+          aria-label="Passphrase"
+          placeholder="Passphrase"
+          bind:value={passphrase}
+          bind:this={passInput}
+        />
+        <button type="button" class="reveal" onclick={() => showPass = !showPass}
+          aria-label={showPass ? "Hide passphrase" : "Show passphrase"} aria-pressed={showPass}>
+          <span class="material-symbols-outlined" aria-hidden="true">{showPass ? "visibility_off" : "visibility"}</span>
+        </button>
+      </div>
       {#if passError}<p class="error-text" role="alert">{passError}</p>{/if}
       <div class="actions">
         <button type="button" class="btn-cancel" onclick={onclose}>Cancel</button>
@@ -190,6 +200,15 @@
     padding: 0.55rem 0.75rem; border-radius: var(--radius);
     border: 1px solid var(--border); background: var(--surface-container); color: var(--text);
   }
+  .pass-row { position: relative; }
+  .pass-row .pass-input { padding-right: 2.5rem; }
+  .reveal {
+    position: absolute; right: 0.35rem; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    display: flex; padding: 0.25rem; border-radius: var(--radius-full);
+  }
+  .reveal:hover { color: var(--text); background: var(--hover); }
+  .reveal .material-symbols-outlined { font-size: 20px; }
   .actions { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.25rem; }
   .btn-cancel {
     padding: 0.55rem 1.25rem; border-radius: var(--radius-full);

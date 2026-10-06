@@ -526,10 +526,12 @@ pub async fn optical_pack(
 pub async fn optical_import(
     payload: Vec<u8>,
     passphrase: String,
+    folder_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<super::optical::OpticalImportSummary, String> {
-    let (summary, result) = super::optical::import(&state, &payload, &passphrase).await;
+    let (summary, result) =
+        super::optical::import(&state, &payload, &passphrase, folder_id.as_deref()).await;
     let imported = summary.inserted + summary.updated;
     // Notes already in stay in, so the list refreshes even when a later one failed.
     if imported > 0 {

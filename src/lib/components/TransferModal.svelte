@@ -43,6 +43,7 @@
   let streamCanvas: HTMLCanvasElement | undefined = $state();
   let stopStream: (() => void) | null = null;
   let packing = $state(false);
+  let showScreenPass = $state(false);
   let destroyed = false;
   // Same floor as optical.rs MIN_PASSPHRASE_CHARS: a filmed stream can be
   // attacked offline, unlike a LAN pairing code.
@@ -351,15 +352,21 @@
       </p>
       <form onsubmit={(e) => { e.preventDefault(); confirmSend(); }}>
         <label class="section-label" for="screen-pass">Passphrase</label>
-        <input
-          id="screen-pass"
-          class="manual-input pass-input"
-          type="password"
-          autocomplete="off"
-          placeholder="At least {MIN_SCREEN_PASS} characters"
-          bind:value={screenPass}
-          bind:this={screenPassInput}
-        />
+        <div class="pass-row">
+          <input
+            id="screen-pass"
+            class="manual-input pass-input"
+            type={showScreenPass ? "text" : "password"}
+            autocomplete="off"
+            placeholder="At least {MIN_SCREEN_PASS} characters"
+            bind:value={screenPass}
+            bind:this={screenPassInput}
+          />
+          <button type="button" class="reveal" onclick={() => showScreenPass = !showScreenPass}
+            aria-label={showScreenPass ? "Hide passphrase" : "Show passphrase"} aria-pressed={showScreenPass}>
+            <span class="material-symbols-outlined" aria-hidden="true">{showScreenPass ? "visibility_off" : "visibility"}</span>
+          </button>
+        </div>
         <p class="muted hint">
           Type the same passphrase on the receiving device. Anyone who films the
           screen sees the codes, so the notes are encrypted with it.
@@ -558,7 +565,15 @@
   .qr-actions {
     display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem;
   }
-  .pass-input { font-family: inherit; width: 100%; margin-top: 0.35rem; box-sizing: border-box; }
+  .pass-row .pass-input { font-family: inherit; width: 100%; box-sizing: border-box; padding-right: 2.5rem; }
+  .pass-row { position: relative; margin-top: 0.35rem; }
+  .reveal {
+    position: absolute; right: 0.35rem; top: 50%; transform: translateY(-50%);
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    display: flex; padding: 0.25rem; border-radius: var(--radius-full);
+  }
+  .reveal:hover { color: var(--text); background: var(--hover); }
+  .reveal .material-symbols-outlined { font-size: 20px; }
   .hint { font-size: 0.78rem; }
   /* White quiet zone around the codes even in the dark theme: cameras need it. */
   .stream {

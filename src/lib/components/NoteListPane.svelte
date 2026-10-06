@@ -24,7 +24,8 @@
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
-  import { showMenu, anchorMenu, type MenuAction, type Rect } from "$lib/contextMenu";
+  import OpticalReceiveModal from "$lib/components/OpticalReceiveModal.svelte";
+  import { anchorMenu, type MenuAction, type Rect } from "$lib/contextMenu";
   import { shortcutFor, findBelongsToNote } from "$lib/shortcuts";
 
   interface Props { desktop?: boolean; }
@@ -52,6 +53,8 @@
   // ...and back: the editor prunes the store when it trashes a selected note.
   onMount(() => listSelected.subscribe(v => { if (v !== untrack(() => selected)) selected = v; }));
   let transferNoteIds = $state<string[] | null>(null);
+  /// Receive by camera into this folder; null is the root, undefined is closed.
+  let receiveInto = $state<{ id: string | null; name?: string } | undefined>(undefined);
   let deleteTargets = $state<string[] | null>(null);
   let sortOpen = $state(false);
   /// The in-app menu, shown only where a native one could not be.
@@ -188,6 +191,7 @@
 
   // Bottom-up speed-dial: last item sits nearest the FAB (prototype order).
   const fabKinds = [
+    { id: "receive", icon: "photo_camera", label: "Receive" },
     { id: "folder", icon: "create_new_folder", label: "Folder" },
     { id: "table", icon: "table_chart", label: "Table" },
     { id: "kanban", icon: "view_kanban", label: "Kanban" },
@@ -429,14 +433,14 @@
 
   // ---- Row menus ----
   //
-  // One action list per row kind, rendered by the native menu on desktop and by
-  // the in-app popover everywhere else.
+  // One action list per row kind: a popover on desktop, a bottom sheet on touch.
 
   function noteActions(note: NoteMetadata): MenuAction[] {
     const pw = (mode: PwMode) => () => { pwModal = { mode, ids: [note.id], isBatch: false }; };
     return [
       { label: note.pinned ? "Unpin" : "Pin", icon: "push_pin", run: () => togglePin(note.id, note.pinned) },
       { label: "View", icon: "visibility", run: () => goto(`/note/${note.id}?mode=view`) },
+      { label: "Send…", icon: "send", run: () => { transferNoteIds = [note.id]; } },
       { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "note", id: note.id, from: note.folder_id ?? null }; } },
       { label: "Copy", icon: "content_copy", run: () => clip("copy", "note", [note.id]) },
       { label: "Cut", icon: "content_cut", run: () => clip("cut", "note", [note.id]) },
@@ -453,9 +457,13 @@
   }
 
   function folderActions(f: { id: string; name: string; parent_id?: string | null }): MenuAction[] {
+    const inside = subtreeIds(f.id);
+    const noteIds = $notes.filter(n => n.folder_id && inside.has(n.folder_id)).map(n => n.id);
     return [
       { label: "New note inside", icon: "note_add", run: () => { listFolder.set(f.id); showNewNote = true; } },
       { label: "New folder inside", icon: "create_new_folder", run: () => { listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; } },
+      ...(noteIds.length ? [{ label: "Send…", icon: "send", run: () => { transferNoteIds = noteIds; } }] : []),
+      { label: "Receive into folder", icon: "photo_camera", run: () => { receiveInto = { id: f.id, name: f.name }; } },
       { label: "Rename", icon: "edit", run: () => { nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; } },
       { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; } },
       { label: "Copy", icon: "content_copy", run: () => clip("copy", "folder", [f.id]) },
@@ -465,7 +473,7 @@
     ];
   }
 
-  /// Kebab click or right-click. The fallback popover opens at the cursor for a
+  /// Kebab click or right-click. The menu opens at the cursor for a
   /// right-click and at the button otherwise.
   function openMenu(e: MouseEvent, actions: MenuAction[]) {
     // A long-press on touch fires contextmenu too; the kebab is the way in there.
@@ -477,7 +485,7 @@
     const anchor: Rect = atCursor
       ? { left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }
       : (e.currentTarget as HTMLElement).getBoundingClientRect();
-    showMenu(actions, () => { menu = { anchor, actions }; });
+    menu = { anchor, actions };
   }
 
   function onShortcut(e: KeyboardEvent) {
@@ -560,6 +568,12 @@
     const next = new Set(selected);
     if (next.has(id)) next.delete(id); else next.add(id);
     selected = next;
+  }
+
+  /// Into the folder being viewed, like a new note.
+  function openReceive() {
+    const id = $listFolder;
+    receiveInto = { id, name: id ? $folders.find(f => f.id === id)?.name : undefined };
   }
 
   function sendSelected() {
@@ -707,6 +721,9 @@
         <span class="material-symbols-outlined">menu</span>
       </button>
       <span class="wordmark">Panote</span>
+      <button class="receive-btn" onclick={openReceive} aria-label="Receive by camera" title="Receive by camera">
+        <span class="material-symbols-outlined">photo_camera</span>
+      </button>
       <button class="compose-btn" onclick={() => showNewNote = true} aria-label="New note">
         <span class="material-symbols-outlined">add</span>
       </button>
@@ -1027,7 +1044,8 @@
           <button class="fab-option" style="animation-delay: {(fabKinds.length - 1 - i) * 40}ms"
             onclick={() => {
               fabOpen = false;
-              if (kind.id === "folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
+              if (kind.id === "receive") openReceive();
+              else if (kind.id === "folder") { nameError = ""; nameModal = { mode: "create", initial: "" }; }
               else goto(newNoteHref(kind.id));
             }}>
             <span class="fab-label">{kind.label}</span>
@@ -1130,6 +1148,10 @@
     onsubmit={handlePassword}
     onclose={() => pwModal = null}
   />
+{/if}
+
+{#if receiveInto}
+  <OpticalReceiveModal folderId={receiveInto.id} folderName={receiveInto.name} onclose={() => receiveInto = undefined} />
 {/if}
 
 {#if transferNoteIds}
@@ -1613,6 +1635,16 @@
   .compose-btn:hover { background: var(--accent-hover); transform: scale(1.06); }
   .compose-btn:active { transform: scale(0.95); }
   .compose-btn .material-symbols-outlined { font-size: 22px; }
+  /* Secondary to +: a quiet icon button, not a second accent pill. */
+  .receive-btn {
+    width: 34px; height: 34px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: var(--radius-full); cursor: pointer;
+    background: transparent; color: var(--muted);
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .receive-btn:hover { background: var(--hover); color: var(--text); }
+  .receive-btn .material-symbols-outlined { font-size: 22px; }
 
   /* The pane's own glass over the window gradient, as behind the rows. */
   .page.desktop .list-head {

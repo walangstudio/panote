@@ -50,7 +50,7 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 - Multi-select to protect, unprotect, or send several notes at once
 - Trash: deleted notes can be restored for 30 days, then are purged
 - Desktop split view above 900px window width
-- Desktop: right-click a note or folder for a native context menu
+- Right-click a note or folder (or use its ··· button) for its menu, including Send… and, on folders, Receive into folder
 - Copy, cut and paste notes and folders, file-manager style: from the row menu or Ctrl/Cmd+C, X, V. Paste lands in the folder you are viewing (or "Paste into" a folder); a copied protected note keeps its password
 - Shortcuts: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder, Ctrl/Cmd+F search (find in note inside the editor), Ctrl/Cmd+C/X/V copy, cut and paste, Delete move to Trash, Ctrl/Cmd+S save, Esc close a menu or dialog
 - Find in note (Ctrl/Cmd+F in the editor) for every note kind, with a match count and next/previous

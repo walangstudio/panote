@@ -10,6 +10,11 @@
   before they are drawn, since anyone filming the screen sees every frame. Missed frames
   only slow the transfer down. Built on Decimen Optical Transfer; see Third-party code in
   the README.
+- **Send and receive from the row menus.** A note's menu has Send…, and a folder's menu has
+  Send… (everything inside it) and Receive into folder, which files the received notes
+  under that folder with the sender's own folders nested inside. Receive by camera is also
+  the camera button beside + on desktop and Receive in the + menu on phones, landing in
+  the folder you are viewing. Passphrase fields have a show/hide toggle.
 
 ### Fixed
 
@@ -18,6 +23,8 @@
 
 ### Changed
 
+- **Desktop row menus are the in-app menu**, with icons, instead of the native OS menu.
+  The two showed the same actions; the in-app one is the one that matches the app.
 - **Panote is now licensed under the AGPL-3.0-or-later**, with the full text in `LICENSE`.
   Releases up to and including 0.5.0 were MIT-licensed and remain available under those terms.
 

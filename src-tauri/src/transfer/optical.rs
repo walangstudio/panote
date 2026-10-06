@@ -112,17 +112,28 @@ pub async fn pack(
 /// corrupt record leaves the database untouched. The imports themselves are one
 /// note at a time: if one fails, the summary still counts the notes already in,
 /// and importing the same stream again updates them instead of duplicating.
+///
+/// With `into_folder`, notes land under that folder, the sender's own folders
+/// nested beneath it; without, they keep the sender's path from the root.
 pub async fn import(
     state: &AppState,
     payload: &[u8],
     passphrase: &str,
+    into_folder: Option<&str>,
 ) -> (OpticalImportSummary, anyhow::Result<()>) {
     let mut summary = OpticalImportSummary::default();
     let blobs = match open(payload, passphrase) {
         Ok(blobs) => blobs,
         Err(e) => return (summary, Err(e)),
     };
-    for blob in blobs {
+    let base = match into_folder {
+        Some(id) => crate::folders::commands::path_of(state, id).await,
+        None => Vec::new(),
+    };
+    for mut blob in blobs {
+        if !base.is_empty() {
+            blob.folder_path = base.iter().cloned().chain(blob.folder_path).collect();
+        }
         match import_blob_detailed(state, &state.device_key, blob).await {
             Ok((_, ImportOutcome::Inserted)) => summary.inserted += 1,
             Ok((_, ImportOutcome::Updated)) => summary.updated += 1,
@@ -248,10 +259,10 @@ mod tests {
             .unwrap();
 
         let payload = pack(&sender, &[id], PASS).await.unwrap();
-        let (none, wrong) = import(&receiver, &payload, "wrong passphrase!").await;
+        let (none, wrong) = import(&receiver, &payload, "wrong passphrase!", None).await;
         assert!(wrong.is_err());
         assert_eq!(none, OpticalImportSummary::default());
-        let (first, ok) = import(&receiver, &payload, PASS).await;
+        let (first, ok) = import(&receiver, &payload, PASS, None).await;
         ok.unwrap();
         assert_eq!(
             first,
@@ -261,7 +272,7 @@ mod tests {
             }
         );
         // The same stream caught twice updates the note instead of duplicating it.
-        let (again, ok) = import(&receiver, &payload, PASS).await;
+        let (again, ok) = import(&receiver, &payload, PASS, None).await;
         ok.unwrap();
         assert_eq!(
             again,
@@ -270,5 +281,37 @@ mod tests {
                 updated: 1
             }
         );
+    }
+
+    #[tokio::test]
+    async fn receiving_into_a_folder_nests_the_senders_folders_under_it() {
+        use crate::db::init_pool;
+        let pool = init_pool(":memory:").await.unwrap();
+        let receiver = AppState::new(pool, derive_key("r", &[0u8; 16]).unwrap(), "r".into());
+        let inbox = crate::folders::commands::create_impl(&receiver, "Inbox", None)
+            .await
+            .unwrap();
+        // blob() files the note under "Work" on the sending side.
+        let payload = seal(&[blob("filed").encode().unwrap()], PASS).unwrap();
+
+        let (summary, ok) = import(&receiver, &payload, PASS, Some(&inbox)).await;
+        ok.unwrap();
+        assert_eq!(summary.inserted, 1);
+        let folders = crate::folders::commands::list_impl(&receiver)
+            .await
+            .unwrap();
+        let work = folders
+            .iter()
+            .find(|f| f.name == "Work")
+            .expect("Work folder created");
+        assert_eq!(work.parent_id.as_deref(), Some(inbox.as_str()));
+        let row = crate::db::queries::note_find_by_origin(&receiver.db, "dev", "id-filed")
+            .await
+            .unwrap()
+            .unwrap();
+        let folder = crate::folders::queries::note_folder(&receiver.db, &row.id)
+            .await
+            .unwrap();
+        assert_eq!(folder.as_deref(), Some(work.id.as_str()));
     }
 }
