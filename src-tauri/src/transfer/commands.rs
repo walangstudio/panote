@@ -513,10 +513,11 @@ pub fn note_receive_reject(transfer_id: String, state: State<'_, AppState>) {
 #[tauri::command]
 pub async fn optical_pack(
     note_ids: Vec<String>,
+    folder_id: Option<String>,
     passphrase: String,
     state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
-    super::optical::pack(&state, &note_ids, &passphrase)
+    super::optical::pack(&state, &note_ids, folder_id.as_deref(), &passphrase)
         .await
         .map(tauri::ipc::Response::new)
         .map_err(|e| e.to_string())
