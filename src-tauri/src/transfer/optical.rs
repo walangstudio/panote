@@ -17,6 +17,7 @@ use super::blob::TransferBlob;
 use super::commands::{import_blob_detailed, ImportOutcome};
 use crate::crypto::vault::{decrypt, derive_key, encrypt, random_salt};
 use crate::folders::commands::{ensure_path, list_impl, path_of};
+use crate::folders::MAX_DEPTH;
 use crate::state::AppState;
 use flate2::{read::DeflateDecoder, write::DeflateEncoder, Compression};
 use std::io::{Read, Write};
@@ -140,10 +141,37 @@ pub fn open(payload: &[u8], passphrase: &str) -> anyhow::Result<Contents> {
     Ok(contents)
 }
 
+/// Where a receive files things: the chosen folder's path, or the root. A
+/// folder deleted while the dialog was open is an error, not a silent root.
+pub(crate) async fn receive_base(
+    state: &AppState,
+    into: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let Some(id) = into else {
+        return Ok(Vec::new());
+    };
+    anyhow::ensure!(
+        crate::folders::queries::get(&state.db, id).await?.is_some(),
+        "the folder to receive into no longer exists"
+    );
+    Ok(path_of(state, id).await)
+}
+
+/// `path` filed under `base`, refusing to nest past the folder depth limit
+/// rather than silently cutting the path short.
+pub(crate) fn nest(base: &[String], path: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let full: Vec<String> = base.iter().cloned().chain(path).collect();
+    anyhow::ensure!(
+        full.len() <= MAX_DEPTH,
+        "receiving here would nest folders deeper than {MAX_DEPTH} levels"
+    );
+    Ok(full)
+}
+
 /// Gather what to send. With `folder`, that folder is the thing being sent:
-/// every path is cut to start at it, and each folder under it goes along, empty
-/// or not. Without, the notes travel on their own, with no folders, and land
-/// wherever the receiver files them.
+/// all its notes (from the database, not a capped list), every path cut to
+/// start at it, and each folder under it, empty or not. Without, the notes in
+/// `note_ids` travel on their own, with no folders.
 pub async fn collect(
     state: &AppState,
     note_ids: &[String],
@@ -175,7 +203,11 @@ pub async fn collect(
         contents.folders.sort_by_key(|p| p.len());
         above = Some(base[..cut].to_vec());
     }
-    for id in note_ids {
+    let ids = match folder {
+        Some(root) => crate::folders::queries::note_ids_in_subtree(&state.db, root).await?,
+        None => note_ids.to_vec(),
+    };
+    for id in &ids {
         let mut note = TransferBlob::decode(&super::lan::build_blob(state, id).await?)?;
         note.folder_path = match &above {
             Some(prefix) if note.folder_path.starts_with(prefix) => {
@@ -214,18 +246,35 @@ pub async fn import(
         Ok(contents) => contents,
         Err(e) => return (summary, Err(e)),
     };
-    let base = match into_folder {
-        Some(id) => path_of(state, id).await,
-        None => Vec::new(),
+    let base = match receive_base(state, into_folder).await {
+        Ok(base) => base,
+        Err(e) => return (summary, Err(e)),
     };
-    let under = |path: Vec<String>| base.iter().cloned().chain(path).collect::<Vec<_>>();
-    for folder in contents.folders {
-        if let Err(e) = ensure_path(state, &under(folder)).await {
+    // Every path checked before anything is written.
+    let folders = match contents
+        .folders
+        .into_iter()
+        .map(|p| nest(&base, p))
+        .collect::<anyhow::Result<Vec<_>>>()
+    {
+        Ok(folders) => folders,
+        Err(e) => return (summary, Err(e)),
+    };
+    let mut notes = contents.notes;
+    for note in &mut notes {
+        match nest(&base, std::mem::take(&mut note.folder_path)) {
+            Ok(path) => note.folder_path = path,
+            Err(e) => return (summary, Err(e)),
+        }
+    }
+    // ponytail: ensure_path lists every folder per segment, fine for real trees;
+    // cache the list per import if someone sends thousands of folders.
+    for folder in folders {
+        if let Err(e) = ensure_path(state, &folder).await {
             return (summary, Err(anyhow::anyhow!(e)));
         }
     }
-    for mut note in contents.notes {
-        note.folder_path = under(note.folder_path);
+    for note in notes {
         match import_blob_detailed(state, &state.device_key, note).await {
             Ok((_, ImportOutcome::Inserted)) => summary.inserted += 1,
             Ok((_, ImportOutcome::Updated)) => summary.updated += 1,
@@ -495,5 +544,64 @@ mod tests {
             folder_path_of_note(&receiver, "loose").await,
             Vec::<String>::new()
         );
+    }
+
+    #[tokio::test]
+    async fn a_folder_send_takes_every_note_in_it_not_just_the_ones_listed() {
+        let sender = device("sender").await;
+        let receiver = device("receiver").await;
+        let work = create_impl(&sender, "Work", None).await.unwrap();
+        for title in ["one", "two", "three"] {
+            let id = crate::transfer::commands::import_blob(
+                &sender,
+                &sender.device_key,
+                blob(title, &[]),
+            )
+            .await
+            .unwrap();
+            crate::folders::queries::set_note_folder(&sender.db, &id, Some(&work), 1)
+                .await
+                .unwrap();
+        }
+        // The list view caps what the UI knows about; the folder is the source of truth.
+        let payload = pack(&sender, &[], Some(&work), PASS).await.unwrap();
+        let (summary, ok) = import(&receiver, &payload, PASS, None).await;
+        ok.unwrap();
+        assert_eq!(summary.inserted, 3);
+        assert_eq!(folder_path_of_note(&receiver, "two").await, strs(&["Work"]));
+    }
+
+    #[tokio::test]
+    async fn a_receive_folder_deleted_meanwhile_is_an_error_not_the_root() {
+        let receiver = device("receiver").await;
+        let gone = create_impl(&receiver, "Gone", None).await.unwrap();
+        crate::folders::queries::delete(&receiver.db, &gone)
+            .await
+            .unwrap();
+        let (summary, result) = import(&receiver, &sealed(&["a"]), PASS, Some(&gone)).await;
+        assert_eq!(summary, OpticalImportSummary::default());
+        assert!(result.unwrap_err().to_string().contains("no longer exists"));
+    }
+
+    #[tokio::test]
+    async fn nesting_past_the_depth_limit_is_refused_before_anything_is_written() {
+        let receiver = device("receiver").await;
+        let deep: Vec<String> = (0..MAX_DEPTH).map(|i| format!("level{i}")).collect();
+        let contents = Contents {
+            notes: vec![blob("too-deep", &["one-more"])],
+            folders: vec![strs(&["one-more"])],
+        };
+        let target = ensure_path(&receiver, &deep).await.unwrap().unwrap();
+        let before = tree(&receiver).await.len();
+        let (summary, result) = import(
+            &receiver,
+            &seal(&contents, PASS).unwrap(),
+            PASS,
+            Some(&target),
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("deeper than"));
+        assert_eq!(summary, OpticalImportSummary::default());
+        assert_eq!(tree(&receiver).await.len(), before);
     }
 }

@@ -68,6 +68,15 @@ async fn listen(state: Arc<AppState>) -> u16 {
 /// Stands in for the recipient typing the code the sender read out, polling for
 /// the offer the way the pending-offer list does.
 fn answer_with(state: Arc<AppState>, code: &str) -> tokio::task::JoinHandle<bool> {
+    answer_into(state, code, None)
+}
+
+/// As `answer_with`, filing what arrives under `folder`.
+fn answer_into(
+    state: Arc<AppState>,
+    code: &str,
+    folder: Option<String>,
+) -> tokio::task::JoinHandle<bool> {
     let code = code.to_string();
     tokio::spawn(async move {
         for _ in 0..400 {
@@ -77,7 +86,12 @@ fn answer_with(state: Arc<AppState>, code: &str) -> tokio::task::JoinHandle<bool
                 id.and_then(|id| responses.remove(&id))
             };
             if let Some(tx) = entry {
-                return tx.send(code).is_ok();
+                return tx
+                    .send(crate::state::OfferAnswer {
+                        code,
+                        into_folder: folder,
+                    })
+                    .is_ok();
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -886,7 +900,7 @@ async fn several_notes_go_in_one_offer() {
 
     let port = listen(bob.clone()).await;
     let responder = answer_with(bob.clone(), CODE);
-    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+    send_notes(&alice, &ids, None, "127.0.0.1", port, CODE, "Alice")
         .await
         .expect("the batch transfer should succeed");
     assert!(responder.await.unwrap(), "recipient never saw the offer");
@@ -907,7 +921,7 @@ async fn a_mismatched_code_aborts_the_batch_before_any_note_moves() {
     let port = listen(bob.clone()).await;
     let responder = answer_with(bob.clone(), "WRONGC");
 
-    let result = send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice").await;
+    let result = send_notes(&alice, &ids, None, "127.0.0.1", port, CODE, "Alice").await;
     responder.await.unwrap();
 
     assert!(
@@ -931,7 +945,7 @@ async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
     let port = listen(bob.clone()).await;
 
     let responder = answer_with(bob.clone(), CODE);
-    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+    send_notes(&alice, &ids, None, "127.0.0.1", port, CODE, "Alice")
         .await
         .unwrap();
     responder.await.unwrap();
@@ -952,7 +966,7 @@ async fn a_resend_onto_a_protected_note_keeps_its_title_sealed() {
     };
     update_impl(&alice, ids[0].clone(), renamed).await.unwrap();
     let responder = answer_with(bob.clone(), CODE);
-    send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+    send_notes(&alice, &ids, None, "127.0.0.1", port, CODE, "Alice")
         .await
         .unwrap();
     responder.await.unwrap();
@@ -995,7 +1009,7 @@ async fn resending_the_same_note_does_not_duplicate_it() {
 
     for _ in 0..2 {
         let responder = answer_with(bob.clone(), CODE);
-        send_notes(&alice, &ids, "127.0.0.1", port, CODE, "Alice")
+        send_notes(&alice, &ids, None, "127.0.0.1", port, CODE, "Alice")
             .await
             .unwrap();
         responder.await.unwrap();
@@ -1006,4 +1020,86 @@ async fn resending_the_same_note_does_not_duplicate_it() {
         1,
         "re-receiving the same origin note should update, not duplicate",
     );
+}
+
+/// The network follows the camera's rule: notes travel without their folders,
+/// a sent folder arrives whole, and both land under the receiving folder.
+#[tokio::test]
+async fn a_batch_files_into_the_folder_the_receiver_chose() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let projects = folder(&alice, "Projects", None).await;
+    let work = folder(&alice, "Work", Some(&projects)).await;
+    let note_id = seed(&alice, "Filed", "in Projects/Work", &[]).await;
+    crate::folders::queries::set_note_folder(&alice.db, &note_id, Some(&work), 1)
+        .await
+        .unwrap();
+    let inbox = folder(&bob, "Inbox", None).await;
+    let port = listen(bob.clone()).await;
+
+    // A single note: no folders travel, it lands straight in Inbox.
+    let responder = answer_into(bob.clone(), CODE, Some(inbox.clone()));
+    send_notes(
+        &alice,
+        std::slice::from_ref(&note_id),
+        None,
+        "127.0.0.1",
+        port,
+        CODE,
+        "Alice",
+    )
+    .await
+    .unwrap();
+    assert!(responder.await.unwrap());
+    let first = received(&bob).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        folder_of(&bob, &first[0].id).await.as_deref(),
+        Some(inbox.as_str())
+    );
+
+    // The folder itself: Work arrives under Inbox, Projects stays behind. A
+    // different note, since a resend never refiles what the recipient filed.
+    let in_work = seed(&alice, "In work", "also in Projects/Work", &[]).await;
+    crate::folders::queries::set_note_folder(&alice.db, &in_work, Some(&work), 1)
+        .await
+        .unwrap();
+    let responder = answer_into(bob.clone(), CODE, Some(inbox.clone()));
+    send_notes(
+        &alice,
+        std::slice::from_ref(&in_work),
+        Some(&work),
+        "127.0.0.1",
+        port,
+        CODE,
+        "Alice",
+    )
+    .await
+    .unwrap();
+    assert!(responder.await.unwrap());
+    let bob_work = folder_named(&bob, "Work").await.expect("Work arrived");
+    assert!(folder_named(&bob, "Projects").await.is_none());
+    let note = received(&bob)
+        .await
+        .into_iter()
+        .find(|n| n.origin_note_id == in_work)
+        .unwrap();
+    assert_eq!(
+        folder_of(&bob, &note.id).await.as_deref(),
+        Some(bob_work.as_str())
+    );
+}
+
+/// The network protocol carries notes only, so an empty folder is refused up
+/// front instead of "delivering" nothing.
+#[tokio::test]
+async fn an_empty_folder_is_refused_over_the_network() {
+    let alice = device("alice").await;
+    let bob = device("bob").await;
+    let empty = folder(&alice, "Empty", None).await;
+    let port = listen(bob.clone()).await;
+    let err = send_notes(&alice, &[], Some(&empty), "127.0.0.1", port, CODE, "Alice")
+        .await
+        .unwrap_err();
+    assert!(err.contains("by camera"), "{err}");
 }

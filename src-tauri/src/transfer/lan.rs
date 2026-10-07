@@ -380,7 +380,7 @@ async fn handle_transfer_offer(
     };
 
     // Create oneshot channel for the UI to send back the passphrase.
-    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::state::OfferAnswer>();
     {
         let mut offers = state.pending_offers.lock().unwrap();
         offers.insert(offer_id.clone(), offer.clone());
@@ -393,13 +393,15 @@ async fn handle_transfer_offer(
     events.offer_received(&offer);
 
     // Wait up to 5 minutes for the recipient to enter the code.
-    let passphrase = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
         .await
         .map_err(|_| anyhow::anyhow!("offer timed out"))?
         .map_err(|_| anyhow::anyhow!("offer cancelled"))?;
 
     // Clean up the offer from pending.
     state.pending_offers.lock().unwrap().remove(&offer_id);
+    let passphrase = answer.code;
+    let base = super::optical::receive_base(state.as_ref(), answer.into_folder.as_deref()).await?;
 
     // Run the SPAKE2 handshake with the entered code — the code itself never
     // goes on the wire. Both sides derive the same session key iff the codes match.
@@ -445,7 +447,8 @@ async fn handle_transfer_offer(
             _ => anyhow::bail!("expected an encrypted note"),
         };
         let blob_bytes = decrypt(&keys.session, &nonce, &ct, TRANSFER_AAD)?;
-        let blob = TransferBlob::decode(&blob_bytes)?;
+        let mut blob = TransferBlob::decode(&blob_bytes)?;
+        blob.folder_path = super::optical::nest(&base, std::mem::take(&mut blob.folder_path))?;
         match import_blob_detailed(state.as_ref(), &state.device_key, blob)
             .await?
             .1
@@ -622,6 +625,7 @@ pub async fn send_note(
 pub async fn send_notes(
     state: &AppState,
     note_ids: &[String],
+    folder: Option<&str>,
     address: &str,
     port: u16,
     passphrase: &str,
@@ -630,13 +634,19 @@ pub async fn send_notes(
     // Build every blob up front so a locked or missing note fails before we
     // connect or transmit anything — otherwise earlier notes would already be
     // delivered when a later one errors (partial, non-atomic send).
-    let mut blobs = Vec::with_capacity(note_ids.len());
-    for note_id in note_ids {
-        blobs.push(
-            build_blob(state, note_id)
-                .await
-                .map_err(|e| e.to_string())?,
-        );
+    // Same rule as the camera: notes travel without folders, a sent folder
+    // arrives whole. ponytail: this protocol has no folder message, so an empty
+    // subfolder of a sent folder does not travel over the network.
+    let blobs = super::optical::collect(state, note_ids, folder)
+        .await
+        .map_err(|e| e.to_string())?
+        .notes
+        .iter()
+        .map(|n| n.encode())
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    if blobs.is_empty() {
+        return Err("nothing to send: over the network only notes travel, so send an empty folder by camera".into());
     }
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -674,7 +684,7 @@ pub async fn send_notes(
     let offer = Message::TransferOffer {
         from_peer: device_name.to_string(),
         offer_id: offer_id.clone(),
-        note_count: note_ids.len() as u32,
+        note_count: blobs.len() as u32,
         pake_msg: pake_msg_i.clone(),
     };
     write_frame(

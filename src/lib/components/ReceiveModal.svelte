@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
-  import { opticalImport } from "$lib/tauri";
+  import { onMount, onDestroy, tick } from "svelte";
+  import { opticalImport, isReceiving, startReceiving, deviceIps } from "$lib/tauri";
   import { trapFocus } from "$lib/trapFocus";
   import { OpticalReceiver } from "$lib/optical/receiver";
+  import { receiveTarget } from "$lib/stores/receiveTarget";
+  import TransferTabs, { type TransferTab } from "./TransferTabs.svelte";
+  import QrShowModal from "./QrShowModal.svelte";
 
   interface Props {
     /** Received notes land in this folder (their own subfolders nested inside); null is the root. */
@@ -13,7 +16,13 @@
   let { folderId = null, folderName, onclose }: Props = $props();
 
   type Step = "scanning" | "passphrase" | "done" | "error";
+  let tab = $state<TransferTab>("camera");
   let step = $state<Step>("scanning");
+  let networkOn = $state(false);
+  let networkBusy = $state(false);
+  let networkError = $state("");
+  let myIps = $state<string[]>([]);
+  let showQr = $state(false);
   let solved = $state(0);
   let total = $state(0);
   let notice = $state("");
@@ -27,6 +36,8 @@
   let video: HTMLVideoElement | undefined = $state();
   let passInput: HTMLInputElement | undefined = $state();
   let receiver: OpticalReceiver | null = null;
+  // Taken before the dialog moves focus, so closing returns it to the opener.
+  const previouslyFocused = document.activeElement as HTMLElement | null;
 
   $effect(() => { if (step === "passphrase") passInput?.focus(); });
 
@@ -41,16 +52,19 @@
     notice = errorMsg = passphrase = passError = "";
     payload = null;
     receiver?.stop();
-    receiver = new OpticalReceiver(video, {
+    const r = new OpticalReceiver(video, {
       progress: (s, k) => { solved = s; total = k; notice = ""; },
       complete: (bytes) => { payload = bytes; step = "passphrase"; },
       notice: (message) => { notice = message; },
       error: (message) => { errorMsg = message; step = "error"; },
     });
+    receiver = r;
     try {
-      await receiver.start();
+      await r.start();
     } catch (e) {
-      receiver.stop();
+      r.stop();
+      // Switched tab (or restarted) while the camera was starting: not ours to report.
+      if (receiver !== r) return;
       errorMsg = e instanceof DOMException && e.name === "NotAllowedError"
         ? "Camera access was denied. Allow it for panote and try again."
         : `The camera could not start: ${e instanceof Error ? e.message : e}`;
@@ -72,14 +86,49 @@
     }
   }
 
+  /// The camera runs only on its own tab.
+  async function selectTab(next: TransferTab) {
+    tab = next;
+    if (next === "camera") {
+      await tick();
+      void startCamera();
+      return;
+    }
+    receiver?.stop();
+    receiver = null;
+    if (next === "network") {
+      networkOn = await isReceiving().catch(() => false);
+      myIps = await deviceIps().catch(() => []);
+    }
+  }
+
+  async function turnOnNetwork() {
+    networkBusy = true;
+    networkError = "";
+    try {
+      await startReceiving();
+      networkOn = true;
+    } catch (e) {
+      networkError = String(e);
+    } finally {
+      networkBusy = false;
+    }
+  }
+
   onMount(() => {
     window.addEventListener("keydown", onKey);
+    // Transfers accepted from the notification while this is open land here too.
+    receiveTarget.set({ id: folderId, name: folderName });
     void startCamera();
   });
   onDestroy(() => {
     receiver?.stop();
+    receiveTarget.set(null);
     window.removeEventListener("keydown", onKey);
+    previouslyFocused?.focus?.();
   });
+
+  const into = $derived(folderName ?? "your notes");
 
   const received = $derived(result.inserted + result.updated);
 </script>
@@ -90,9 +139,40 @@
     <span class="material-symbols-outlined">close</span>
   </button>
 
-  {#if step === "scanning"}
-    <h2 id="optical-title">{folderName ? `Receive into ${folderName}` : "Receive by camera"}</h2>
-    <p class="muted">On the sending device choose Send by screen, then point this camera at its codes.</p>
+  {#if step === "scanning" || step === "error"}
+    <h2 id="optical-title">{folderName ? `Receive into ${folderName}` : "Receive"}</h2>
+    <TransferTabs {tab} onselect={selectTab} />
+  {/if}
+
+  {#if tab === "bluetooth"}
+    <p class="muted">Receiving over Bluetooth is coming soon. Use Camera, or Network on the same Wi-Fi.</p>
+    <div class="actions">
+      <button class="btn-cancel" onclick={onclose}>Close</button>
+    </div>
+  {:else if tab === "network"}
+    {#if networkOn}
+      <p class="muted">
+        Receiving on this network{myIps.length ? ` as ${myIps.join(", ")}` : ""}. On the other device
+        choose Send, Network tab, and pick this device.
+      </p>
+      <p class="muted">
+        Incoming transfers appear as a notification. Accept them there while this is open and they
+        land in {into}.
+      </p>
+      <div class="actions">
+        <button class="btn-cancel" onclick={() => showQr = true}>Show my QR</button>
+        <button class="btn-primary" onclick={onclose}>Done</button>
+      </div>
+    {:else}
+      <p class="muted">Turn on receiving so devices on this Wi-Fi can find this one.</p>
+      {#if networkError}<p class="error-text" role="alert">{networkError}</p>{/if}
+      <div class="actions">
+        <button class="btn-cancel" onclick={onclose}>Cancel</button>
+        <button class="btn-primary" disabled={networkBusy} onclick={turnOnNetwork}>Start receiving</button>
+      </div>
+    {/if}
+  {:else if step === "scanning"}
+    <p class="muted">On the sending device choose Send, Camera tab, then point this camera at its codes.</p>
   {:else if step === "passphrase"}
     <h2 id="optical-title">Enter the passphrase</h2>
     <p class="muted">Received. Type the passphrase that was set on the sending device.</p>
@@ -102,6 +182,7 @@
     <h2 id="optical-title">Could not receive</h2>
   {/if}
 
+  {#if tab === "camera"}
   <!-- The video stays mounted so the receiver keeps its element across steps. -->
   <div class="camera" hidden={step !== "scanning"}>
     <video bind:this={video} muted playsinline></video>
@@ -160,7 +241,12 @@
       <button class="btn-primary" onclick={startCamera}>Try again</button>
     </div>
   {/if}
+  {/if}
 </div>
+
+{#if showQr}
+  <QrShowModal onclose={() => showQr = false} />
+{/if}
 
 <style>
   .backdrop {

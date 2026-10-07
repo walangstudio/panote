@@ -24,7 +24,7 @@
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
   import NewNoteModal from "$lib/components/NewNoteModal.svelte";
-  import OpticalReceiveModal from "$lib/components/OpticalReceiveModal.svelte";
+  import ReceiveModal from "$lib/components/ReceiveModal.svelte";
   import { anchorMenu, type MenuAction, type Rect } from "$lib/contextMenu";
   import { shortcutFor, findBelongsToNote } from "$lib/shortcuts";
 
@@ -53,7 +53,9 @@
   // ...and back: the editor prunes the store when it trashes a selected note.
   onMount(() => listSelected.subscribe(v => { if (v !== untrack(() => selected)) selected = v; }));
   let transferNoteIds = $state<string[] | null>(null);
-  /// Receive by camera into this folder; null is the root, undefined is closed.
+  /// Set when a folder's own Send... opened the dialog: the folder goes whole.
+  let transferFolder = $state<{ id: string; name: string } | null>(null);
+  /// Receive into this folder; null is the root, undefined is closed.
   let receiveInto = $state<{ id: string | null; name?: string } | undefined>(undefined);
   let deleteTargets = $state<string[] | null>(null);
   let sortOpen = $state(false);
@@ -191,7 +193,7 @@
 
   // Bottom-up speed-dial: last item sits nearest the FAB (prototype order).
   const fabKinds = [
-    { id: "receive", icon: "photo_camera", label: "Receive" },
+    { id: "receive", icon: "download", label: "Receive" },
     { id: "folder", icon: "create_new_folder", label: "Folder" },
     { id: "table", icon: "table_chart", label: "Table" },
     { id: "kanban", icon: "view_kanban", label: "Kanban" },
@@ -462,8 +464,8 @@
     return [
       { label: "New note inside", icon: "note_add", run: () => { listFolder.set(f.id); showNewNote = true; } },
       { label: "New folder inside", icon: "create_new_folder", run: () => { listFolder.set(f.id); nameModal = { mode: "create", initial: "" }; } },
-      ...(noteIds.length ? [{ label: "Send…", icon: "send", run: () => { transferNoteIds = noteIds; } }] : []),
-      { label: "Receive into folder", icon: "photo_camera", run: () => { receiveInto = { id: f.id, name: f.name }; } },
+      { label: "Send…", icon: "send", run: () => { transferFolder = { id: f.id, name: f.name }; transferNoteIds = noteIds; } },
+      { label: "Receive into folder", icon: "download", run: () => { receiveInto = { id: f.id, name: f.name }; } },
       { label: "Rename", icon: "edit", run: () => { nameError = ""; nameModal = { mode: "rename", id: f.id, initial: f.name }; } },
       { label: "Move to", icon: "swap_horiz", run: () => { moveError = ""; moveTarget = { kind: "folder", id: f.id, from: f.parent_id ?? null }; } },
       { label: "Copy", icon: "content_copy", run: () => clip("copy", "folder", [f.id]) },
@@ -721,8 +723,8 @@
         <span class="material-symbols-outlined">menu</span>
       </button>
       <span class="wordmark">Panote</span>
-      <button class="receive-btn" onclick={openReceive} aria-label="Receive by camera" title="Receive by camera">
-        <span class="material-symbols-outlined">photo_camera</span>
+      <button class="receive-btn" onclick={openReceive} aria-label="Receive" title="Receive">
+        <span class="material-symbols-outlined">download</span>
       </button>
       <button class="compose-btn" onclick={() => showNewNote = true} aria-label="New note">
         <span class="material-symbols-outlined">add</span>
@@ -1151,14 +1153,16 @@
 {/if}
 
 {#if receiveInto}
-  <OpticalReceiveModal folderId={receiveInto.id} folderName={receiveInto.name} onclose={() => receiveInto = undefined} />
+  <ReceiveModal folderId={receiveInto.id} folderName={receiveInto.name} onclose={() => receiveInto = undefined} />
 {/if}
 
 {#if transferNoteIds}
   {#await import("$lib/components/TransferModal.svelte") then { default: TransferModal }}
     <TransferModal
       noteIds={transferNoteIds}
-      onclose={() => { transferNoteIds = null; selecting = false; selected = new Set(); }}
+      folderId={transferFolder?.id ?? null}
+      folderName={transferFolder?.name}
+      onclose={() => { transferNoteIds = null; transferFolder = null; selecting = false; selected = new Set(); }}
     />
   {/await}
 {/if}

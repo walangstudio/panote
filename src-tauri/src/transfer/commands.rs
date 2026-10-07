@@ -370,6 +370,7 @@ pub async fn note_send(
 #[tauri::command]
 pub async fn notes_send(
     note_ids: Vec<String>,
+    folder_id: Option<String>,
     peer_id: String,
     passphrase: String,
     state: State<'_, AppState>,
@@ -389,8 +390,16 @@ pub async fn notes_send(
         .unwrap_or_else(|_| "panote-device".into());
     let result = match via {
         TransportKind::Lan => {
-            super::lan::send_notes(&state, &note_ids, &address, port, &passphrase, &device_name)
-                .await
+            super::lan::send_notes(
+                &state,
+                &note_ids,
+                folder_id.as_deref(),
+                &address,
+                port,
+                &passphrase,
+                &device_name,
+            )
+            .await
         }
         TransportKind::Ble => Err("BLE batch send not supported".into()),
     };
@@ -407,6 +416,7 @@ pub async fn notes_send(
 pub fn transfer_offer_respond(
     offer_id: String,
     passphrase: String,
+    folder_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let tx = state
@@ -415,8 +425,11 @@ pub fn transfer_offer_respond(
         .unwrap()
         .remove(&offer_id)
         .ok_or("no pending offer with this ID")?;
-    tx.send(passphrase)
-        .map_err(|_| "offer connection already closed".to_string())
+    tx.send(crate::state::OfferAnswer {
+        code: passphrase,
+        into_folder: folder_id,
+    })
+    .map_err(|_| "offer connection already closed".to_string())
 }
 
 // ---- Pending offers ----
@@ -473,6 +486,7 @@ pub fn pending_transfers_list(state: State<'_, AppState>) -> Vec<PendingTransfer
 pub async fn note_receive_accept(
     transfer_id: String,
     passphrase: String,
+    folder_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     // Peek without removing so the user can retry if they enter the wrong code.
@@ -480,13 +494,21 @@ pub async fn note_receive_accept(
         .peek_pending(&transfer_id)
         .ok_or("transfer not found or already processed")?;
 
-    let blob = decrypt_transfer(
+    let mut blob = decrypt_transfer(
         &transfer.transfer_salt,
         &transfer.transfer_nonce,
         &transfer.transfer_ct,
         &passphrase,
     )
     .map_err(|_| "wrong passphrase".to_string())?;
+
+    // Before taking it off the queue: a bad target folder must leave the note
+    // pending for another try, not lose it.
+    let base = super::optical::receive_base(&state, folder_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    blob.folder_path = super::optical::nest(&base, std::mem::take(&mut blob.folder_path))
+        .map_err(|e| e.to_string())?;
 
     // Decryption succeeded — remove from pending before import so concurrent
     // accept calls can't import the same transfer twice.

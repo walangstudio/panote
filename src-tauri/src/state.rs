@@ -64,6 +64,14 @@ pub struct PendingTransfer {
 }
 
 /// A transfer offer waiting for the recipient to enter the pairing code.
+/// The recipient's answer to a transfer offer: the code the sender read out, and
+/// the folder to file the notes under (None for the root).
+#[derive(Debug)]
+pub struct OfferAnswer {
+    pub code: String,
+    pub into_folder: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingOffer {
     pub offer_id: String,
@@ -88,8 +96,8 @@ pub struct AppState {
     pub outbound_lock: Arc<tokio::sync::Mutex<()>>,
     /// Transfer offers awaiting recipient code entry.
     pub pending_offers: Arc<Mutex<HashMap<String, PendingOffer>>>,
-    /// Oneshot channels for delivering the recipient's passphrase to the waiting connection.
-    pub offer_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>,
+    /// Oneshot channels for delivering the recipient's answer to the waiting connection.
+    pub offer_responses: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<OfferAnswer>>>>,
     /// Whether the TCP listener is active (receiving enabled).
     pub receiving: Arc<AtomicBool>,
     /// Handle to the listener task so it can be aborted on toggle-off.

@@ -193,20 +193,23 @@ export const peerAddManual = (address: string) =>
 export const deviceIps = () => invoke<string[]>("device_ips");
 export const noteSend = (noteId: string, peerId: string, passphrase: string) =>
   invoke<void>("note_send", { noteId, peerId, passphrase });
-export const notesSend = (noteIds: string[], peerId: string, passphrase: string) =>
-  invoke<void>("notes_send", { noteIds, peerId, passphrase });
+/// `folderId` is set when a folder itself is being sent: it then arrives whole.
+/// Without it the notes travel on their own, with no folders.
+export const notesSend = (noteIds: string[], peerId: string, passphrase: string, folderId: string | null = null) =>
+  invoke<void>("notes_send", { noteIds, peerId, passphrase, folderId });
 export const pendingTransfersList = () =>
   invoke<PendingTransfer[]>("pending_transfers_list");
 export const pendingOffersList = () =>
   invoke<PendingOffer[]>("pending_offers_list");
-export const transferOfferRespond = (offerId: string, passphrase: string) =>
-  invoke<void>("transfer_offer_respond", { offerId, passphrase });
-export const noteReceiveAccept = (transferId: string, passphrase: string) =>
-  invoke<string>("note_receive_accept", { transferId, passphrase });
+/// `folderId` files what arrives under that folder; null is the root.
+export const transferOfferRespond = (offerId: string, passphrase: string, folderId: string | null = null) =>
+  invoke<void>("transfer_offer_respond", { offerId, passphrase, folderId });
+export const noteReceiveAccept = (transferId: string, passphrase: string, folderId: string | null = null) =>
+  invoke<string>("note_receive_accept", { transferId, passphrase, folderId });
 export const noteReceiveReject = (transferId: string) =>
   invoke<void>("note_receive_reject", { transferId });
-export const opticalPack = async (noteIds: string[], passphrase: string) =>
-  new Uint8Array(await invoke<ArrayBuffer>("optical_pack", { noteIds, passphrase }));
+export const opticalPack = async (noteIds: string[], passphrase: string, folderId: string | null = null) =>
+  new Uint8Array(await invoke<ArrayBuffer>("optical_pack", { noteIds, passphrase, folderId }));
 export const opticalImport = (payload: Uint8Array, passphrase: string, folderId: string | null = null) =>
   invoke<{ inserted: number; updated: number }>("optical_import", {
     payload: Array.from(payload),

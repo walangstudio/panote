@@ -141,7 +141,7 @@ describe("incoming single-note transfers", () => {
     target.querySelector<HTMLButtonElement>(".btn-accept")!.click();
     await settle();
 
-    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2", null);
     expect(refreshNotes).toHaveBeenCalled();
   });
 

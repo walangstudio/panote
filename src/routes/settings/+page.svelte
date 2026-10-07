@@ -6,7 +6,7 @@
   import { autosave, setAutosave } from "$lib/stores/autosave";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
-  import OpticalReceiveModal from "$lib/components/OpticalReceiveModal.svelte";
+  import ReceiveModal from "$lib/components/ReceiveModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
 
@@ -229,10 +229,10 @@
         {/if}
         <div class="row-divider"></div>
         <button class="row actionable" onclick={() => showCameraReceive = true}>
-          <span class="row-icon"><span class="material-symbols-outlined">photo_camera</span></span>
+          <span class="row-icon"><span class="material-symbols-outlined">download</span></span>
           <div class="row-body">
-            <span class="row-title">Receive by camera</span>
-            <span class="row-sub">Scan notes another device shows on its screen, no network needed</span>
+            <span class="row-title">Receive</span>
+            <span class="row-sub">By camera, or over this network</span>
           </div>
           <span class="material-symbols-outlined row-chevron">chevron_right</span>
         </button>
@@ -348,7 +348,7 @@
 {/if}
 
 {#if showCameraReceive}
-  <OpticalReceiveModal onclose={() => showCameraReceive = false} />
+  <ReceiveModal onclose={() => showCameraReceive = false} />
 {/if}
 
 {#if pendingImportContents !== null}

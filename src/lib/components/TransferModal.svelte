@@ -9,16 +9,24 @@
   import { frameSource, playStream } from "$lib/optical/sender";
   import QrShowModal from "./QrShowModal.svelte";
   import QrScanModal from "./QrScanModal.svelte";
+  import TransferTabs, { type TransferTab } from "./TransferTabs.svelte";
 
   interface Props {
     noteIds: string[];
+    /// Set when a folder itself is being sent: it arrives whole, subfolders and
+    /// all. Without it the notes travel on their own, with no folders.
+    folderId?: string | null;
+    folderName?: string;
     onclose: () => void;
   }
-  let { noteIds, onclose }: Props = $props();
+  let { noteIds, folderId = null, folderName, onclose }: Props = $props();
 
   type Step = "peers" | "code" | "screen-pass" | "unlock" | "sending" | "streaming" | "done" | "error";
 
-  let step = $state<Step>("peers");
+  // Camera first: it needs no network, pairing or discovery.
+  let tab = $state<TransferTab>("camera");
+  let step = $state<Step>("screen-pass");
+  let scanned = false;
   let livePeers = $state<Peer[]>([]);
   let recentPeers = $state<KnownPeer[]>([]);
   let scanning = $state(false);
@@ -33,11 +41,13 @@
   let scanQr = $state(false);
   let closeBtn: HTMLButtonElement | undefined = $state();
   let unlockInput: HTMLInputElement | undefined = $state();
-  let previouslyFocused: HTMLElement | null = null;
+  // Taken before anything in the dialog grabs focus (the passphrase field does
+  // on mount), so closing returns focus to whatever opened it.
+  const previouslyFocused = document.activeElement as HTMLElement | null;
 
-  // Screen transfer: the passphrase is typed, never shown, because anything on
+  // Camera transfer: the passphrase is typed, never shown, because anything on
   // this screen is visible to whoever films the stream.
-  let optical = $state(false);
+  const optical = $derived(tab === "camera");
   let screenPass = $state("");
   let screenPassInput: HTMLInputElement | undefined = $state();
   let streamCanvas: HTMLCanvasElement | undefined = $state();
@@ -65,7 +75,6 @@
   let unlockBusy = $state(false);
 
   onMount(async () => {
-    previouslyFocused = document.activeElement as HTMLElement | null;
     closeBtn?.focus();
     window.addEventListener("keydown", onKey);
     recentPeers = await knownPeersList().catch(() => []);
@@ -75,7 +84,6 @@
     protectedQueue = metas
       .filter((m) => chosen.has(m.id) && m.has_note_password)
       .map((m) => ({ id: m.id, title: m.title }));
-    await scan();
   });
   onDestroy(() => {
     destroyed = true;
@@ -84,18 +92,24 @@
     previouslyFocused?.focus?.();
   });
 
-  function chooseScreen() {
-    optical = true;
-    screenPass = "";
-    step = "screen-pass";
-  }
-
-  function backToPeers() {
+  /// Each tab starts at its own first step; the network one scans on first visit.
+  function selectTab(next: TransferTab) {
     stopStream?.();
     stopStream = null;
-    optical = false;
-    step = "peers";
+    tab = next;
+    screenPass = "";
+    step = next === "camera" ? "screen-pass" : "peers";
+    if (next === "network" && !scanned) {
+      scanned = true;
+      void scan();
+    }
   }
+
+  const heading = $derived(
+    folderName ? `Send ${folderName}` : noteIds.length === 1 ? "Send note" : `Send ${noteIds.length} notes`,
+  );
+  /// The tabs show only before a transfer starts, never mid-flow.
+  const choosing = $derived((step === "screen-pass" || step === "peers") && !packing);
 
   async function scan() {
     scanning = true;
@@ -158,7 +172,7 @@
     if (!selectedPeer) return;
     step = "sending";
     try {
-      await notesSend(noteIds, selectedPeer.id, pairingCode);
+      await notesSend(noteIds, selectedPeer.id, pairingCode, folderId);
       step = "done";
     } catch (e) {
       errorMsg = String(e);
@@ -170,7 +184,7 @@
     if (packing) return;
     packing = true;
     try {
-      const source = await frameSource(await opticalPack(noteIds, screenPass));
+      const source = await frameSource(await opticalPack(noteIds, screenPass, folderId));
       screenPass = "";
       if (destroyed) return; // closed while sealing: nothing left to paint on
       step = "streaming";
@@ -217,7 +231,7 @@
       code: "Pairing code ready. Share it with the recipient.",
       unlock: `Unlock note ${unlockIdx + 1} of ${protectedQueue.length} to continue.`,
       sending: "Waiting for the recipient to enter the code.",
-      "screen-pass": "Choose a passphrase for the screen transfer.",
+      "screen-pass": "Choose a passphrase for the camera transfer.",
       streaming: "Showing the notes as moving QR codes.",
       done: "Transfer delivered.",
       error: "Transfer failed.",
@@ -233,8 +247,18 @@
     </button>
     <div class="sr-only" role="status" aria-live="polite">{stepAnnouncement}</div>
 
-    {#if step === "peers"}
-      <h2>Transfer over LAN</h2>
+    {#if choosing}
+      <h2>{heading}</h2>
+      <TransferTabs {tab} onselect={selectTab} />
+    {/if}
+
+    {#if tab === "bluetooth"}
+      <p class="muted">Sending over Bluetooth is coming soon. Use Camera, or Network on the same Wi-Fi.</p>
+      <div class="actions">
+        <button class="btn-cancel" onclick={onclose}>Close</button>
+      </div>
+
+    {:else if step === "peers"}
       <p class="desc">Have the other device scan this code, or pick a peer on your network. Nothing leaves your LAN.</p>
 
       <div class="qr-actions">
@@ -245,10 +269,6 @@
         <button class="qr-btn" onclick={() => scanQr = true}>
           <span class="material-symbols-outlined">qr_code_scanner</span>
           Scan QR code
-        </button>
-        <button class="qr-btn" onclick={chooseScreen}>
-          <span class="material-symbols-outlined">screen_share</span>
-          Send by screen
         </button>
       </div>
 
@@ -345,10 +365,9 @@
       </div>
 
     {:else if step === "screen-pass"}
-      <h2>Send by screen</h2>
       <p class="muted">
-        This screen plays the {noteIds.length === 1 ? "note" : `${noteIds.length} notes`} as moving QR codes
-        for the other device's camera. No network needed.
+        Show this screen to the other device's camera: open Receive there, Camera tab.
+        No network needed.
       </p>
       <form onsubmit={(e) => { e.preventDefault(); confirmSend(); }}>
         <label class="section-label" for="screen-pass">Passphrase</label>
@@ -372,7 +391,7 @@
           screen sees the codes, so the notes are encrypted with it.
         </p>
         <div class="actions">
-          <button type="button" class="btn-cancel" onclick={backToPeers}>Back</button>
+          <button type="button" class="btn-cancel" onclick={onclose}>Cancel</button>
           <button type="submit" class="btn-primary" disabled={packing || [...screenPass].length < MIN_SCREEN_PASS}>{packing ? "Encrypting…" : "Start"}</button>
         </div>
       </form>
@@ -380,7 +399,7 @@
     {:else if step === "streaming"}
       <h2>Show this to the camera</h2>
       <p class="muted">
-        On the other device open Settings, Receive by camera, and point it here.
+        On the other device open Receive, Camera tab, and point it here.
         Keep this open until that device says it received the notes.
       </p>
       <canvas class="stream" bind:this={streamCanvas} aria-label="Animated QR codes carrying the notes"></canvas>
@@ -437,7 +456,7 @@
       <h2>Failed</h2>
       <p class="error">{errorMsg}</p>
       <div class="actions">
-        <button class="btn-cancel" onclick={backToPeers}>Try again</button>
+        <button class="btn-cancel" onclick={() => selectTab(tab)}>Try again</button>
         <button class="btn-primary" onclick={onclose}>Close</button>
       </div>
     {/if}

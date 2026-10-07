@@ -1,5 +1,5 @@
 import { test, expect } from "playwright/test";
-import { reject, setupTauriMock } from "./mock";
+import { MOCK_NOTES, reject, setupTauriMock } from "./mock";
 import { FAKE_CAMERA, OPTICAL_PAYLOAD } from "./optical-fixture";
 
 // The camera is Chromium's fake device playing the QR stream written by global
@@ -18,7 +18,7 @@ test.use({
 const MENU_BTN = '.editor-header button[aria-label="More options"]';
 const OPEN_TRANSFER = '.overflow-menu button:has-text("Transfer")';
 
-test("send by screen seals the note with the passphrase and plays a stream", async ({ page }) => {
+test("send to camera seals the note with the passphrase and plays a stream", async ({ page }) => {
   let packed: { noteIds: string[]; passphrase: string } | null = null;
   await setupTauriMock(page, {
     optical_pack: (args: unknown) => {
@@ -29,7 +29,7 @@ test("send by screen seals the note with the passphrase and plays a stream", asy
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
-  await page.getByRole("button", { name: "Send by screen" }).click();
+  await expect(page.getByRole("tab", { name: "Camera" })).toHaveAttribute("aria-selected", "true");
 
   const start = page.getByRole("button", { name: "Start" });
   await page.getByLabel("Passphrase", { exact: true }).fill("123456789");
@@ -38,7 +38,7 @@ test("send by screen seals the note with the passphrase and plays a stream", asy
   await start.click();
 
   await expect(page.locator(".modal h2")).toHaveText("Show this to the camera");
-  expect(packed).toEqual({ noteIds: ["note-1"], passphrase: "correct horse" });
+  expect(packed).toEqual({ noteIds: ["note-1"], passphrase: "correct horse", folderId: null });
   // The codes change frame to frame: two snapshots of the canvas differ.
   const canvas = page.locator("canvas.stream");
   const first = await canvas.evaluate((c: HTMLCanvasElement) => c.toDataURL());
@@ -47,7 +47,7 @@ test("send by screen seals the note with the passphrase and plays a stream", asy
     .not.toBe(first);
 });
 
-test("receive by camera reassembles the stream and imports it with the passphrase", async ({ page }) => {
+test("receiving by camera reassembles the stream and imports it with the passphrase", async ({ page }) => {
   const received: number[][] = [];
   await setupTauriMock(page, {
     optical_import: (args: unknown) => {
@@ -57,7 +57,7 @@ test("receive by camera reassembles the stream and imports it with the passphras
     },
   });
   await page.goto("/settings");
-  await page.locator("button.row", { hasText: "Receive by camera" }).click();
+  await page.locator("button.row", { hasText: "By camera, or over this network" }).click();
 
   await expect(page.locator(".modal h2")).toHaveText("Enter the passphrase", { timeout: 20_000 });
   await page.getByLabel("Passphrase", { exact: true }).fill("nope");
@@ -85,9 +85,8 @@ test.describe("send and receive from the row menus", () => {
     await page.goto("/");
     await page.locator(".note-card", { hasText: "Meeting notes" }).first().click({ button: "right" });
     await item(page, "Send…").click();
-    await expect(page.locator(".modal h2")).toHaveText("Transfer over LAN");
-    await page.getByRole("button", { name: "Send by screen" }).click();
-    await expect(page.locator(".modal")).toContainText("This screen plays the note as moving QR codes");
+    await expect(page.locator(".modal h2")).toHaveText("Send note");
+    await expect(page.locator(".modal")).toContainText("Show this screen to the other device's camera");
   });
 
   test("the passphrase can be shown to check for typos", async ({ page }) => {
@@ -95,7 +94,6 @@ test.describe("send and receive from the row menus", () => {
     await page.goto("/note/note-1");
     await page.click(MENU_BTN);
     await page.locator(OPEN_TRANSFER).click();
-    await page.getByRole("button", { name: "Send by screen" }).click();
     const field = page.getByLabel("Passphrase", { exact: true });
     await field.fill("correct horse");
     await expect(field).toHaveAttribute("type", "password");
@@ -125,10 +123,60 @@ test.describe("send and receive from the row menus", () => {
     expect(calls.at(-1)?.folderId).toBe("f-work");
   });
 
-  test("the header's camera button receives into the folder being viewed", async ({ page }) => {
+  test("the header's Receive button receives into the folder being viewed", async ({ page }) => {
     await setupTauriMock(page, { folder_list: [WORK] });
     await page.goto("/");
-    await page.getByRole("button", { name: "Receive by camera" }).click();
-    await expect(page.locator(".modal h2")).toHaveText(/Receive by camera|Enter the passphrase/);
+    await page.getByRole("button", { name: "Receive", exact: true }).click();
+    await expect(page.locator(".modal h2")).toHaveText(/^(Receive|Enter the passphrase)$/);
+  });
+
+  test("a folder's Send... sends the folder itself", async ({ page }) => {
+    let packed: { noteIds: string[]; folderId: string | null } | null = null;
+    await setupTauriMock(page, {
+      folder_list: [WORK],
+      note_list: [{ ...MOCK_NOTES[0], folder_id: "f-work" }, MOCK_NOTES[1]],
+      optical_pack: (args: unknown) => {
+        packed = args as typeof packed;
+        return Array.from(OPTICAL_PAYLOAD);
+      },
+    });
+    await page.goto("/");
+    await page.locator(".note-card", { hasText: "Work" }).first().click({ button: "right" });
+    await item(page, "Send…").click();
+    await expect(page.locator(".modal h2")).toHaveText("Send Work");
+    await page.getByLabel("Passphrase", { exact: true }).fill("correct horse");
+    await page.getByRole("button", { name: "Start" }).click();
+    await expect(page.locator(".modal h2")).toHaveText("Show this to the camera");
+    expect(packed).toEqual({ noteIds: [MOCK_NOTES[0].id], passphrase: "correct horse", folderId: "f-work" });
+  });
+
+  test("send and receive offer Camera, Network and Bluetooth (coming soon)", async ({ page }) => {
+    await setupTauriMock(page, { is_receiving: false });
+    await page.goto("/note/note-1");
+    await page.click(MENU_BTN);
+    await page.locator(OPEN_TRANSFER).click();
+    await page.getByRole("tab", { name: /Network/ }).click();
+    await expect(page.locator("text=Nearby devices")).toBeVisible();
+    await page.getByRole("tab", { name: /Bluetooth/ }).click();
+    await expect(page.locator(".modal")).toContainText("coming soon");
+    await page.keyboard.press("Escape");
+
+    await page.goto("/settings");
+    await page.locator("button.row", { hasText: "By camera, or over this network" }).click();
+    await page.getByRole("tab", { name: /Network/ }).click();
+    await expect(page.getByRole("button", { name: "Start receiving" })).toBeVisible();
+  });
+
+  test("when the camera is refused, Network is still one tap away", async ({ page }) => {
+    await setupTauriMock(page, { is_receiving: false });
+    await page.addInitScript(() => {
+      navigator.mediaDevices.getUserMedia = () =>
+        Promise.reject(new DOMException("denied", "NotAllowedError"));
+    });
+    await page.goto("/settings");
+    await page.locator("button.row", { hasText: "By camera, or over this network" }).click();
+    await expect(page.getByRole("alert")).toContainText("Camera access was denied");
+    await page.getByRole("tab", { name: /Network/ }).click();
+    await expect(page.getByRole("button", { name: "Start receiving" })).toBeVisible();
   });
 });

@@ -17,7 +17,7 @@ $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 $Icons = @(
   "add", "arrow_back", "arrow_downward", "arrow_forward", "arrow_upward",
-  "assignment", "check", "check_box", "checklist", "checklist_rtl",
+  "assignment", "bluetooth", "check", "check_box", "checklist", "checklist_rtl",
   "chevron_right", "close", "code", "content_copy", "content_cut", "content_paste",
   "create_new_folder",
   "dark_mode", "data_object", "delete",
@@ -33,7 +33,7 @@ $Icons = @(
   "open_in_new", "palette",
   "password", "photo_camera", "push_pin", "qr_code_2", "qr_code_scanner",
   "radio_button_checked", "radio_button_unchecked", "refresh", "save", "search",
-  "screen_share", "search_off", "send", "settings", "smartphone", "sticky_note_2",
+  "search_off", "send", "settings", "smartphone", "sticky_note_2",
   "swap_horiz", "swap_vert", "table_chart", "table_rows", "title", "trophy",
   "upload", "view_column", "view_kanban", "visibility", "visibility_off",
   "warning", "wifi_tethering"

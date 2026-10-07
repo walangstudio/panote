@@ -16,6 +16,7 @@ vi.mock("$lib/tauri", () => ({
 
 import { transferOfferRespond, noteReceiveAccept, noteReceiveReject } from "$lib/tauri";
 import IncomingTransferToast from "./IncomingTransferToast.svelte";
+import { receiveTarget } from "$lib/stores/receiveTarget";
 
 const offer = (id: string, over: Partial<PendingOffer> = {}): PendingOffer => ({
   offer_id: id,
@@ -61,6 +62,7 @@ beforeEach(() => {
   vi.mocked(noteReceiveReject).mockResolvedValue(undefined as never);
 });
 afterEach(() => {
+  receiveTarget.set(null);
   cleanup?.();
   cleanup = null;
   document.body.innerHTML = "";
@@ -91,13 +93,23 @@ describe("rendering offers", () => {
 });
 
 describe("accepting", () => {
+  it("files into the folder the Receive dialog was opened from", async () => {
+    receiveTarget.set({ id: "f-work", name: "Work" });
+    const { target } = setup([offer("o1")]);
+    expect(target.textContent).toContain("into Work");
+    await typeCode(target, "K4X7P2");
+    acceptBtn(target).click();
+    await flush();
+    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "K4X7P2", "f-work");
+  });
+
   it("sends the typed code for that offer", async () => {
     const { target, onupdate } = setup([offer("o1")]);
     await typeCode(target, "K4X7P2");
     acceptBtn(target).click();
     await flush();
 
-    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "K4X7P2");
+    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "K4X7P2", null);
     expect(onupdate).toHaveBeenCalled();
   });
 
@@ -107,7 +119,7 @@ describe("accepting", () => {
     await typeCode(target, "k4x-7p2");
     acceptBtn(target).click();
     await flush();
-    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "K4X7P2");
+    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "K4X7P2", null);
   });
 
   it("accepts on Enter as well as the button", async () => {
@@ -115,7 +127,7 @@ describe("accepting", () => {
     await typeCode(target, "AAA111");
     codeInput(target).dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await flush();
-    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "AAA111");
+    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "AAA111", null);
   });
 
   it("refuses an empty code instead of calling the backend", async () => {
@@ -181,11 +193,11 @@ describe("keeping offers apart", () => {
 
     acceptBtn(target, 1).click();
     await flush();
-    expect(transferOfferRespond).toHaveBeenCalledWith("o2", "SECON2");
+    expect(transferOfferRespond).toHaveBeenCalledWith("o2", "SECON2", null);
 
     acceptBtn(target, 0).click();
     await flush();
-    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "FIRST1");
+    expect(transferOfferRespond).toHaveBeenCalledWith("o1", "FIRST1", null);
   });
 
   it("shows an error only on the offer that failed", async () => {
@@ -228,7 +240,7 @@ describe("a delivered note waiting to be opened", () => {
     acceptBtn(target).click();
     await flush();
 
-    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2", null);
     expect(transferOfferRespond).not.toHaveBeenCalled();
     expect(onupdate).toHaveBeenCalled();
   });
@@ -238,7 +250,7 @@ describe("a delivered note waiting to be opened", () => {
     await typeCode(target, "k4x-7p2");
     acceptBtn(target).click();
     await flush();
-    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2");
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "K4X7P2", null);
   });
 
   it("keeps the toast up on a wrong code so it can be retried", async () => {
@@ -281,7 +293,7 @@ describe("a delivered note waiting to be opened", () => {
     acceptBtn(target, 1).click();
     await flush();
 
-    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "AAA111");
+    expect(noteReceiveAccept).toHaveBeenCalledWith("t1", "AAA111", null);
     expect(transferOfferRespond).not.toHaveBeenCalled();
   });
 
