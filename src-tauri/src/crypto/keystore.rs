@@ -14,7 +14,9 @@
 use crate::db::queries;
 use sqlx::SqlitePool;
 
+#[cfg(not(target_os = "android"))]
 const SERVICE: &str = "panote";
+#[cfg(not(target_os = "android"))]
 const ENTRY: &str = "device_key";
 
 #[cfg(not(target_os = "android"))]

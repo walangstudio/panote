@@ -4,7 +4,7 @@
 
 # Panote
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square)](LICENSE)
@@ -79,9 +79,9 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 
 ## How transfer works
 
-**Sending:** Open a note and tap **···** → **Send note**, or use multi-select on the notes list and tap **Send selected**. Pick a device from the peer list. The app generates a pairing code — tell the recipient the code.
+**Over the network:** Choose **Send…** on a note or folder (or **Send selected** in multi-select) and switch to the **Network** tab. Pick a device from the peer list. The app generates a pairing code; tell the recipient the code.
 
-**Receiving:** An incoming transfer appears as a toast notification. Enter the pairing code from the sender and tap **Accept**. The note is decrypted, re-encrypted with the local device key, and added to your notes list. Wrong code leaves the transfer pending so you can retry.
+**Receiving over the network:** An incoming transfer appears as a toast notification; if a Receive dialog is open, it lands in that dialog's folder. Enter the pairing code from the sender and tap **Accept**. The note is decrypted, re-encrypted with the local device key, and added to your notes list. Wrong code leaves the transfer pending so you can retry.
 
 Peers are discovered automatically via mDNS and UDP broadcast beacon. The beacon covers networks where router multicast filtering blocks mDNS (e.g., WiFi + Ethernet on the same segment).
 
@@ -219,7 +219,7 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 
 ## Third-party code
 
-Screen transfer uses [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer) v0.5.3 (AGPL-3.0-or-later, Copyright (c) 2026 Evan Crawley): its wire protocol, fountain code and decoder are vendored unmodified in `src/lib/vendor/decimen/`, and its send and receive loops are adapted in `src/lib/optical/`. The decoder is decimen-codec, a WebAssembly build of [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) (Apache-2.0); its source is at [bashalarmistalt/decimen-codec](https://github.com/bashalarmistalt/decimen-codec). Notices are in `src/lib/vendor/decimen/NOTICE` and `src/lib/vendor/decimen/vendor/decimen-codec/`.
+Camera transfer uses [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer) v0.5.3 (AGPL-3.0-or-later, Copyright (c) 2026 Evan Crawley): its wire protocol, fountain code and decoder are vendored unmodified in `src/lib/vendor/decimen/`, and its send and receive loops are adapted in `src/lib/optical/`. The decoder is decimen-codec, a WebAssembly build of [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) (Apache-2.0); its source is at [bashalarmistalt/decimen-codec](https://github.com/bashalarmistalt/decimen-codec). Notices are in `src/lib/vendor/decimen/NOTICE` and `src/lib/vendor/decimen/vendor/decimen-codec/`.
 
 ---
 
