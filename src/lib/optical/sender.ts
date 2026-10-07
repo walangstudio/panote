@@ -30,7 +30,8 @@ export async function frameSource(payload: Uint8Array): Promise<FrameSource> {
   if (!fitsInOneStream(container.length, FRAME_BYTES)) throw new Error("Too much to send in one stream.");
   const blockLen = blockLength(FRAME_BYTES);
   // Tells streams apart, never zero; not a secret (the payload is sealed in Rust).
-  const sessionId = (crypto.getRandomValues(new Uint16Array(1))[0]! % 0xffff) + 1;
+  let sessionId = 0;
+  while (sessionId === 0) sessionId = crypto.getRandomValues(new Uint16Array(1))[0]!;
   const encoder = new LTEncoder(container, blockLen, sessionId);
   const header: FrameHeader = {
     sessionId,
