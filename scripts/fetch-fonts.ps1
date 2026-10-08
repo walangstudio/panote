@@ -17,7 +17,7 @@ $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 $Icons = @(
   "add", "arrow_back", "arrow_downward", "arrow_forward", "arrow_upward",
-  "assignment", "check", "check_box", "checklist", "checklist_rtl",
+  "assignment", "bluetooth", "check", "check_box", "checklist", "checklist_rtl",
   "chevron_right", "close", "code", "content_copy", "content_cut", "content_paste",
   "create_new_folder",
   "dark_mode", "data_object", "delete",
@@ -31,7 +31,7 @@ $Icons = @(
   "keyboard_arrow_up", "lan", "light_mode", "link", "lock", "lock_open",
   "menu", "military_tech", "more_horiz", "more_vert", "note_add",
   "open_in_new", "palette",
-  "password", "push_pin", "qr_code_2", "qr_code_scanner",
+  "password", "photo_camera", "push_pin", "qr_code_2", "qr_code_scanner",
   "radio_button_checked", "radio_button_unchecked", "refresh", "save", "search",
   "search_off", "send", "settings", "smartphone", "sticky_note_2",
   "swap_horiz", "swap_vert", "table_chart", "table_rows", "title", "trophy",

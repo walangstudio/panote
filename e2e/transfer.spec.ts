@@ -13,11 +13,12 @@ test.beforeEach(async ({ page }) => {
 
 // ---- TransferModal ----
 
-test("transfer modal shows peer list step by default", async ({ page }) => {
+test("the network tab lists nearby devices", async ({ page }) => {
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
-  await expect(page.locator(".modal h2")).toContainText("Transfer over LAN");
+  await page.getByRole("tab", { name: /Network/ }).click();
+  await expect(page.locator(".modal h2")).toContainText("Send note");
   await expect(page.locator("text=Nearby devices")).toBeVisible();
 });
 
@@ -25,6 +26,7 @@ test("transfer modal shows no devices when peers_scan returns empty", async ({ p
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
+  await page.getByRole("tab", { name: /Network/ }).click();
   await expect(page.locator("text=No devices found")).toBeVisible();
 });
 
@@ -36,6 +38,7 @@ test("transfer modal shows discovered peers", async ({ page }) => {
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
+  await page.getByRole("tab", { name: /Network/ }).click();
   await expect(page.locator("text=Alice Phone")).toBeVisible();
 });
 
@@ -47,6 +50,7 @@ test("selecting peer enables Next button", async ({ page }) => {
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
+  await page.getByRole("tab", { name: /Network/ }).click();
   const nextBtn = page.locator(".btn-primary", { hasText: "Next" });
   await expect(nextBtn).toBeDisabled();
   await page.locator(".peer-item").click();
@@ -62,6 +66,7 @@ test("pairing code step shows generated code", async ({ page }) => {
   await page.goto("/note/note-1");
   await page.click(MENU_BTN);
   await page.locator(OPEN_TRANSFER).click();
+  await page.getByRole("tab", { name: /Network/ }).click();
   await page.locator(".peer-item").click();
   await page.locator(".btn-primary", { hasText: "Next" }).click();
   await expect(page.locator(".code-display")).toContainText("XYZ");

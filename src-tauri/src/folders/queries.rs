@@ -143,7 +143,6 @@ pub async fn note_counts(pool: &SqlitePool) -> anyhow::Result<Vec<(String, i64)>
 }
 
 /// Every note in `folder_id`, and in its subfolders, for a folder send.
-#[cfg(test)]
 pub async fn note_ids_in_subtree(
     pool: &SqlitePool,
     folder_id: &str,

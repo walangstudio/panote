@@ -1,7 +1,4 @@
-import { Menu } from "@tauri-apps/api/menu";
-
-/// One row of a note or folder menu. The native menu and the in-app popover
-/// both render from the same list, so the two can never offer different things.
+/// One row of a note or folder menu: a popover on desktop, a bottom sheet on touch.
 export interface MenuAction {
   label: string;
   icon: string;
@@ -43,27 +40,4 @@ export function anchorMenu(node: HTMLElement, anchor: Rect) {
   };
   place(anchor);
   return { update: place };
-}
-
-/// Native menus are a desktop thing: Android has no popup menu, and a touch
-/// screen gets the bottom sheet instead.
-function nativeMenus(): boolean {
-  return !!window.matchMedia?.("(hover: hover) and (pointer: fine)").matches
-    && !/Android/i.test(navigator.userAgent);
-}
-
-// Each Menu is a backend resource. Closing it right after popup() could race
-// the item's click event, so the previous one is released on the next open.
-let lastMenu: Menu | null = null;
-
-/// Show `actions` as an OS context menu at the cursor, which the OS keeps on
-/// screen. `fallback` runs where that is not possible (touch, or no Tauri
-/// runtime as under Playwright).
-export function showMenu(actions: MenuAction[], fallback: () => void) {
-  if (!nativeMenus()) return fallback();
-  (async () => {
-    lastMenu?.close().catch(() => {});
-    lastMenu = await Menu.new({ items: actions.map(a => ({ text: a.label, action: () => a.run() })) });
-    await lastMenu.popup();
-  })().catch(fallback);
 }

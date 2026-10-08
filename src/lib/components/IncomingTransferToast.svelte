@@ -3,6 +3,7 @@
     transferOfferRespond, noteReceiveAccept, noteReceiveReject,
     type PendingOffer, type PendingTransfer,
   } from "$lib/tauri";
+  import { receiveTarget } from "$lib/stores/receiveTarget";
 
   interface Props {
     offers: PendingOffer[];
@@ -33,7 +34,7 @@
       id: o.offer_id,
       from: o.from_peer,
       what: `${o.note_count} ${o.note_count === 1 ? "note" : "notes"}`,
-      unlock: (code: string) => transferOfferRespond(o.offer_id, code),
+      unlock: (code: string) => transferOfferRespond(o.offer_id, code, $receiveTarget?.id ?? null),
       // An offer is a live connection waiting on us; letting it time out is the
       // only way to decline.
       drop: () => {},
@@ -42,7 +43,7 @@
       id: t.transfer_id,
       from: t.from_peer,
       what: "1 note",
-      unlock: (code: string) => noteReceiveAccept(t.transfer_id, code),
+      unlock: (code: string) => noteReceiveAccept(t.transfer_id, code, $receiveTarget?.id ?? null),
       // Already delivered and sitting in memory, so declining must discard it.
       drop: () => { void noteReceiveReject(t.transfer_id).catch(() => {}); },
     })),
@@ -78,7 +79,7 @@
         </span>
         <div class="text-block">
           <div class="line1">{o.from} wants to send</div>
-          <div class="line2">{o.what}</div>
+          <div class="line2">{o.what}{#if $receiveTarget?.name} into {$receiveTarget.name}{/if}</div>
           <input
             class="code-input"
             placeholder="Enter code (e.g. K4X-7P2)"

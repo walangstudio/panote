@@ -6,6 +6,7 @@
   import { autosave, setAutosave } from "$lib/stores/autosave";
   import { sidebarOpen } from "$lib/stores/sidebar";
   import QrShowModal from "$lib/components/QrShowModal.svelte";
+  import ReceiveModal from "$lib/components/ReceiveModal.svelte";
   import ConfirmModal from "$lib/components/ConfirmModal.svelte";
   import PasswordModal from "$lib/components/PasswordModal.svelte";
 
@@ -16,6 +17,7 @@
   let receiving = $state(false);
   let myIps = $state<string[]>([]);
   let showQr = $state(false);
+  let showCameraReceive = $state(false);
 
   let exporting = $state(false);
   let importing = $state(false);
@@ -185,9 +187,9 @@
       </div>
     </div>
 
-    <!-- LAN Transfer -->
+    <!-- Transfer -->
     <div class="settings-group">
-      <div class="group-label">LAN Transfer</div>
+      <div class="group-label">Transfer</div>
       <div class="group-card">
         <div class="row">
           <span class="row-icon"><span class="material-symbols-outlined">wifi_tethering</span></span>
@@ -225,6 +227,15 @@
             <span class="material-symbols-outlined row-chevron">chevron_right</span>
           </button>
         {/if}
+        <div class="row-divider"></div>
+        <button class="row actionable" onclick={() => showCameraReceive = true}>
+          <span class="row-icon"><span class="material-symbols-outlined">download</span></span>
+          <div class="row-body">
+            <span class="row-title">Receive</span>
+            <span class="row-sub">By camera, or over this network</span>
+          </div>
+          <span class="material-symbols-outlined row-chevron">chevron_right</span>
+        </button>
       </div>
     </div>
 
@@ -334,6 +345,10 @@
 
 {#if showQr}
   <QrShowModal onclose={() => showQr = false} />
+{/if}
+
+{#if showCameraReceive}
+  <ReceiveModal onclose={() => showCameraReceive = false} />
 {/if}
 
 {#if pendingImportContents !== null}

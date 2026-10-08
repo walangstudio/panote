@@ -1,9 +1,33 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.0] - 2026-10-08
+
+### Added
+
+- **Send to a camera, no network needed.** Send and Receive now open on a Camera tab: the
+  sender plays the notes as moving QR codes and the receiver reads them with its camera.
+  Both sides type the same passphrase, and the notes are encrypted with it before they are
+  drawn, since anyone filming the screen sees every frame. Missed frames only slow the
+  transfer down. Built on Decimen Optical Transfer; see Third-party code in the README.
+- **Send and Receive have tabs: Camera, Network and Bluetooth.** Camera is the default,
+  Network is the existing transfer on the same Wi-Fi, and Bluetooth is marked coming soon.
+- **Send and receive from the row menus.** A note's menu has Send…; a folder's menu has
+  Send… and Receive into folder. Receive is also the button beside + on desktop and in
+  the + menu on phones. Passphrase fields have a show/hide toggle.
+- **What travels with a transfer is what you sent.** Sending notes sends just the notes,
+  without their folders. Sending a folder sends that folder whole, subfolders included
+  (over the network, empty subfolders stay behind). Either way everything lands in the
+  folder the receive was started from, by camera or over the network.
+
+### Fixed
+
+- **Scanning a QR code on Android can use the camera.** The app never declared the camera
+  permission, so the camera could not start there.
 
 ### Changed
 
+- **Desktop row menus are the in-app menu**, with icons, instead of the native OS menu.
+  The two showed the same actions; the in-app one is the one that matches the app.
 - **Panote is now licensed under the AGPL-3.0-or-later**, with the full text in `LICENSE`.
   Releases up to and including 0.5.0 were MIT-licensed and remain available under those terms.
 

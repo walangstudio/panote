@@ -4,7 +4,7 @@
 
 # Panote
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue?style=flat-square)](src-tauri/tauri.conf.json)
 [![Rust](https://img.shields.io/badge/Rust-1.78%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://rust-lang.org)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-22c55e?style=flat-square)](LICENSE)
@@ -50,7 +50,7 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 - Multi-select to protect, unprotect, or send several notes at once
 - Trash: deleted notes can be restored for 30 days, then are purged
 - Desktop split view above 900px window width
-- Desktop: right-click a note or folder for a native context menu
+- Right-click a note or folder (or use its ··· button) for its menu, including Send… and, on folders, Receive into folder
 - Copy, cut and paste notes and folders, file-manager style: from the row menu or Ctrl/Cmd+C, X, V. Paste lands in the folder you are viewing (or "Paste into" a folder); a copied protected note keeps its password
 - Shortcuts: Ctrl/Cmd+N new note, Ctrl/Cmd+Shift+N new folder, Ctrl/Cmd+F search (find in note inside the editor), Ctrl/Cmd+C/X/V copy, cut and paste, Delete move to Trash, Ctrl/Cmd+S save, Esc close a menu or dialog
 - Find in note (Ctrl/Cmd+F in the editor) for every note kind, with a match count and next/previous
@@ -68,6 +68,8 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 - Sender generates a 6-character pairing code; receiver enters it to accept. Pairing uses SPAKE2, so the code never crosses the wire
 - Peers can also be paired by QR code, and recently-contacted devices are remembered
 - Folders and protected notes survive a transfer
+- **Send to a camera**: no network at all. The sender plays the notes as moving QR codes and the receiver reads them with its camera. Both sides type the same passphrase
+- Send and Receive have tabs: **Camera** (default), **Network** (same Wi-Fi) and **Bluetooth** (coming soon). Received notes land in the folder you started the receive from
 
 **Backup**
 
@@ -77,11 +79,13 @@ Desktop builds are not code-signed. Windows SmartScreen asks you to confirm ("Mo
 
 ## How transfer works
 
-**Sending:** Open a note and tap **···** → **Send note**, or use multi-select on the notes list and tap **Send selected**. Pick a device from the peer list. The app generates a pairing code — tell the recipient the code.
+**Over the network:** Choose **Send…** on a note or folder (or **Send selected** in multi-select) and switch to the **Network** tab. Pick a device from the peer list. The app generates a pairing code; tell the recipient the code.
 
-**Receiving:** An incoming transfer appears as a toast notification. Enter the pairing code from the sender and tap **Accept**. The note is decrypted, re-encrypted with the local device key, and added to your notes list. Wrong code leaves the transfer pending so you can retry.
+**Receiving over the network:** An incoming transfer appears as a toast notification; if a Receive dialog is open, it lands in that dialog's folder. Enter the pairing code from the sender and tap **Accept**. The note is decrypted, re-encrypted with the local device key, and added to your notes list. Wrong code leaves the transfer pending so you can retry.
 
 Peers are discovered automatically via mDNS and UDP broadcast beacon. The beacon covers networks where router multicast filtering blocks mDNS (e.g., WiFi + Ethernet on the same segment).
+
+**By camera:** Choose **Send…** on a note or folder; the dialog opens on the **Camera** tab. Type a passphrase of at least 10 characters and hold the screen up to the other device. There, choose **Receive** (beside +, in the + menu, or **Receive into folder** on a folder), point the camera at the codes, and type the same passphrase once they are received. Missed frames only slow it down: the stream is fountain-coded, so the receiver needs any set of frames that covers the payload, in any order.
 
 ---
 
@@ -209,6 +213,13 @@ Transfer history (device names, last-transfer timestamps) is stored in the `know
 - Pairing codes are 6 characters from an unambiguous 32-character alphanumeric alphabet (≈30 bits). A peer is locked out after 5 wrong codes.
 - Peer display names and IDs received over the network are capped at 128 characters before storage.
 - BLE transport is stubbed and not yet functional. The btleplug peripheral role is unsupported on Windows, and the feature is deferred to a future release.
+- Camera transfer: anyone who can film the sender's screen captures every frame, so the payload is sealed before it is drawn (Argon2id over a fresh salt, ChaCha20-Poly1305). The passphrase is typed on both devices and never shown on screen.
+
+---
+
+## Third-party code
+
+Camera transfer uses [Decimen Optical Transfer](https://github.com/bashalarmistalt/decimen-optical-transfer) v0.5.3 (AGPL-3.0-or-later, Copyright (c) 2026 Evan Crawley): its wire protocol, fountain code and decoder are vendored unmodified in `src/lib/vendor/decimen/`, and its send and receive loops are adapted in `src/lib/optical/`. The decoder is decimen-codec, a WebAssembly build of [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) (Apache-2.0); its source is at [bashalarmistalt/decimen-codec](https://github.com/bashalarmistalt/decimen-codec). Notices are in `src/lib/vendor/decimen/NOTICE` and `src/lib/vendor/decimen/vendor/decimen-codec/`.
 
 ---
 

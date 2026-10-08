@@ -2,7 +2,7 @@
 //
 // Nothing moved focus into this dialog on open, nor restored it on close.
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 
 const { peer } = vi.hoisted(() => ({
   peer: { id: "p1", name: "Peer One", address: "10.0.0.2", port: 1, via: "lan" as const },
@@ -36,6 +36,9 @@ function setup() {
   document.body.appendChild(target);
   const onclose = vi.fn();
   const app = mount(TransferModal, { target, props: { noteIds: ["n1"], onclose } });
+  // These cover the network flow; the dialog opens on the Camera tab.
+  flushSync();
+  ([...target.querySelectorAll("[role=tab]")].find(t => t.textContent?.includes("Network")) as HTMLButtonElement).click();
   cleanup = () => { try { unmount(app); } catch { /* teardown races are noise */ } };
   return { target, onclose };
 }

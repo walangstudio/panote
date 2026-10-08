@@ -78,6 +78,7 @@ describe("tauri bindings", () => {
     expect(invoke).toHaveBeenCalledWith("note_receive_accept", {
       transferId: "t1",
       passphrase: "secret",
+      folderId: null,
     });
   });
 
@@ -104,6 +105,7 @@ describe("tauri bindings", () => {
       noteIds: ["n1", "n2"],
       peerId: "peer1",
       passphrase: "CODE",
+      folderId: null,
     });
   });
 
@@ -117,6 +119,7 @@ describe("tauri bindings", () => {
     expect(invoke).toHaveBeenCalledWith("transfer_offer_respond", {
       offerId: "offer-1",
       passphrase: "K4X7P2",
+      folderId: null,
     });
   });
 
